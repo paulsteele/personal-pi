@@ -6,7 +6,8 @@ Actionable, bounded notifications for Pi running in Alacritty:
 - **Linux:** Hyprland window routing with dunst notifications.
 - Sends completion notifications only after `agent_settled` and only when the originating terminal is unfocused.
 - Sends notifications for actual interactive permission prompts and clears them on the matching decision.
-- Keeps at most one notification per terminal window and clears it when work resumes—including after submitting a normal response or answering/canceling an in-terminal question. Merely focusing the terminal does not clear it.
+- Keeps at most one notification per terminal window and clears only that window's notice when work resumes—including after submitting a normal response or answering/canceling an in-terminal question. Merely focusing the terminal does not clear it.
+- Never uses Hammerspoon's bulk notification clear; notices from other Pi windows and unrelated Hammerspoon automation remain intact.
 
 ## macOS setup
 
@@ -32,7 +33,11 @@ hs -c 'return piNotify.preflight()'
 
 Expected output includes `"ok":true` and `"accessibility":true`.
 
-Hammerspoon owns notification lifecycle, exact Alacritty window discovery, switching to the window's Space, and click focus. Existing Claude Code notification settings are unaffected.
+Hammerspoon owns notification lifecycle, exact Alacritty window discovery, switching to the window's Space, and click focus. Each terminal window receives a stable key, while each emitted notice receives a unique namespaced tag. Clear, replacement, and click cleanup target only that exact tag; the bridge intentionally has no `clearAll` API or bulk-clear fallback. Existing Claude Code notification settings are unaffected.
+
+### Reload boundary
+
+Do not routinely reload Hammerspoon while actionable notices are visible. Hammerspoon 1.1.1 cannot reliably reconstruct an individually withdrawable `NSUserNotification` object after a configuration/process reload. To protect notices belonging to other Pi windows, startup is deliberately non-destructive: visible pre-reload notices remain for one-time manual dismissal. Notices created after the reload resume normal targeted clear/replacement behavior.
 
 ## Linux / Hyprland setup
 
@@ -78,6 +83,10 @@ Grant Accessibility access, fully quit/reopen Hammerspoon if macOS requires it, 
 ### Hammerspoon notification does not appear
 
 Open **System Settings → Notifications → Hammerspoon**, enable notifications and sounds, then run `/notify-test` while Alacritty is not focused.
+
+### A notice remains after reloading Hammerspoon
+
+Manually dismiss that pre-reload notice once. Startup intentionally does not bulk-clear Notification Center because that would also erase notices belonging to agents in other windows. Fresh notices created after reload are tracked and cleared individually.
 
 ### `/notify-test` says the terminal is focused
 
