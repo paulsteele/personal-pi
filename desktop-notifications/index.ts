@@ -18,6 +18,7 @@ type NativeTarget =
 
 type PermissionPrompt = { requestId?: unknown; surface?: unknown; value?: unknown };
 type PermissionDecision = { requestId?: unknown };
+type AskUserBlocked = { active?: unknown };
 type CommandResult = { stdout: string; stderr: string; code: number | null };
 
 type Runtime = {
@@ -78,11 +79,12 @@ function warnOnce(runtime: Runtime, message: string): void {
 	runtime.ctx.ui.notify(`Desktop notifications disabled: ${message}`, "warning");
 }
 
-function enqueue(runtime: Runtime, task: (generation: number) => Promise<void>): void {
+function enqueue(runtime: Runtime, task: (generation: number) => Promise<void>): Promise<void> {
 	const generation = runtime.generation;
 	runtime.queue = runtime.queue
 		.then(() => task(generation))
 		.catch((error) => warnOnce(runtime, error instanceof Error ? error.message : String(error)));
+	return runtime.queue;
 }
 
 async function hsCall(expression: string): Promise<Record<string, unknown>> {
@@ -311,7 +313,16 @@ export default function desktopNotifications(pi: ExtensionAPI): void {
 			current.generation++;
 			enqueue(current, async () => clearNotification(current));
 		});
-		current.unsubscribers.push(promptUnsubscribe, decisionUnsubscribe);
+		const questionUnsubscribe = pi.events.on("rpiv:ask-user:blocked", (raw) => {
+			if (runtime !== current) return;
+			const event = raw as AskUserBlocked;
+			// active=false is emitted after the user answers or cancels the
+			// questionnaire. Merely focusing the terminal emits nothing.
+			if (event.active !== false) return;
+			current.generation++;
+			enqueue(current, async () => clearNotification(current));
+		});
+		current.unsubscribers.push(promptUnsubscribe, decisionUnsubscribe, questionUnsubscribe);
 		try {
 			await resolveTarget(current);
 		} catch (error) {
@@ -321,12 +332,32 @@ export default function desktopNotifications(pi: ExtensionAPI): void {
 		}
 	});
 
-	pi.on("agent_start", async () => {
+	const clearWhenWorkStarts = async (): Promise<void> => {
 		if (!runtime) return;
 		const current = runtime;
 		current.generation++;
-		enqueue(current, async () => clearNotification(current));
+		// Await the serialized clear. Previously these lifecycle handlers only
+		// queued it and returned, which allowed user input/model startup to race
+		// ahead while the old notification remained visible.
+		await enqueue(current, async () => clearNotification(current));
+	};
+
+	// Clear as soon as typed/RPC input is accepted. message_start is a second,
+	// authoritative signal for user messages injected by hosts/extensions that
+	// can bypass the input hook.
+	pi.on("input", async () => {
+		await clearWhenWorkStarts();
+		return { action: "continue" };
 	});
+	pi.on("message_start", async (event) => {
+		if (event.message.role === "user") await clearWhenWorkStarts();
+	});
+	pi.on("agent_start", async () => clearWhenWorkStarts());
+
+	// An interactive tool (for example, ask_user_question) resumes inside the
+	// existing agent run, so agent_start does not fire after a manual answer.
+	// The following model turn is the reliable signal that Pi is working again.
+	pi.on("turn_start", async () => clearWhenWorkStarts());
 
 	pi.on("agent_settled", async (_event, ctx) => {
 		if (!runtime || runtime.permissionRequest) return;

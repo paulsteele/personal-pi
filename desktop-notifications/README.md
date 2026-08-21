@@ -2,11 +2,11 @@
 
 Actionable, bounded notifications for Pi running in Alacritty:
 
-- **macOS:** Hammerspoon native notifications and exact `hs.window` routing.
+- **macOS:** Hammerspoon native notifications and exact-window routing.
 - **Linux:** Hyprland window routing with dunst notifications.
 - Sends completion notifications only after `agent_settled` and only when the originating terminal is unfocused.
 - Sends notifications for actual interactive permission prompts and clears them on the matching decision.
-- Keeps at most one notification per terminal window and clears it when work resumes or the terminal regains focus.
+- Keeps at most one notification per terminal window and clears it when work resumes—including after submitting a normal response or answering/canceling an in-terminal question. Merely focusing the terminal does not clear it.
 
 ## macOS setup
 
@@ -20,8 +20,9 @@ Actionable, bounded notifications for Pi running in Alacritty:
 3. Grant Hammerspoon these macOS permissions when prompted:
    - **Privacy & Security → Accessibility** (required to identify/focus the exact Alacritty window)
    - **Notifications** (allow alerts and sounds)
-4. The provided `~/.hammerspoon/init.lua` loads `hs.ipc`, installs `/opt/homebrew/bin/hs`, and loads `pi-notify.lua`.
-5. Reload Hammerspoon after config changes, then run `/reload` in Pi.
+4. Grant Hammerspoon **Automation → Dock** access if macOS prompts for it. This is needed to switch Spaces before focusing an originating window on another Space.
+5. The provided `~/.hammerspoon/init.lua` loads `hs.ipc`, installs `/opt/homebrew/bin/hs`, and loads `pi-notify.lua` for notification delivery, exact window discovery, Space switching, and focus.
+6. Reload Hammerspoon after config changes, then run `/reload` in Pi.
 
 Preflight:
 
@@ -31,7 +32,7 @@ hs -c 'return piNotify.preflight()'
 
 Expected output includes `"ok":true` and `"accessibility":true`.
 
-Hammerspoon completely replaces `terminal-notifier` for this Pi extension. Existing Claude Code notification settings are unaffected.
+Hammerspoon owns notification lifecycle, exact Alacritty window discovery, switching to the window's Space, and click focus. Existing Claude Code notification settings are unaffected.
 
 ## Linux / Hyprland setup
 
