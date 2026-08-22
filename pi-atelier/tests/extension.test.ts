@@ -1,6 +1,3 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import atelierExtension, { SIDEBAR_PANEL_EVENT_CHANNEL } from "../extensions/index.js";
@@ -33,11 +30,9 @@ function harness(
 	const commands = new Map<string, any>();
 	const eventBusHandlers = new Map<string, Set<(data: unknown) => void>>();
 	const shortcuts: string[] = [];
-	const shortcutHandlers = new Map<string, (ctx: any) => Promise<void> | void>();
 	const setFooter = vi.fn();
 	const setWidget = vi.fn();
 	let terminalInput: ((data: string) => unknown) | undefined;
-	let terminalInputUnsubscribe = vi.fn();
 	const terminalWrite = vi.fn();
 	const baseRender = vi.fn((width: number) => [`main:${width}`]);
 	const overlays: Array<{
@@ -68,10 +63,7 @@ function harness(
 			}),
 		},
 		registerCommand: vi.fn((name: string, options: any) => commands.set(name, options)),
-		registerShortcut: vi.fn((key: string, options: any) => {
-			shortcuts.push(key);
-			shortcutHandlers.set(key, options.handler);
-		}),
+		registerShortcut: vi.fn((key: string) => shortcuts.push(key)),
 		exec: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
 		getThinkingLevel: vi.fn().mockReturnValue("medium"),
 		getActiveTools: vi.fn().mockReturnValue(["read"]),
@@ -139,10 +131,9 @@ function harness(
 			custom,
 			onTerminalInput: vi.fn((handler) => {
 				terminalInput = handler;
-				terminalInputUnsubscribe = vi.fn(() => {
+				return () => {
 					if (terminalInput === handler) terminalInput = undefined;
-				});
-				return terminalInputUnsubscribe;
+				};
 			}),
 		},
 	};
@@ -151,7 +142,6 @@ function harness(
 		handlers,
 		commands,
 		shortcuts,
-		shortcutHandlers,
 		setFooter,
 		setWidget,
 		ctx,
@@ -165,9 +155,6 @@ function harness(
 		},
 		get terminalInput() {
 			return terminalInput;
-		},
-		get terminalInputUnsubscribe() {
-			return terminalInputUnsubscribe;
 		},
 	};
 }
@@ -188,14 +175,6 @@ function replacementContext(
 
 async function start(h: ReturnType<typeof harness>, ctx = h.ctx) {
 	await h.handlers.get("session_start")?.({ reason: "startup" }, ctx);
-}
-
-/** One persisted `todo` tool result, the shape session branches are reconstructed from. */
-function todoBranchEntry(details: unknown, isError?: boolean) {
-	return {
-		type: "message",
-		message: { role: "toolResult", toolName: "todo", ...(isError === undefined ? {} : { isError }), details },
-	};
 }
 
 async function command(h: ReturnType<typeof harness>, args: string, ctx = h.ctx) {
@@ -253,92 +232,41 @@ async function waitForWorkspacePulseInspection(h: ReturnType<typeof harness>): P
 	await Promise.resolve();
 }
 
-async function withPersistedUserConfig(
-	config: Record<string, unknown>,
-	run: () => Promise<void>,
-): Promise<void> {
-	const previous = process.env.PI_CODING_AGENT_DIR;
-	const agentDir = await mkdtemp(join(tmpdir(), "pi-atelier-extension-"));
-	try {
-		await writeFile(join(agentDir, "pi-atelier.json"), JSON.stringify(config), "utf8");
-		process.env.PI_CODING_AGENT_DIR = agentDir;
-		await run();
-	} finally {
-		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = previous;
-		await rm(agentDir, { recursive: true, force: true });
-	}
-}
-
 describe("extension registration", () => {
 	it("discovers and renders a structured contributed panel through pi.events", async () => {
 		const h = harness();
-		await withPersistedUserConfig(
-			{
-				sidebarPanelLayout: [
-					{ id: "vendor:queue", visible: true },
-					...Array.from({ length: 8 }, (_, index) => ({
-						id: ["agent", "activity", "alerts", "todos", "context", "workspace", "usage", "tools"][index],
-						visible: false,
-					})),
-				],
-			},
-			async () => {
-				await start(h);
-				h.pi.events.emit(SIDEBAR_PANEL_EVENT_CHANNEL, {
-					version: 1,
-					type: "register",
-					source: "vendor",
-					revision: 1,
-					panel: { id: "vendor:queue", title: "Queue", rows: ["queued 2"] },
-				});
-				await command(h, "on");
-				const rendered = h.overlays.at(-1)?.component.render(44).join("\\n") ?? "";
-				expect(rendered).toContain("QUEUE");
-				expect(rendered).toContain("queued 2");
-			},
-		);
+		await start(h);
+		h.pi.events.emit(SIDEBAR_PANEL_EVENT_CHANNEL, {
+			version: 1,
+			type: "register",
+			source: "vendor",
+			revision: 1,
+			panel: { id: "vendor:queue", title: "Queue", rows: ["queued 2"] },
+		});
+		await command(h, "on");
+		const rendered = h.overlays.at(-1)?.component.render(44).join("\\n") ?? "";
+		expect(rendered).toContain("QUEUE");
+		expect(rendered).toContain("queued 2");
 	});
 
 	it("renders Plannotator planning as a native panel and clears only its duplicate widget", async () => {
-		await withPersistedUserConfig(
-			{
-				sidebarPanelLayout: [
-					{ id: "plannotator:progress", visible: true },
-					...Array.from({ length: 8 }, (_, index) => ({
-						id: ["agent", "activity", "alerts", "todos", "context", "workspace", "usage", "tools"][index],
-						visible: false,
-					})),
-				],
-			},
-			async () => {
-				const h = harness();
-				h.ctx.sessionManager.getBranch.mockReturnValue([
-					{ type: "custom", customType: "plannotator", data: { phase: "planning", lastSubmittedPath: null } },
-				]);
-				await start(h);
-				const rendered = renderOverlayText(h);
-				expect(rendered).toContain("PLANNOTATOR");
-				expect(rendered).toContain("Planning");
-				await vi.waitFor(() => expect(h.setWidget).toHaveBeenCalledWith("plannotator-progress", undefined));
-			},
-		);
+		const h = harness();
+		h.ctx.sessionManager.getBranch.mockReturnValue([
+			{ type: "custom", customType: "plannotator", data: { phase: "planning", lastSubmittedPath: null } },
+		]);
+		await start(h);
+		const rendered = renderOverlayText(h);
+		expect(rendered).toContain("PLANNOTATOR");
+		expect(rendered).toContain("Planning");
+		await vi.waitFor(() => expect(h.setWidget).toHaveBeenCalledWith("plannotator-progress", undefined));
 	});
 
-	it("registers the command and installs one footer in TUI mode", async () => {
+	it("registers the command, no shortcuts, and one footer in TUI mode", async () => {
 		const h = harness();
 		expect(h.commands.has("atelier")).toBe(true);
 		await start(h);
 		expect(h.setFooter).toHaveBeenCalledTimes(1);
-		expect(h.shortcuts).toContain("ctrl+shift+r");
-	});
-
-	it("registers the resize shortcut exactly once across session replacement", async () => {
-		const h = harness();
-		await start(h);
-		await start(h, replacementContext(h.ctx, "Replacement session"));
-
-		expect(h.pi.registerShortcut.mock.calls.filter(([key]) => key === "ctrl+shift+r")).toHaveLength(1);
+		expect(h.shortcuts).toEqual([]);
 	});
 
 	it("does not install terminal UI outside TUI mode", async () => {
@@ -459,44 +387,16 @@ describe("extension registration", () => {
 		expect(h.overlays[0]?.tui.render(120)).toEqual(["main:120"]);
 	});
 
-	it("enters Resize mode with Ctrl+Shift+R only for the active visible sidebar", async () => {
-		const h = harness();
-		await start(h);
-		await h.shortcutHandlers.get("ctrl+shift+r")?.(h.ctx);
-		expect(h.terminalWrite).toHaveBeenCalledWith("\u001b[?1002h\u001b[?1006h");
-
-		await command(h, "off");
-		h.terminalWrite.mockClear();
-		await h.shortcutHandlers.get("ctrl+shift+r")?.(h.ctx);
-		expect(h.terminalWrite).not.toHaveBeenCalled();
-		expect(h.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("sidebar"), "warning");
-
-		const staleCtx = h.ctx;
-		const currentCtx = replacementContext(h.ctx, "Replacement session");
-		await start(h, currentCtx);
-		const writeCount = h.terminalWrite.mock.calls.length;
-		await h.shortcutHandlers.get("ctrl+shift+r")?.(staleCtx);
-		expect(h.terminalWrite).toHaveBeenCalledTimes(writeCount);
-		expect(staleCtx.ui.notify).toHaveBeenLastCalledWith(
-			"Show the Pi Atelier sidebar before resizing it",
-			"warning",
-		);
-	});
-
-	it("closes an enabled sidebar and resize input during shutdown", async () => {
+	it("closes an enabled sidebar during shutdown", async () => {
 		const h = harness();
 		await start(h);
 		await command(h, "on");
-		await h.shortcutHandlers.get("ctrl+shift+r")?.(h.ctx);
-		expect(h.terminalWrite).toHaveBeenLastCalledWith("\u001b[?1002h\u001b[?1006h");
-		expect(h.terminalInput).toEqual(expect.any(Function));
 
 		await h.handlers.get("session_shutdown")?.({ reason: "quit" }, h.ctx);
 
 		expect(h.overlays[0]?.done).toHaveBeenCalledOnce();
 		expect(h.setFooter).toHaveBeenLastCalledWith(undefined);
-		expect(h.terminalWrite).toHaveBeenLastCalledWith("\u001b[?1006l\u001b[?1002l");
-		expect(h.terminalInputUnsubscribe).toHaveBeenCalledOnce();
+		expect(h.terminalWrite).not.toHaveBeenCalled();
 		expect(h.terminalInput).toBeUndefined();
 	});
 
@@ -505,9 +405,6 @@ describe("extension registration", () => {
 		await start(h);
 
 		const failingCtx = replacementContext(h.ctx, "Failing session");
-		failingCtx.sessionManager.getBranch.mockReturnValue([
-			todoBranchEntry({ todos: [{ id: 1, text: "Failure stale TODO", done: false }], nextId: 2 }),
-		]);
 		const failedFooterRender = vi.fn();
 		h.setFooter.mockImplementation((footer) => {
 			if (typeof footer !== "function") return;
@@ -527,9 +424,6 @@ describe("extension registration", () => {
 		expect(h.overlays).toHaveLength(1);
 
 		failedFooterRender.mockClear();
-		failingCtx.sessionManager.getBranch.mockReturnValue([
-			todoBranchEntry({ todos: [{ id: 2, text: "Resurrected TODO", done: false }], nextId: 3 }),
-		]);
 		await h.handlers.get("session_tree")?.({ type: "session_tree" }, failingCtx);
 		expect(failedFooterRender).not.toHaveBeenCalled();
 
@@ -656,7 +550,7 @@ describe("extension registration", () => {
 			vi.fn(),
 			() => new Map([["one", "atelier index failed"]]),
 		);
-		expect(footer.render(120)).toEqual([]);
+		expect(footer.render(120).join("\n")).toContain("atelier index failed");
 		// Pi disposes the mounted footer inside `setFooter`; if that throws, the old footer stays live.
 		h.setFooter.mockImplementation((value: unknown) => {
 			if (value === undefined) throw new Error("footer removal failed");

@@ -7,7 +7,15 @@ import {
 import { formatTokens } from "./metrics.js";
 import { type AtelierPalette, createPalette, type PaletteRole } from "./palette.js";
 import { responsePerformanceValues } from "./run-activity.js";
-import type { AtelierConfig, AtelierMetrics, AtelierState, DisplayValue, FooterState } from "./types.js";
+import {
+	CONTEXT_DANGER_PERCENT,
+	CONTEXT_WARNING_PERCENT,
+	CURRENCY_DECIMALS,
+	type AtelierMetrics,
+	type AtelierState,
+	type DisplayValue,
+	type FooterState,
+} from "./types.js";
 
 export interface ThemeLike {
 	readonly name?: string;
@@ -15,8 +23,6 @@ export interface ThemeLike {
 	bold(text: string): string;
 	italic(text: string): string;
 }
-
-export type ResponsiveMode = "gallery" | "balanced" | "focus" | "telemetry" | "safe";
 
 const WORKING_DOT_FRAMES = ["...", "..", "."] as const;
 const WORKING_ANIMATION_INTERVAL_MS = 400;
@@ -65,14 +71,6 @@ const sanitize = (text: string): string =>
 		.replace(/\s+/g, " ")
 		.trim();
 
-export function selectResponsiveMode(width: number): ResponsiveMode {
-	if (width >= 132) return "gallery";
-	if (width >= 96) return "balanced";
-	if (width >= 72) return "focus";
-	if (width >= 56) return "telemetry";
-	return "safe";
-}
-
 function paintValue(value: DisplayValue, role: PaletteRole, palette: AtelierPalette): string {
 	return palette.paint(value.available ? role : "dim", value.text);
 }
@@ -102,10 +100,10 @@ function costValue(metrics: AtelierMetrics, decimals: number, compact: boolean):
 	return { text: `$${amount}`, available: true };
 }
 
-function contextRole(metrics: AtelierMetrics, config: AtelierConfig): PaletteRole {
+function contextRole(metrics: AtelierMetrics): PaletteRole {
 	if (metrics.contextPercent === null || !Number.isFinite(metrics.contextPercent)) return "context";
-	if (metrics.contextPercent >= config.contextDanger) return "error";
-	if (metrics.contextPercent >= config.contextWarning) return "warning";
+	if (metrics.contextPercent >= CONTEXT_DANGER_PERCENT) return "error";
+	if (metrics.contextPercent >= CONTEXT_WARNING_PERCENT) return "warning";
 	return "context";
 }
 
@@ -120,31 +118,20 @@ function activityText(
 	const label = state.activity === "working" && !compact ? (state.workingLabel ?? fallback) : fallback;
 	const dots =
 		state.activity === "working" && !compact ? workingDots.padEnd(WORKING_DOT_FRAMES[0].length, " ") : "";
-	const role: PaletteRole =
-		state.activity === "ready"
-			? "ready"
-			: state.activity === "working"
-				? "working"
-				: state.activity === "warning"
-					? "warning"
-					: "error";
+	const role: PaletteRole = state.activity === "working" ? "working" : "ready";
 	return palette.paint(role, theme.bold(`● ${sanitize(label)}${dots}`));
 }
 
 function buildItems(
 	state: FooterState,
-	config: AtelierConfig,
 	theme: ThemeLike,
 	colorEnabled: boolean,
 	workingDots: string,
 ): FooterItem[] {
 	const palette = createPalette(theme, colorEnabled);
 	const items: FooterItem[] = [];
-	const itemIds = new Set<FooterItemId>();
 	const add = (item: FooterItem): void => {
-		if (itemIds.has(item.id)) return;
-		itemIds.add(item.id);
-		items.push(item);
+		if (!items.some((candidate) => candidate.id === item.id)) items.push(item);
 	};
 
 	const plannotator = state.plannotatorStatus
@@ -162,158 +149,96 @@ function buildItems(
 		});
 	}
 
-	for (const entry of config.segmentLayout) {
-		if (!entry.visible) continue;
-		const segment = entry.id;
-		if (segment === "activity") {
-			add({
-				id: "activity",
-				zone: "left",
-				full: activityText(state, palette, theme, workingDots, false),
-				compact: activityText(state, palette, theme, workingDots, true),
-				dropRank: DROP.activity,
-				required: true,
-			});
-			continue;
-		}
+	add({
+		id: "activity",
+		zone: "left",
+		full: activityText(state, palette, theme, workingDots, false),
+		compact: activityText(state, palette, theme, workingDots, true),
+		dropRank: DROP.activity,
+		required: true,
+	});
 
-		if (segment === "model") {
-			const model = state.modelId ? sanitize(state.modelId) : "";
-			if (model) {
-				const rendered = palette.paint("primary", model);
-				add({
-					id: "model",
-					zone: "left",
-					full: rendered,
-					compact: rendered,
-					dropRank: DROP.model,
-					required: false,
-				});
-			}
-			const thinking = state.thinkingLevel ? sanitize(state.thinkingLevel) : "";
-			if (thinking) {
-				const rendered = palette.paint("muted", thinking);
-				add({
-					id: "thinking",
-					zone: "left",
-					full: rendered,
-					compact: rendered,
-					dropRank: DROP.thinking,
-					required: false,
-				});
-			}
-			continue;
-		}
-
-		if (segment === "git") {
-			const branch = state.branch ? sanitize(state.branch) : "";
-			if (branch) {
-				const rendered = `${palette.paint("primary", branch)}${state.dirty ? palette.paint("warning", "*") : ""}`;
-				add({
-					id: "git",
-					zone: "left",
-					full: rendered,
-					compact: rendered,
-					dropRank: DROP.git,
-					required: false,
-				});
-			}
-			continue;
-		}
-
-		if (segment === "statuses") {
-			const statuses = state.extensionStatuses.map(sanitize).filter(Boolean).join(" ");
-			if (statuses) {
-				const rendered = palette.paint("muted", statuses);
-				add({
-					id: "status",
-					zone: "left",
-					full: rendered,
-					compact: rendered,
-					dropRank: DROP.status,
-					required: false,
-				});
-			}
-			continue;
-		}
-
-		if (segment === "metrics") {
-			const metrics = state.metrics;
-			const inputFull = metric("in", availableValue(metrics.usageAvailable, metrics.input), palette, "input");
-			const outputFull = metric(
-				"out",
-				availableValue(metrics.usageAvailable, metrics.output),
-				palette,
-				"output",
-			);
-			const cacheHit = metric("cache", percentValue(metrics.cacheHitPercent, 0), palette, "cache");
-			const cost = `${paintValue(costValue(metrics, config.currencyDecimals, false), "cost", palette)}${
-				metrics.subscription ? palette.paint("muted", " (sub)") : ""
-			}`;
-
-			add({
-				id: "input",
-				zone: "right",
-				full: inputFull,
-				compact: inputFull,
-				dropRank: DROP.input,
-				required: false,
-			});
-			add({
-				id: "output",
-				zone: "right",
-				full: outputFull,
-				compact: outputFull,
-				dropRank: DROP.output,
-				required: false,
-			});
-			add({
-				id: "cache",
-				zone: "right",
-				full: cacheHit,
-				compact: cacheHit,
-				dropRank: DROP.cache,
-				required: false,
-			});
-			add({ id: "cost", zone: "right", full: cost, compact: cost, dropRank: DROP.cost, required: false });
-			continue;
-		}
-
-		if (segment === "performance") {
-			const values = responsePerformanceValues(state.performance);
-			const rendered = [
-				metric("TTFT", values.ttft, palette, "output"),
-				metric("TPS", values.tps, palette, "output"),
-			].join(palette.paint("muted", " · "));
-			add({
-				id: "performance",
-				zone: "right",
-				full: rendered,
-				compact: rendered,
-				dropRank: DROP.performance,
-				required: false,
-			});
-			continue;
-		}
-
-		if (segment === "context") {
-			const metrics = state.metrics;
-			const role = contextRole(metrics, config);
-			const contextFull = `${metric("ctx", percentValue(metrics.contextPercent, 1), palette, role)}${
-				metrics.autoCompact === true ? palette.paint("muted", " (auto)") : ""
-			}`;
-			const contextCompact = metric("ctx", percentValue(metrics.contextPercent, 0), palette, role);
-			add({
-				id: "context",
-				zone: "right",
-				full: contextFull,
-				compact: contextCompact,
-				dropRank: DROP.context,
-				required: true,
-			});
-			continue;
-		}
+	const model = state.modelId ? sanitize(state.modelId) : "";
+	if (model) {
+		const rendered = palette.paint("primary", model);
+		add({
+			id: "model",
+			zone: "left",
+			full: rendered,
+			compact: rendered,
+			dropRank: DROP.model,
+			required: false,
+		});
 	}
+	const thinking = state.thinkingLevel ? sanitize(state.thinkingLevel) : "";
+	if (thinking) {
+		const rendered = palette.paint("muted", thinking);
+		add({
+			id: "thinking",
+			zone: "left",
+			full: rendered,
+			compact: rendered,
+			dropRank: DROP.thinking,
+			required: false,
+		});
+	}
+	const branch = state.branch ? sanitize(state.branch) : "";
+	if (branch) {
+		const rendered = `${palette.paint("primary", branch)}${state.dirty ? palette.paint("warning", "*") : ""}`;
+		add({ id: "git", zone: "left", full: rendered, compact: rendered, dropRank: DROP.git, required: false });
+	}
+	const statuses = state.extensionStatuses.map(sanitize).filter(Boolean).join(" ");
+	if (statuses) {
+		const rendered = palette.paint("muted", statuses);
+		add({
+			id: "status",
+			zone: "left",
+			full: rendered,
+			compact: rendered,
+			dropRank: DROP.status,
+			required: false,
+		});
+	}
+
+	const metrics = state.metrics;
+	const input = metric("in", availableValue(metrics.usageAvailable, metrics.input), palette, "input");
+	const output = metric("out", availableValue(metrics.usageAvailable, metrics.output), palette, "output");
+	const cache = metric("cache", percentValue(metrics.cacheHitPercent, 0), palette, "cache");
+	const cost = `${paintValue(costValue(metrics, CURRENCY_DECIMALS, false), "cost", palette)}${
+		metrics.subscription ? palette.paint("muted", " (sub)") : ""
+	}`;
+	add({ id: "input", zone: "right", full: input, compact: input, dropRank: DROP.input, required: false });
+	add({ id: "output", zone: "right", full: output, compact: output, dropRank: DROP.output, required: false });
+	add({ id: "cache", zone: "right", full: cache, compact: cache, dropRank: DROP.cache, required: false });
+	add({ id: "cost", zone: "right", full: cost, compact: cost, dropRank: DROP.cost, required: false });
+
+	const performance = responsePerformanceValues(state.performance);
+	const renderedPerformance = [
+		metric("TTFT", performance.ttft, palette, "output"),
+		metric("TPS", performance.tps, palette, "output"),
+	].join(palette.paint("muted", " · "));
+	add({
+		id: "performance",
+		zone: "right",
+		full: renderedPerformance,
+		compact: renderedPerformance,
+		dropRank: DROP.performance,
+		required: false,
+	});
+
+	const contextPaletteRole = contextRole(metrics);
+	const contextFull = `${metric("ctx", percentValue(metrics.contextPercent, 1), palette, contextPaletteRole)}${
+		metrics.autoCompact === true ? palette.paint("muted", " (auto)") : ""
+	}`;
+	const contextCompact = metric("ctx", percentValue(metrics.contextPercent, 0), palette, contextPaletteRole);
+	add({
+		id: "context",
+		zone: "right",
+		full: contextFull,
+		compact: contextCompact,
+		dropRank: DROP.context,
+		required: true,
+	});
 
 	return items;
 }
@@ -363,20 +288,18 @@ function compose(items: FooterItem[], width: number): string {
 
 export function renderFooterLine(
 	state: FooterState,
-	config: AtelierConfig,
 	theme: ThemeLike,
 	width: number,
 	colorEnabled = true,
 	workingDots = "...",
 ): string {
 	if (width <= 0) return "";
-	const line = compose(buildItems(state, config, theme, colorEnabled, workingDots), width);
+	const line = compose(buildItems(state, theme, colorEnabled, workingDots), width);
 	return truncateToWidth(line, width, "");
 }
 
 export interface FooterComponentOptions {
 	getState(): FooterState;
-	getConfig(): AtelierConfig;
 	isSidebarPresented?(): boolean;
 	colorEnabled?: boolean;
 	requestRender(): void;
@@ -420,10 +343,9 @@ export function createFooterComponent(options: FooterComponentOptions): Componen
 				syncAnimation(false);
 				return [];
 			}
-			const config = options.getConfig();
 			const colorEnabled = options.colorEnabled ?? true;
 			const workingDots = WORKING_DOT_FRAMES[frameIndex] ?? WORKING_DOT_FRAMES[0];
-			const line = renderFooterLine(state, config, options.theme, width, colorEnabled, workingDots);
+			const line = renderFooterLine(state, options.theme, width, colorEnabled, workingDots);
 			const fullActivity = activityText(
 				state,
 				createPalette(options.theme, colorEnabled),

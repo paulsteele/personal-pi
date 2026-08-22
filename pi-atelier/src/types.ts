@@ -1,33 +1,10 @@
 import type { WorkspacePulseData } from "./workspace-pulse.js";
 
-export type ActivityState = "ready" | "working" | "warning" | "error";
-export type SegmentId =
-	| "brand"
-	| "activity"
-	| "metrics"
-	| "performance"
-	| "context"
-	| "model"
-	| "git"
-	| "statuses";
-export type BuiltinSidebarPanelId =
-	| "agent"
-	| "activity"
-	| "alerts"
-	| "todos"
-	| "context"
-	| "workspace"
-	| "usage"
-	| "tools";
+export type ActivityState = "ready" | "working";
+export type BuiltinSidebarPanelId = "agent" | "activity" | "alerts" | "context" | "workspace" | "usage";
 /** Stable namespaced IDs are used by contributed panels. */
 export type ContributedSidebarPanelId = `${string}:${string}`;
 export type SidebarPanelId = BuiltinSidebarPanelId | ContributedSidebarPanelId;
-export interface SegmentLayoutEntry {
-	id: SegmentId;
-	visible: boolean;
-}
-export type SegmentLayout = SegmentLayoutEntry[];
-
 export interface ResponsePerformance {
 	ttftMs: number;
 	tokensPerSecond?: number;
@@ -39,12 +16,9 @@ export interface DisplayValue {
 	available: boolean;
 }
 
-export interface AtelierConfig {
-	segmentLayout: SegmentLayout;
-	contextWarning: number;
-	contextDanger: number;
-	currencyDecimals: number;
-}
+export const CONTEXT_WARNING_PERCENT = 70;
+export const CONTEXT_DANGER_PERCENT = 90;
+export const CURRENCY_DECIMALS = 3;
 
 export interface AtelierMetrics {
 	usageAvailable: boolean;
@@ -85,19 +59,3 @@ export interface FooterState extends AtelierState {
 	performance?: ResponsePerformance;
 	plannotatorStatus?: string;
 }
-
-export const DEFAULT_CONFIG: AtelierConfig = {
-	segmentLayout: [
-		{ id: "brand", visible: false },
-		{ id: "activity", visible: true },
-		{ id: "metrics", visible: true },
-		{ id: "performance", visible: false },
-		{ id: "context", visible: true },
-		{ id: "model", visible: true },
-		{ id: "git", visible: true },
-		{ id: "statuses", visible: true },
-	],
-	contextWarning: 70,
-	contextDanger: 90,
-	currencyDecimals: 3,
-};

@@ -10,7 +10,7 @@ not be replaced wholesale without reconciling the changes below.
 - Release tag: `v0.8.2`
 - Peeled commit: `159f34cf440c18cba847999a191b252b4574b57d`
 - Original package version: `0.8.2`
-- Local package version: `0.8.2-local.1`
+- Local package version: `0.8.2-local.2`
 - Pi/TUI target used by this fork: `0.84.2`
 
 The local copy retains only runtime source, tests, build configuration, the package lock, license,
@@ -27,9 +27,11 @@ Primary files:
 - `src/sidebar.ts`
 - `tests/split-pane.test.ts`
 
-In supported fullscreen Pi 0.84 renderers, the right side is a real `HStack` child containing a
-non-primary, contained `ScrollView`. The passive overlay is hidden there and retained only as the
-lifecycle/theme acquisition seam. Regular and unsupported renderers retain the overlay fallback.
+In the supported fullscreen Pi 0.84 renderer, the right side is a real `HStack` child containing a
+non-primary, contained `ScrollView`. The passive overlay remains only as an invisible lifecycle/theme
+acquisition seam. Regular and unknown renderers fail closed without layout mutation or overlay
+presentation. Width is fixed at 44 preferred/28 minimum columns, with a 64-column main-pane minimum
+and auto-hide below 92 terminal columns.
 
 **Invariant:** fullscreen mouse selection begins in either the transcript or sidebar `ScrollView` and
 cannot include text from the other pane. The Sidebar renders its complete panel stack; its contained
@@ -64,7 +66,7 @@ The fork owns `plannotator:progress`, reconstructing the active branch's durable
 Planning displays its mode and a validated known plan path; execution displays checklist progress and
 replays `[DONE:n]` markers after the latest execution boundary. It clears only the duplicate
 `plannotator-progress` widget. When the sidebar is absent, Plannotator's status is a required Atelier
-footer item and cannot be dropped by the Statuses setting or responsive pressure.
+footer item and cannot be dropped by responsive pressure.
 
 **Invariant:** paths must resolve through existing ancestors, remain inside `ctx.cwd`, and use Markdown
 extensions. Never trust session/tool-call paths directly.
@@ -81,12 +83,13 @@ Primary files:
 The feature, config key, event subscription, process spawning, and tests are removed. The separate
 local `desktop-notifications` extension remains the only desktop notification owner.
 
-### 5. No settings/control-center UI
+### 5. Fixed personal feature set; no configuration or resize UI
 
-Upstream `src/menu.ts` and `src/settings-workspace.ts`, their tests, the Alt+A shortcut, display editor,
+Upstream `src/menu.ts` and `src/settings-workspace.ts`, their tests, all shortcuts, display editor,
 tool-list editor, model/tool/session actions, and enable/disable flows are removed. The sole command is
-`/atelier [on|off|toggle]`; `Ctrl+Shift+R` remains for resizing. Sidebar and footer behavior is fixed
-in source rather than exposed through configuration.
+`/atelier [on|off|toggle]`. There is no `pi-atelier.json`; Sidebar and footer behavior is fixed in
+source. The fallback footer always includes activity, model/thinking, Git, extension statuses,
+usage/cost/cache, response performance, and context, subject only to responsive dropping.
 
 ## Reconcile a future upstream release
 
@@ -106,7 +109,7 @@ Use a temporary workspace; do not turn this directory into a nested Git reposito
 3. Inspect upstream changes overlapping every file in the patch inventory. Pay special attention to:
    - Pi renderer compatibility and private adapter guards;
    - overlay and selection behavior;
-   - sidebar lifecycle/resize cleanup;
+   - fixed-width sidebar lifecycle and responsive cleanup;
    - footer ownership and layout structure;
    - panel registry protocol changes;
    - completion-notification code being reintroduced by upstream copies.
@@ -115,7 +118,7 @@ Use a temporary workspace; do not turn this directory into a nested Git reposito
 5. Diff the candidate against both the new upstream snapshot and this local tree. Do not merely copy
    new upstream files over locally modified files.
 6. Run the complete verification below and manually validate fullscreen selection, footer switching,
-   Plannotator lifecycle, resizing, narrow width, reload, and shutdown.
+   Plannotator lifecycle, narrow width, reload, and shutdown.
 7. Only after success, replace this directory's maintained files, update the baseline/version above,
    update this patch inventory for moved files, and append the reconciliation to `CHANGELOG.md`.
 
@@ -138,7 +141,7 @@ pi --tui-mode fullscreen
 Check:
 
 1. transcript and sidebar selection remain pane-local;
-2. sidebar show/hide, resize, narrow auto-hide, scrolling, `/reload`, and shutdown;
+2. sidebar show/hide, fixed-width narrow auto-hide, scrolling, `/reload`, and shutdown;
 3. zero footer rows while the sidebar is presented and full fallback footer otherwise;
 4. Plannotator idle, planning, denied/resubmitted, executing, completed, `/tree`, and `/resume` states;
 5. no Atelier notification control or native notification process; and

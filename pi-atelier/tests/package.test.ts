@@ -24,7 +24,7 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 describe("local package contract", () => {
 	it("publishes a Pi extension with compatible peers", () => {
 		expect(pkg.name).toBe("pi-atelier-local");
-		expect(pkg.version).toBe("0.8.2-local.1");
+		expect(pkg.version).toBe("0.8.2-local.2");
 		expect(pkg.private).toBe(true);
 		expect(pkg.description).toBe("Local, manually maintained Pi Atelier fork");
 		expect(pkg.keywords).toContain("pi-package");
@@ -37,11 +37,12 @@ describe("local package contract", () => {
 		);
 	});
 
-	it("documents Sidebar use and Resize", async () => {
+	it("documents fixed fullscreen Sidebar use", async () => {
 		const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
 		expect(readme).toContain("/atelier on|off|toggle");
-		expect(readme).toContain("Ctrl+Shift+R");
 		expect(readme).toContain("hides when the terminal is too narrow");
+		expect(readme).toContain("44-column");
+		expect(readme).not.toContain("Ctrl+Shift+R");
 	});
 
 	it("exports the deliberate structured contribution contract from the package entrypoint", () => {
@@ -65,7 +66,7 @@ describe("local package contract", () => {
 		};
 		const discovery: SidebarPanelDiscoveryEvent = { version: 1, type: "discover", requestId: "vendor-1" };
 		const event: SidebarPanelEvent = register;
-		// @ts-expect-error Built-ins are valid config IDs but not contributed IDs.
+		// @ts-expect-error Built-ins are reserved and cannot be contributed.
 		const invalidContribution: SidebarPanelContribution = { id: "agent", title: "Agent", rows: [] };
 		expect(row).toEqual({ text: "Ready", role: "ready" });
 		expect(role).toBe("ready");
@@ -74,7 +75,14 @@ describe("local package contract", () => {
 		expect(discovery.requestId).toBe("vendor-1");
 		expect(event.type).toBe("register");
 		expect(invalidContribution.id).toBe("agent");
-		expect(BUILTIN_SIDEBAR_PANEL_IDS).toContain("agent");
+		expect(BUILTIN_SIDEBAR_PANEL_IDS).toEqual([
+			"agent",
+			"activity",
+			"alerts",
+			"context",
+			"workspace",
+			"usage",
+		]);
 		expect(isSidebarPanelContributionId(contributedId)).toBe(true);
 		expect(isSidebarPanelContributionId("agent")).toBe(false);
 		expect(isSidebarPanelId("agent")).toBe(true);

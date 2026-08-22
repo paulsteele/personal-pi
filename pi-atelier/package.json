@@ -1,6 +1,6 @@
 {
 	"name": "pi-atelier-local",
-	"version": "0.8.2-local.1",
+	"version": "0.8.2-local.2",
 	"private": true,
 	"description": "Local, manually maintained Pi Atelier fork",
 	"type": "module",

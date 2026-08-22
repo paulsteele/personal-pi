@@ -21,44 +21,14 @@ import {
 	sanitizeSidebarPanelText,
 } from "./sidebar-panels.js";
 import { createSplitPaneController, type SplitPaneController } from "./split-pane.js";
-import { DEFAULT_CONFIG, type AtelierConfig, type AtelierState, type WorkspacePulseState } from "./types.js";
+import {
+	CONTEXT_DANGER_PERCENT,
+	CONTEXT_WARNING_PERCENT,
+	CURRENCY_DECIMALS,
+	type AtelierState,
+	type WorkspacePulseState,
+} from "./types.js";
 import type { WorkspacePulseData } from "./workspace-pulse.js";
-
-export type {
-	SidebarPanelContribution,
-	SidebarPanelData,
-	SidebarPanelDiscoveryEvent,
-	SidebarPanelEvent,
-	SidebarPanelEventTransport,
-	SidebarPanelRegisterEvent,
-	SidebarPanelRegistry,
-	SidebarPanelRegistryOptions,
-	SidebarPanelRole,
-	SidebarPanelRow,
-	SidebarPanelUnregisterEvent,
-} from "./sidebar-panels.js";
-export {
-	BUILTIN_SIDEBAR_PANEL_IDS,
-	createSidebarPanelRegistry,
-	isSidebarPanelContributionId,
-	isSidebarPanelId,
-	isSidebarPanelRequestId,
-	isSidebarPanelSource,
-	isSidebarPanelTextWithinRawLimit,
-	registerSidebarPanel,
-	SIDEBAR_PANEL_EVENT_CHANNEL,
-	SIDEBAR_PANEL_MAX_ID_CHARS,
-	SIDEBAR_PANEL_MAX_PANELS,
-	SIDEBAR_PANEL_MAX_RAW_REQUEST_ID_CODE_UNITS,
-	SIDEBAR_PANEL_MAX_RAW_ROW_CODE_UNITS,
-	SIDEBAR_PANEL_MAX_RAW_TITLE_CODE_UNITS,
-	SIDEBAR_PANEL_MAX_ROW_CHARS,
-	SIDEBAR_PANEL_MAX_ROWS,
-	SIDEBAR_PANEL_MAX_SOURCE_CHARS,
-	SIDEBAR_PANEL_MAX_TITLE_CHARS,
-	SIDEBAR_PANEL_MAX_TRACKED_SOURCES,
-	sanitizeSidebarPanelText,
-} from "./sidebar-panels.js";
 
 export interface SidebarSnapshotInput {
 	state: AtelierState;
@@ -131,18 +101,12 @@ function padToWidth(text: string, width: number): string {
 	return `${content}${" ".repeat(Math.max(0, safeWidth - visibleWidth(content)))}`;
 }
 
-function renderDock(
-	rows: string[],
-	width: number,
-	height: number,
-	palette: AtelierPalette,
-	resizing = false,
-): string[] {
+function renderDock(rows: string[], width: number, height: number, palette: AtelierPalette): string[] {
 	const safeWidth = Math.max(0, Math.trunc(width));
 	const safeHeight = Math.max(0, Math.trunc(height));
 	if (safeWidth <= 0 || safeHeight <= 0) return [];
 	const contentWidth = Math.max(0, safeWidth - 2);
-	const divider = palette.paint(resizing ? "warning" : "dim", "│");
+	const divider = palette.paint("dim", "│");
 	return Array.from({ length: Math.max(safeHeight, rows.length) }, (_, index) => {
 		const content = truncateToWidth(rows[index] ?? "", contentWidth, "");
 		const padding = " ".repeat(Math.max(0, contentWidth - visibleWidth(content)));
@@ -193,17 +157,11 @@ function sidebarLayout(width: number): SidebarLayout {
 }
 
 function activityRole(activity: SidebarSnapshot["activity"]): PaletteRole {
-	if (activity === "error") return "error";
-	if (activity === "warning") return "warning";
-	if (activity === "working") return "working";
-	return "ready";
+	return activity === "working" ? "working" : "ready";
 }
 
 function activitySymbol(activity: SidebarSnapshot["activity"]): string {
-	if (activity === "error") return "✕";
-	if (activity === "warning") return "▲";
-	if (activity === "working") return "◆";
-	return "●";
+	return activity === "working" ? "◆" : "●";
 }
 
 function agentRows(
@@ -360,11 +318,11 @@ function workspaceRows(
 	};
 }
 
-function contextRole(snapshot: SidebarSnapshot, config: AtelierConfig): PaletteRole {
+function contextRole(snapshot: SidebarSnapshot): PaletteRole {
 	const percent = snapshot.metrics.contextPercent;
 	if (percent === null || !Number.isFinite(percent)) return "dim";
-	if (percent >= config.contextDanger) return "error";
-	if (percent >= config.contextWarning) return "warning";
+	if (percent >= CONTEXT_DANGER_PERCENT) return "error";
+	if (percent >= CONTEXT_WARNING_PERCENT) return "warning";
 	return "context";
 }
 
@@ -379,7 +337,6 @@ function spacedRow(left: string, right: string, width: number): string {
 
 function contextRows(
 	snapshot: SidebarSnapshot,
-	config: AtelierConfig,
 	contentWidth: number,
 	layout: SidebarLayout,
 	palette: AtelierPalette,
@@ -394,7 +351,7 @@ function contextRows(
 		return [palette.paint("dim", "Context unavailable")];
 	}
 
-	const role = contextRole(snapshot, config);
+	const role = contextRole(snapshot);
 	const usage = `${formatTokens(metrics.contextTokens ?? 0)} / ${
 		metrics.contextWindow > 0 ? formatTokens(metrics.contextWindow) : "—"
 	}`;
@@ -442,7 +399,6 @@ function metricPairRows(
 
 function usageRows(
 	snapshot: SidebarSnapshot,
-	config: AtelierConfig,
 	contentWidth: number,
 	layout: SidebarLayout,
 	palette: AtelierPalette,
@@ -479,7 +435,7 @@ function usageRows(
 	}
 	if (metrics.costAvailable) {
 		const cost = `$${Math.max(0, Number.isFinite(metrics.cost) ? metrics.cost : 0).toFixed(
-			currencyDecimals(config.currencyDecimals),
+			currencyDecimals(CURRENCY_DECIMALS),
 		)}`;
 		rows.push(metricValue("Cost", cost, palette, "cost"));
 	}
@@ -721,13 +677,11 @@ function activitySidebarGroups(
 
 export function renderSidebarLines(
 	snapshot: SidebarSnapshot,
-	config: AtelierConfig,
 	theme: ThemeLike,
 	width: number,
 	height: number,
 	colorEnabled = true,
 	now = Date.now(),
-	resizing = false,
 ): string[] {
 	const palette = createPalette(theme, colorEnabled);
 	const safeWidth = Math.max(0, Math.trunc(width));
@@ -738,14 +692,6 @@ export function renderSidebarLines(
 	const layout = sidebarLayout(safeWidth);
 	const workspace = workspaceRows(snapshot, layout, palette);
 	const groups: SidebarGroup[] = [
-		...(resizing
-			? [
-					{
-						name: "resize",
-						rows: [palette.paint("warning", "RESIZE · drag divider"), ""],
-					},
-				]
-			: []),
 		{
 			name: "agent",
 			panel: "AGENT",
@@ -766,8 +712,8 @@ export function renderSidebarLines(
 		{
 			name: "context",
 			panel: "CONTEXT",
-			panelRole: contextRole(snapshot, config),
-			rows: contextRows(snapshot, config, panelContentWidth, layout, palette),
+			panelRole: contextRole(snapshot),
+			rows: contextRows(snapshot, panelContentWidth, layout, palette),
 		},
 		{
 			name: "workspaceCore",
@@ -803,7 +749,7 @@ export function renderSidebarLines(
 			name: "usage",
 			panel: "USAGE",
 			panelRole: "output",
-			rows: usageRows(snapshot, config, panelContentWidth, layout, palette),
+			rows: usageRows(snapshot, panelContentWidth, layout, palette),
 		},
 	];
 
@@ -854,61 +800,42 @@ export function renderSidebarLines(
 			rows: rows.length > 0 ? rows : [palette.paint("dim", "No data")],
 		});
 	}
-	return renderDock(
-		renderGroups(ordered, contentWidth, palette, theme),
-		safeWidth,
-		safeHeight,
-		palette,
-		resizing,
-	);
+	return renderDock(renderGroups(ordered, contentWidth, palette, theme), safeWidth, safeHeight, palette);
 }
 
 export interface SidebarComponentOptions {
 	getSnapshot(): SidebarSnapshot;
-	getConfig(): AtelierConfig;
 	getHeight(): number;
-	isResizing?(): boolean;
 	theme: ThemeLike;
 	colorEnabled?: boolean;
 }
 
-function renderSidebarError(error: unknown, width: number, height: number, resizing = false): string[] {
+function renderSidebarError(error: unknown, width: number, height: number): string[] {
 	let detail = "Unknown error";
 	try {
 		detail = sanitize(error instanceof Error ? error.message : String(error)) || detail;
 	} catch {
 		// Keep the fallback render path safe even for unusual thrown values.
 	}
-	return renderDock(
-		["Sidebar unavailable", detail],
-		width,
-		height,
-		{
-			paint: (_role, text) => text,
-		},
-		resizing,
-	);
+	return renderDock(["Sidebar unavailable", detail], width, height, {
+		paint: (_role, text) => text,
+	});
 }
 
 export function createSidebarComponent(options: SidebarComponentOptions): Component {
 	return {
 		render(width) {
 			const height = options.getHeight();
-			let resizing = false;
 			try {
-				resizing = options.isResizing?.() ?? false;
 				return renderSidebarLines(
 					options.getSnapshot(),
-					options.getConfig(),
 					options.theme,
 					width,
 					height,
 					options.colorEnabled ?? true,
-					Date.now(),
-					resizing,
 				);
 			} catch (error) {
-				return renderSidebarError(error, width, height, resizing);
+				return renderSidebarError(error, width, height);
 			}
 		},
 		invalidate() {},
@@ -921,9 +848,6 @@ export interface SidebarController {
 	toggle(): void;
 	isVisible(): boolean;
 	isPresented(): boolean;
-	beginResize(): boolean;
-	isResizing(): boolean;
-	getWidth(): number;
 	requestRender(): void;
 	dispose(): void;
 }
@@ -931,20 +855,15 @@ export interface SidebarController {
 export interface SidebarControllerOptions {
 	ctx: ExtensionContext;
 	getSnapshot(): SidebarSnapshot;
-	getConfig(): AtelierConfig;
 	colorEnabled?: boolean;
 	shouldAnimate?(): boolean;
 	animationIntervalMs?: number;
-	onWarning?(message: string): void;
 	onError?(error: unknown): void;
 	onPresentationChange?(): void;
 }
 
 interface RetirableSidebarBinding {
 	getSnapshot(): SidebarSnapshot;
-	getConfig(): AtelierConfig;
-	isResizing(): boolean;
-	setResizing(reader: () => boolean): void;
 	detach(): void;
 }
 
@@ -968,23 +887,11 @@ function cloneSidebarSnapshot(snapshot: SidebarSnapshot): SidebarSnapshot {
 	return structuredClone(snapshot);
 }
 
-function cloneSidebarConfig(config: AtelierConfig): AtelierConfig {
-	return structuredClone(config);
-}
-
 function createRetirableSidebarBinding(options: SidebarControllerOptions): RetirableSidebarBinding {
 	let readSnapshot: (() => SidebarSnapshot) | undefined = options.getSnapshot;
-	let readConfig: (() => AtelierConfig) | undefined = options.getConfig;
-	let readResizing: (() => boolean) | undefined;
 	let snapshot = createDetachedSidebarSnapshot(typeof options.ctx.cwd === "string" ? options.ctx.cwd : "");
-	let config = cloneSidebarConfig(DEFAULT_CONFIG);
 	return {
 		getSnapshot: () => (readSnapshot ? readSnapshot() : snapshot),
-		getConfig: () => (readConfig ? readConfig() : config),
-		isResizing: () => readResizing?.() ?? false,
-		setResizing: (reader) => {
-			if (readSnapshot) readResizing = reader;
-		},
 		detach: () => {
 			if (readSnapshot) {
 				try {
@@ -993,16 +900,7 @@ function createRetirableSidebarBinding(options: SidebarControllerOptions): Retir
 					// The inert snapshot is already detached from the retired runtime.
 				}
 			}
-			if (readConfig) {
-				try {
-					config = cloneSidebarConfig(readConfig());
-				} catch {
-					// Keep the last plain configuration snapshot.
-				}
-			}
 			readSnapshot = undefined;
-			readConfig = undefined;
-			readResizing = undefined;
 		},
 	};
 }
@@ -1038,11 +936,6 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 	};
 
 	const split: SplitPaneController = createSplitPaneController({
-		subscribeInput: (handler) => options.ctx.ui.onTerminalInput(handler),
-		onResizeChange: () => {
-			safely(() => requestOverlayRender?.());
-			safely(() => splitRequestRender?.());
-		},
 		onPresentationChange: () => {
 			safely(() => requestOverlayRender?.());
 			safely(() => splitRequestRender?.());
@@ -1052,11 +945,7 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 				// Presentation invalidation is best effort.
 			}
 		},
-		...(options.onWarning ? { onWarning: options.onWarning } : {}),
-		...(options.onError ? { onError: options.onError } : {}),
 	});
-
-	binding.setResizing(split.isResizing);
 
 	const stopAnimation = () => {
 		if (!animationTimer) return;
@@ -1088,7 +977,6 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 		enabled = false;
 		generation += 1;
 		stopAnimation();
-		safely(split.cancelResize);
 		const close = closeOverlay;
 		const handle = overlayHandle;
 		clearOverlayCallbacks();
@@ -1119,9 +1007,7 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 					let closed = false;
 					const component = createSidebarComponent({
 						getSnapshot: binding.getSnapshot,
-						getConfig: binding.getConfig,
 						getHeight: () => tui.terminal.rows,
-						isResizing: binding.isResizing,
 						theme: theme as unknown as ThemeLike,
 						...(options.colorEnabled === undefined ? {} : { colorEnabled: options.colorEnabled }),
 					});
@@ -1195,9 +1081,6 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 			return enabled;
 		},
 		isPresented: split.isPresented,
-		beginResize: split.beginResize,
-		isResizing: split.isResizing,
-		getWidth: split.getSidebarWidth,
 		requestRender() {
 			safely(() => requestOverlayRender?.());
 			safely(split.requestRender);

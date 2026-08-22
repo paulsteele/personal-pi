@@ -9,7 +9,9 @@
 - Color each Sidebar panel's complete border—including its sides and bottom—with the panel's semantic accent.
 - Integrate Plannotator planning mode, plan path, and execution checklist into the Sidebar with a required fallback footer status.
 - Remove Atelier's native completion notification implementation and configuration; notifications remain owned by the separate local extension.
-- Remove the settings/control-center overlays, configuration loader, TODO/tool-list panels, display presets, and unrelated model/tool/session actions; retain only sidebar visibility and resize controls with behavior fixed in source.
+- Remove the settings/control-center overlays, configuration loader/file, TODO/tool-list panels, display presets, resize controls, and unrelated model/tool/session actions; retain only `/atelier` visibility control with behavior fixed in source.
+- Specialize layout support to Pi 0.84 fullscreen mode with a fixed 44-column preferred/28-column minimum Sidebar and fail closed on regular or unknown renderers.
+- Replace configurable footer segments with a fixed dense fallback rail that includes response performance, and remove orphaned overlay/config/formatter compatibility scaffolding.
 
 ## 0.8.2 — 2026-08-19
 

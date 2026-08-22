@@ -5,7 +5,6 @@ import {
 	getAgentDir,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import type { KeyId } from "@earendil-works/pi-tui";
 import { createFooterComponent, type ThemeLike } from "../src/footer.js";
 import {
 	createPlannotatorIntegration,
@@ -22,7 +21,7 @@ import {
 } from "../src/sidebar.js";
 import { createSidebarPanelRegistry, type SidebarPanelRegistry } from "../src/sidebar-panels.js";
 import { AtelierRuntime, createInertAtelierState } from "../src/state.js";
-import { type AtelierConfig, type AtelierState, DEFAULT_CONFIG, type FooterState } from "../src/types.js";
+import { type AtelierState, type FooterState } from "../src/types.js";
 
 export type {
 	SidebarPanelContribution,
@@ -72,7 +71,6 @@ interface ActiveSession {
 	readonly runActivity: RunActivityTracker;
 	readonly plannotator: PlannotatorIntegration;
 	readonly retiredState: AtelierState;
-	readonly retiredConfig: AtelierConfig;
 	readonly retiredCwd: string;
 	footerDisposer: (() => void) | undefined;
 	footerGeneration: number;
@@ -88,7 +86,6 @@ interface LifecycleToken {
 export default function atelierExtension(pi: ExtensionAPI): void {
 	const noopRender = (): void => undefined;
 	let activeSession: ActiveSession | undefined;
-	let resizeShortcutRegistered = false;
 	let lifecycleToken: LifecycleToken = { id: 0 };
 	let initializingSessionManager: ExtensionContext["sessionManager"] | undefined;
 
@@ -247,7 +244,6 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 		const token = targetSession.token;
 		const generation = ++targetSession.footerGeneration;
 		const retiredState = targetSession.retiredState;
-		const retiredConfig = targetSession.retiredConfig;
 		if (ctx.mode !== "tui") return;
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			const getCurrentSession = (): ActiveSession | undefined => {
@@ -282,7 +278,6 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 						extensionStatuses: currentSession.extensionStatuses,
 					};
 				},
-				getConfig: () => retiredConfig,
 				isSidebarPresented: () => getCurrentSession()?.sidebar.isPresented() ?? false,
 				colorEnabled: !("NO_COLOR" in process.env),
 				requestRender: footerRequestRender,
@@ -348,7 +343,6 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 			onChange: requestCandidateRenders,
 		});
 		try {
-			const config = structuredClone(DEFAULT_CONFIG);
 			if (!isFresh()) return;
 			let autoCompact: boolean | null = null;
 			try {
@@ -381,11 +375,9 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 						throw new Error("Pi Atelier session is not published");
 					return getSidebarSnapshot(current);
 				},
-				getConfig: () => DEFAULT_CONFIG,
 				colorEnabled: !("NO_COLOR" in process.env),
 				shouldAnimate: () => activeSession?.token === initializationToken && localRunActivity.isRunning(),
 				onPresentationChange: requestCandidateRenders,
-				onWarning: (message) => initializationContext.ui.notify(message, "warning"),
 				onError: (error) =>
 					initializationContext.ui.notify(
 						`Pi Atelier sidebar failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -411,7 +403,6 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 				runActivity: localRunActivity,
 				plannotator: localPlannotator,
 				retiredState: createInertAtelierState(autoCompact),
-				retiredConfig: DEFAULT_CONFIG,
 				retiredCwd: initializationContext.cwd,
 				footerDisposer: undefined,
 				footerGeneration: 0,
@@ -429,20 +420,6 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 			publishedSession = nextSession;
 			if (previousSession) disposeSession(previousSession, { clearFooter: true });
 
-			if (isFresh() && !resizeShortcutRegistered) {
-				pi.registerShortcut("ctrl+shift+r" as KeyId, {
-					description: "Resize Pi Atelier sidebar",
-					handler: (shortcutContext) => {
-						const current = getActiveSession(shortcutContext);
-						if (!current?.sidebar.isVisible()) {
-							shortcutContext.ui.notify("Show the Pi Atelier sidebar before resizing it", "warning");
-							return;
-						}
-						current.sidebar.beginResize();
-					},
-				});
-				resizeShortcutRegistered = true;
-			}
 			if (isFresh() && activeSession === nextSession) {
 				installFooter(nextSession);
 				nextSession.sidebar.show();
@@ -561,7 +538,10 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 		schedulePlannotatorRefresh(current);
 		current.runtime.refreshUsage();
 	});
-	pi.on("session_info_changed", (_event, ctx) => getActiveSession(ctx)?.runtime.refreshUsage());
+	pi.on("session_info_changed", (_event, ctx) => {
+		const current = getActiveSession(ctx);
+		if (current) requestAllRenders(current);
+	});
 	pi.on("session_shutdown", (_event, ctx) => {
 		const current = getActiveSession(ctx);
 		const initializing = initializingSessionManager;

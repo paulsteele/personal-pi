@@ -2,16 +2,12 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EMPTY_RUN_ACTIVITY, type RunActivitySnapshot } from "../src/run-activity.js";
 import {
-	buildSidebarSnapshot,
-	createSidebarComponent,
-	createSidebarController,
 	createSidebarPanelRegistry,
 	isSidebarPanelContributionId,
 	isSidebarPanelId,
 	isSidebarPanelRequestId,
 	isSidebarPanelTextWithinRawLimit,
 	registerSidebarPanel,
-	renderSidebarLines,
 	SIDEBAR_PANEL_EVENT_CHANNEL,
 	SIDEBAR_PANEL_MAX_ID_CHARS,
 	SIDEBAR_PANEL_MAX_PANELS,
@@ -23,9 +19,15 @@ import {
 	SIDEBAR_PANEL_MAX_SOURCE_CHARS,
 	SIDEBAR_PANEL_MAX_TITLE_CHARS,
 	SIDEBAR_PANEL_MAX_TRACKED_SOURCES,
+} from "../src/sidebar-panels.js";
+import {
+	buildSidebarSnapshot,
+	createSidebarComponent,
+	createSidebarController,
+	renderSidebarLines,
 } from "../src/sidebar.js";
-import { DEFAULT_SIDEBAR_WIDTH } from "../src/split-pane.js";
-import { type AtelierState, DEFAULT_CONFIG } from "../src/types.js";
+import { SIDEBAR_WIDTH } from "../src/split-pane.js";
+import type { AtelierState } from "../src/types.js";
 
 const stripAnsi = (text: string) => text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 
@@ -389,7 +391,7 @@ describe("sidebar snapshot and layout", () => {
 		const registry = createSidebarPanelRegistry();
 		// @ts-expect-error Built-in IDs are intentionally rejected by this contributed-panel API.
 		expect(registry.register({ id: "agent", title: "Spoofed", rows: [] })).toBe(false);
-		for (const id of ["agent", "tools"] as const) {
+		for (const id of ["agent", "usage"] as const) {
 			registry.handleEvent({
 				version: 1,
 				type: "register",
@@ -399,7 +401,7 @@ describe("sidebar snapshot and layout", () => {
 			});
 		}
 		expect(registry.get("agent")).toBeUndefined();
-		expect(registry.get("tools")).toBeUndefined();
+		expect(registry.get("usage")).toBeUndefined();
 		expect(registry.getAvailable()).toEqual([]);
 		// The rejected built-in events do not consume the source's first revision.
 		registry.handleEvent({
@@ -873,7 +875,7 @@ describe("sidebar snapshot and layout", () => {
 	});
 
 	it("renders a full-height dock with elegant terminal-native panels", () => {
-		const lines = renderSidebarLines(snapshot(), DEFAULT_CONFIG, theme, 44, 36, false, 0);
+		const lines = renderSidebarLines(snapshot(), theme, 44, 36, false, 0);
 		const text = lines.join("\n");
 		expect(lines).toHaveLength(36);
 		expect(lines.every((line) => visibleWidth(line) <= 44)).toBe(true);
@@ -891,7 +893,7 @@ describe("sidebar snapshot and layout", () => {
 	});
 
 	it("renders a scan-first Workspace Pulse without repeating the repository root path", () => {
-		const rows = contentRows(renderSidebarLines(snapshot(), DEFAULT_CONFIG, theme, 44, 36, false, 0));
+		const rows = contentRows(renderSidebarLines(snapshot(), theme, 44, 36, false, 0));
 
 		expect(rows).toContain("5 tracked  +182  −47");
 		expect(rows).toContain("2 untracked");
@@ -907,15 +909,7 @@ describe("sidebar snapshot and layout", () => {
 	])("renders the %s Pulse state explicitly", (workspacePulse, expected) => {
 		const { branch: _branch, ...withoutBranch } = snapshot();
 		const rows = contentRows(
-			renderSidebarLines(
-				{ ...withoutBranch, workspacePulse, dirty: false },
-				DEFAULT_CONFIG,
-				theme,
-				44,
-				36,
-				false,
-				0,
-			),
+			renderSidebarLines({ ...withoutBranch, workspacePulse, dirty: false }, theme, 44, 36, false, 0),
 		);
 		expect(rows).toContain(expected);
 	});
@@ -935,7 +929,6 @@ describe("sidebar snapshot and layout", () => {
 		const conflictRows = contentRows(
 			renderSidebarLines(
 				{ ...snapshot(), workspacePulse: { status: "conflict", data } },
-				DEFAULT_CONFIG,
 				theme,
 				44,
 				36,
@@ -950,7 +943,6 @@ describe("sidebar snapshot and layout", () => {
 		const staleRows = contentRows(
 			renderSidebarLines(
 				{ ...snapshot(), workspacePulse: { status: "stale", data } },
-				DEFAULT_CONFIG,
 				theme,
 				44,
 				36,
@@ -963,7 +955,6 @@ describe("sidebar snapshot and layout", () => {
 		const compactRows = contentRows(
 			renderSidebarLines(
 				{ ...snapshot(), workspacePulse: { status: "stale", data } },
-				DEFAULT_CONFIG,
 				theme,
 				28,
 				36,
@@ -977,8 +968,8 @@ describe("sidebar snapshot and layout", () => {
 	});
 
 	it("pulses only the working Agent jewel while keeping other crowns stable", () => {
-		const bright = renderSidebarLines(snapshot(), DEFAULT_CONFIG, theme, 44, 36, false, 0).join("\n");
-		const soft = renderSidebarLines(snapshot(), DEFAULT_CONFIG, theme, 44, 36, false, 400).join("\n");
+		const bright = renderSidebarLines(snapshot(), theme, 44, 36, false, 0).join("\n");
+		const soft = renderSidebarLines(snapshot(), theme, 44, 36, false, 400).join("\n");
 		expect(bright).toContain("╭─ ✦ AGENT ");
 		expect(soft).toContain("╭─ ✧ AGENT ");
 		expect(bright).toContain("╭─ ✦ CONTEXT ");
@@ -986,13 +977,13 @@ describe("sidebar snapshot and layout", () => {
 	});
 
 	it("renders a compact segmented context meter that adapts to width", () => {
-		const narrow = contentRows(renderSidebarLines(snapshot(), DEFAULT_CONFIG, theme, 28, 36, false));
+		const narrow = contentRows(renderSidebarLines(snapshot(), theme, 28, 36, false));
 		const narrowContext = narrow.indexOf("CONTEXT");
 		expect(narrow[narrowContext + 1]).toMatch(/^32k \/ 400k\s+8\.1%$/);
 		expect(narrow[narrowContext + 2]).toMatch(/^\[■·+\]$/);
 
 		for (const width of [40, 44, 72]) {
-			const rows = contentRows(renderSidebarLines(snapshot(), DEFAULT_CONFIG, theme, width, 36, false));
+			const rows = contentRows(renderSidebarLines(snapshot(), theme, width, 36, false));
 			const contextIndex = rows.indexOf("CONTEXT");
 			expect(rows[contextIndex + 1]).toMatch(/^32k \/ 400k\s+8\.1%$/);
 			expect(rows[contextIndex + 2]).toMatch(/^\[■·+\]$/);
@@ -1007,7 +998,7 @@ describe("sidebar snapshot and layout", () => {
 			branchEntryCount: 6,
 			extensionStatuses: [],
 		});
-		const rows = contentRows(renderSidebarLines(missingSession, DEFAULT_CONFIG, theme, 44, 36, false));
+		const rows = contentRows(renderSidebarLines(missingSession, theme, 44, 36, false));
 		const sessionIndex = rows.findIndex((row) => row.startsWith("SESSION "));
 		const usageIndex = rows.findIndex((row) => row.startsWith("USAGE "));
 		expect(rows.slice(sessionIndex + 1, usageIndex)).not.toContain("—");
@@ -1015,7 +1006,7 @@ describe("sidebar snapshot and layout", () => {
 	});
 
 	it("does not render the session file path", () => {
-		const text = renderSidebarLines(snapshot(), DEFAULT_CONFIG, theme, 44, 36, false).join("\n");
+		const text = renderSidebarLines(snapshot(), theme, 44, 36, false).join("\n");
 		expect(text).not.toContain("/tmp/session.jsonl");
 		expect(text).not.toContain("session.jsonl");
 	});
@@ -1029,7 +1020,7 @@ describe("sidebar snapshot and layout", () => {
 			branchEntryCount: 6,
 			extensionStatuses: [],
 		});
-		expect(contentRows(renderSidebarLines(persisted, DEFAULT_CONFIG, theme, 44, 36, false))).toContain(
+		expect(contentRows(renderSidebarLines(persisted, theme, 44, 36, false))).toContain(
 			"6 entries · persisted",
 		);
 	});
@@ -1037,7 +1028,7 @@ describe("sidebar snapshot and layout", () => {
 	it("renders populated usage as compact inline metric rows", () => {
 		const fg = vi.fn((_color: string, text: string) => text);
 		const unnamedTheme = { fg, bold: theme.bold, italic: theme.italic };
-		const rows = contentRows(renderSidebarLines(snapshot(), DEFAULT_CONFIG, unnamedTheme, 44, 36, true));
+		const rows = contentRows(renderSidebarLines(snapshot(), unnamedTheme, 44, 36, true));
 		const usageIndex = rows.indexOf("USAGE");
 		expect(rows[usageIndex + 1]).toBe("In 50.0k  Out 1.9k");
 		expect(rows[usageIndex + 2]).toBe("Cache 100.0k  Hit 96.0%");
@@ -1046,7 +1037,7 @@ describe("sidebar snapshot and layout", () => {
 			expect(fg).toHaveBeenCalledWith("muted", label);
 		}
 		for (const width of [44, 56, 72]) {
-			const wideRows = contentRows(renderSidebarLines(snapshot(), DEFAULT_CONFIG, theme, width, 36, false));
+			const wideRows = contentRows(renderSidebarLines(snapshot(), theme, width, 36, false));
 			const wideUsage = wideRows.indexOf("USAGE");
 			expect(wideRows[wideUsage + 1]).toBe("In 50.0k  Out 1.9k");
 			expect(wideRows[wideUsage + 2]).toBe("Cache 100.0k  Hit 96.0%");
@@ -1066,14 +1057,14 @@ describe("sidebar snapshot and layout", () => {
 				cost: 0,
 			},
 		};
-		const rows = contentRows(renderSidebarLines(unavailable, DEFAULT_CONFIG, theme, 44, 36, false));
+		const rows = contentRows(renderSidebarLines(unavailable, theme, 44, 36, false));
 		expect(rows).not.toContain("USAGE");
 		expect(rows).toContain("OPENAI-CODEX · MEDIUM · SUBSCRIPTION");
 	});
 
 	it("renders deterministic live run activity", () => {
 		const rows = contentRows(
-			renderSidebarLines(withActivity(activeActivity()), DEFAULT_CONFIG, theme, 44, 36, false, 20_000),
+			renderSidebarLines(withActivity(activeActivity()), theme, 44, 36, false, 20_000),
 		);
 		expect(rows).toContain("ACTIVITY");
 		expect(rows).toContain("Turn 3 · running 19s");
@@ -1101,7 +1092,6 @@ describe("sidebar snapshot and layout", () => {
 					completedCount,
 					failedCount,
 				}),
-				DEFAULT_CONFIG,
 				theme,
 				44,
 				36,
@@ -1125,7 +1115,6 @@ describe("sidebar snapshot and layout", () => {
 					completedCount: 0,
 					failedCount: 0,
 				}),
-				DEFAULT_CONFIG,
 				theme,
 				44,
 				36,
@@ -1146,7 +1135,6 @@ describe("sidebar snapshot and layout", () => {
 					completedCount: 0,
 					failedCount: 0,
 				}),
-				DEFAULT_CONFIG,
 				theme,
 				44,
 				36,
@@ -1168,7 +1156,6 @@ describe("sidebar snapshot and layout", () => {
 					completedCount: 0,
 					failedCount: 0,
 				}),
-				DEFAULT_CONFIG,
 				theme,
 				44,
 				36,
@@ -1180,9 +1167,7 @@ describe("sidebar snapshot and layout", () => {
 	});
 
 	it("always renders idle placeholders and preserves settled activity", () => {
-		const idleRows = contentRows(
-			renderSidebarLines(snapshot(), DEFAULT_CONFIG, theme, 44, 36, false, 20_000),
-		);
+		const idleRows = contentRows(renderSidebarLines(snapshot(), theme, 44, 36, false, 20_000));
 		expect(idleRows).toContain("ACTIVITY");
 		expect(idleRows).toContain("Ready");
 		expect(idleRows).toContain("TTFT ~ · TPS ~");
@@ -1208,7 +1193,6 @@ describe("sidebar snapshot and layout", () => {
 					completedCount: 0,
 					failedCount: 1,
 				}),
-				DEFAULT_CONFIG,
 				theme,
 				44,
 				36,
@@ -1240,7 +1224,6 @@ describe("sidebar snapshot and layout", () => {
 					completedCount: 1,
 					failedCount: 0,
 				}),
-				DEFAULT_CONFIG,
 				theme,
 				44,
 				36,
@@ -1266,7 +1249,6 @@ describe("sidebar snapshot and layout", () => {
 					completedCount: 0,
 					failedCount: 0,
 				}),
-				DEFAULT_CONFIG,
 				theme,
 				44,
 				36,
@@ -1288,7 +1270,6 @@ describe("sidebar snapshot and layout", () => {
 					completedCount: 0,
 					failedCount: 2,
 				}),
-				DEFAULT_CONFIG,
 				theme,
 				44,
 				36,
@@ -1325,7 +1306,6 @@ describe("sidebar snapshot and layout", () => {
 					completedCount: 1,
 					failedCount: 0,
 				}),
-				DEFAULT_CONFIG,
 				theme,
 				44,
 				36,
@@ -1395,7 +1375,6 @@ describe("sidebar snapshot and layout", () => {
 					completedCount: 5,
 					failedCount: 0,
 				}),
-				DEFAULT_CONFIG,
 				theme,
 				34,
 				60,
@@ -1429,7 +1408,6 @@ describe("sidebar snapshot and layout", () => {
 				completedCount: 1,
 				failedCount: 1,
 			}),
-			DEFAULT_CONFIG,
 			{ fg, bold: theme.bold, italic: theme.italic },
 			44,
 			36,
@@ -1448,7 +1426,7 @@ describe("sidebar snapshot and layout", () => {
 			branchEntryCount: 6,
 			extensionStatuses: ["tests \u001b[31mpassing", "api\nready", "sync warning", "index failed", "   "],
 		});
-		const rows = contentRows(renderSidebarLines(statusSnapshot, DEFAULT_CONFIG, theme, 44, 36, false));
+		const rows = contentRows(renderSidebarLines(statusSnapshot, theme, 44, 36, false));
 		expect(rows).toContain("ALERTS");
 		expect(rows).toContain("▲ sync warning");
 		expect(rows).toContain("✕ index failed");
@@ -1474,7 +1452,7 @@ describe("sidebar snapshot and layout", () => {
 			branchEntryCount: 0,
 			extensionStatuses: [],
 		});
-		const lines = renderSidebarLines(missing, DEFAULT_CONFIG, theme, 32, 36, false);
+		const lines = renderSidebarLines(missing, theme, 32, 36, false);
 		expect(lines.join("\n")).toContain("—");
 		expect(lines.join("\n")).toContain("ephemeral");
 		expect(lines.every((line) => visibleWidth(line) <= 32)).toBe(true);
@@ -1488,7 +1466,7 @@ describe("sidebar snapshot and layout", () => {
 			sessionName: `release\n${"y".repeat(100)}`,
 			extensionStatuses: [`status\t${"z".repeat(100)}`],
 		};
-		const lines = renderSidebarLines(long, DEFAULT_CONFIG, theme, 34, 36, false);
+		const lines = renderSidebarLines(long, theme, 34, 36, false);
 		expect(lines.join("")).not.toContain("[31m");
 		expect(lines.every((line) => visibleWidth(line) <= 34)).toBe(true);
 	});
@@ -1501,7 +1479,6 @@ describe("sidebar snapshot and layout", () => {
 		const fg = vi.fn((_color: string, text: string) => text);
 		renderSidebarLines(
 			{ ...snapshot(), metrics: { ...state.metrics, contextPercent: percent } },
-			DEFAULT_CONFIG,
 			{ ...theme, fg },
 			44,
 			36,
@@ -1515,7 +1492,6 @@ describe("sidebar component and overlay", () => {
 	it("does not capture editor input or render modal close help", () => {
 		const component = createSidebarComponent({
 			getSnapshot: snapshot,
-			getConfig: () => DEFAULT_CONFIG,
 			getHeight: () => 36,
 			theme,
 		});
@@ -1523,25 +1499,10 @@ describe("sidebar component and overlay", () => {
 		expect(component.render(44).join("\n")).not.toContain("esc/q close");
 	});
 
-	it("shows a visible Resize state and active divider styling", () => {
-		const fg = vi.fn((_color: string, text: string) => text);
-		const component = createSidebarComponent({
-			getSnapshot: snapshot,
-			getConfig: () => DEFAULT_CONFIG,
-			getHeight: () => 36,
-			isResizing: () => true,
-			theme: { fg, bold: theme.bold, italic: theme.italic },
-		});
-
-		expect(component.render(44).join("\n")).toContain("RESIZE");
-		expect(fg).toHaveBeenCalledWith("warning", "│");
-	});
-
 	it("reads live terminal height on every render without recreation", () => {
 		let height = 24;
 		const component = createSidebarComponent({
 			getSnapshot: snapshot,
-			getConfig: () => DEFAULT_CONFIG,
 			getHeight: () => height,
 			theme,
 		});
@@ -1551,39 +1512,32 @@ describe("sidebar component and overlay", () => {
 		expect(component.render(44)).toHaveLength(31);
 	});
 
-	it.each(["snapshot", "config", "render"] as const)(
-		"renders a bounded error state after a %s failure",
-		(source) => {
-			const component = createSidebarComponent({
-				getSnapshot: () => {
-					if (source === "snapshot") throw new Error("snapshot failed");
-					return snapshot();
-				},
-				getConfig: () => {
-					if (source === "config") throw new Error("config failed");
-					return DEFAULT_CONFIG;
-				},
-				getHeight: () => 7,
-				theme:
-					source === "render"
-						? {
-								...theme,
-								bold: () => {
-									throw new Error("render failed");
-								},
-							}
-						: theme,
-			});
-			const lines = component.render(24);
-			expect(lines).toHaveLength(7);
-			expect(lines.every((line) => stripAnsi(line).startsWith("│ "))).toBe(true);
-			expect(contentRows(lines)[0]).toBe("Sidebar unavailable");
-			expect(lines.join("\n")).not.toMatch(/PI ATELIER|ATELIER/);
-			expect(lines.join("\n")).not.toContain("esc/q close");
-			expect(lines.join("\n")).not.toMatch(/[╭╮╰╯]/);
-			expect(lines.every((line) => visibleWidth(line) <= 24)).toBe(true);
-		},
-	);
+	it.each(["snapshot", "render"] as const)("renders a bounded error state after a %s failure", (source) => {
+		const component = createSidebarComponent({
+			getSnapshot: () => {
+				if (source === "snapshot") throw new Error("snapshot failed");
+				return snapshot();
+			},
+			getHeight: () => 7,
+			theme:
+				source === "render"
+					? {
+							...theme,
+							bold: () => {
+								throw new Error("render failed");
+							},
+						}
+					: theme,
+		});
+		const lines = component.render(24);
+		expect(lines).toHaveLength(7);
+		expect(lines.every((line) => stripAnsi(line).startsWith("│ "))).toBe(true);
+		expect(contentRows(lines)[0]).toBe("Sidebar unavailable");
+		expect(lines.join("\n")).not.toMatch(/PI ATELIER|ATELIER/);
+		expect(lines.join("\n")).not.toContain("esc/q close");
+		expect(lines.join("\n")).not.toMatch(/[╭╮╰╯]/);
+		expect(lines.every((line) => visibleWidth(line) <= 24)).toBe(true);
+	});
 
 	it("keeps one overlay alive and supports repeated lifecycle operations", async () => {
 		const requestRender = vi.fn();
@@ -1609,7 +1563,7 @@ describe("sidebar component and overlay", () => {
 						: customOptions.overlayOptions;
 				expect(overlayOptions).toMatchObject({
 					anchor: "top-right",
-					width: DEFAULT_SIDEBAR_WIDTH,
+					width: SIDEBAR_WIDTH,
 					nonCapturing: true,
 				});
 				expect(tui.render(120)).toEqual(["main:120"]);
@@ -1619,7 +1573,6 @@ describe("sidebar component and overlay", () => {
 		const controller = createSidebarController({
 			ctx: { mode: "tui", ui: { custom } } as never,
 			getSnapshot: snapshot,
-			getConfig: () => DEFAULT_CONFIG,
 		});
 
 		expect(controller.isVisible()).toBe(false);
@@ -1678,7 +1631,6 @@ describe("sidebar component and overlay", () => {
 		const controller = createSidebarController({
 			ctx: { mode: "tui", ui: { custom } } as never,
 			getSnapshot: snapshot,
-			getConfig: () => DEFAULT_CONFIG,
 			shouldAnimate: () => running,
 			animationIntervalMs: 10,
 		});
@@ -1721,7 +1673,6 @@ describe("sidebar component and overlay", () => {
 		const controller = createSidebarController({
 			ctx: { mode: "tui", ui: { custom } } as never,
 			getSnapshot: snapshot,
-			getConfig: () => DEFAULT_CONFIG,
 			shouldAnimate: () => true,
 			animationIntervalMs: 10,
 		});
@@ -1763,71 +1714,6 @@ describe("sidebar component and overlay", () => {
 		expect(requestRender).not.toHaveBeenCalled();
 	});
 
-	it("enters Resize mode through the composed sidebar controller", () => {
-		let input: ((data: string) => unknown) | undefined;
-		const tui = fakeTui();
-		const custom = vi.fn((factory, customOptions) => {
-			factory(tui as never, theme as never, {} as never, vi.fn());
-			customOptions.onHandle?.({ hide: vi.fn() });
-			return new Promise(() => undefined);
-		});
-		const controller = createSidebarController({
-			ctx: {
-				mode: "tui",
-				ui: {
-					custom,
-					onTerminalInput: vi.fn((handler) => {
-						input = handler;
-						return vi.fn();
-					}),
-				},
-			} as never,
-			getSnapshot: snapshot,
-			getConfig: () => DEFAULT_CONFIG,
-		});
-
-		controller.show();
-		expect(controller.beginResize()).toBe(true);
-		expect(controller.isResizing()).toBe(true);
-		expect(controller.getWidth()).toBe(DEFAULT_SIDEBAR_WIDTH);
-		expect(input).toBeTypeOf("function");
-	});
-
-	it("cleans composed Resize state and restores full-width rendering on hide", () => {
-		let input: ((data: string) => unknown) | undefined;
-		const tui = fakeTui();
-		const custom = vi.fn((factory, customOptions) => {
-			factory(tui as never, theme as never, {} as never, vi.fn());
-			customOptions.onHandle?.({ hide: vi.fn() });
-			return new Promise(() => undefined);
-		});
-		const controller = createSidebarController({
-			ctx: {
-				mode: "tui",
-				ui: {
-					custom,
-					onTerminalInput: vi.fn((handler) => {
-						input = handler;
-						return vi.fn();
-					}),
-				},
-			} as never,
-			getSnapshot: snapshot,
-			getConfig: () => DEFAULT_CONFIG,
-		});
-
-		controller.show();
-		expect(controller.beginResize()).toBe(true);
-		input?.("\u001b[D");
-		expect(controller.getWidth()).toBe(DEFAULT_SIDEBAR_WIDTH + 1);
-		expect(tui.render(120)).toEqual(["main:120"]);
-
-		controller.hide();
-
-		expect(controller.isResizing()).toBe(false);
-		expect(tui.render(120)).toEqual(["main:120"]);
-	});
-
 	it("continues overlay cleanup when the external TUI render request throws", async () => {
 		vi.useFakeTimers();
 		const renderError = new Error("request render failed");
@@ -1846,7 +1732,6 @@ describe("sidebar component and overlay", () => {
 		const controller = createSidebarController({
 			ctx: { mode: "tui", ui: { custom } } as never,
 			getSnapshot: snapshot,
-			getConfig: () => DEFAULT_CONFIG,
 			shouldAnimate: () => true,
 			animationIntervalMs: 10,
 			onError,
@@ -1861,7 +1746,6 @@ describe("sidebar component and overlay", () => {
 		await flushOverlay();
 
 		expect(controller.isVisible()).toBe(false);
-		expect(controller.isResizing()).toBe(false);
 		expect(tui.render(120)).toEqual(["main:120"]);
 		expect(vi.getTimerCount()).toBe(0);
 		expect(onError).toHaveBeenCalledWith(renderError);
@@ -1886,7 +1770,6 @@ describe("sidebar component and overlay", () => {
 		const controller = createSidebarController({
 			ctx: { mode: "tui", ui: { custom } } as never,
 			getSnapshot: snapshot,
-			getConfig: () => DEFAULT_CONFIG,
 		});
 
 		controller.show();
@@ -1924,7 +1807,6 @@ describe("sidebar component and overlay", () => {
 		const controller = createSidebarController({
 			ctx: { mode: "tui", ui: { custom } } as never,
 			getSnapshot: snapshot,
-			getConfig: () => DEFAULT_CONFIG,
 			shouldAnimate: () => true,
 			animationIntervalMs: 10,
 			onError,
@@ -1953,7 +1835,6 @@ describe("sidebar component and overlay", () => {
 		const controller = createSidebarController({
 			ctx: { mode: "rpc", ui: { custom } } as never,
 			getSnapshot: snapshot,
-			getConfig: () => DEFAULT_CONFIG,
 			onError,
 		});
 		controller.show();

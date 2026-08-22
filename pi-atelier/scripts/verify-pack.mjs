@@ -15,13 +15,23 @@ const required = [
 	"src/palette.ts",
 	"src/run-activity.ts",
 	"src/sidebar-panels.ts",
+	"src/sidebar.ts",
+	"src/split-pane.ts",
 	"src/plannotator.ts",
 	"CHANGELOG.md",
 	"FORK.md",
 	"README.md",
 	"LICENSE",
 ];
-const forbidden = ["node_modules", "tests/", "docs/", ".git/", ".pi-subagents", "demo.mp4"];
+const forbidden = [
+	"node_modules",
+	"tests/",
+	"docs/",
+	".git/",
+	".pi-subagents",
+	"demo.mp4",
+	"src/overlay-lifecycle.ts",
+];
 for (const path of required) {
 	if (!names.includes(path)) throw new Error(`Missing package file: ${path}`);
 }
