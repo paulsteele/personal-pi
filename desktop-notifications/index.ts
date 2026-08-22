@@ -162,19 +162,6 @@ async function isFocused(target: NativeTarget): Promise<boolean> {
 	return String(active.address).toLowerCase() === target.id.toLowerCase();
 }
 
-async function playLinuxSound(): Promise<void> {
-	let result = await exec("canberra-gtk-play", ["-i", "complete", "-d", "pi-desktop-notify"], 3000);
-	if (result.code === 0) return;
-	for (const file of [
-		"/usr/share/sounds/freedesktop/stereo/complete.oga",
-		"/usr/share/sounds/freedesktop/stereo/message.oga",
-	]) {
-		result = await exec("paplay", [file], 3000);
-		if (result.code === 0) return;
-	}
-	throw new Error("install canberra-gtk-play or paplay for notification sounds");
-}
-
 async function clearNotification(runtime: Runtime): Promise<void> {
 	const target = runtime.target;
 	if (!target) return;
@@ -229,7 +216,6 @@ async function sendDunst(runtime: Runtime, target: Extract<NativeTarget, { platf
 		if (runtime.dunst === child) runtime.dunst = undefined;
 	});
 	child.on("error", (error) => warnOnce(runtime, error.message));
-	await playLinuxSound();
 }
 
 async function sendNotification(runtime: Runtime, subtitle: string, body: string, generation: number): Promise<void> {

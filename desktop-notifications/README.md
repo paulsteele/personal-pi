@@ -46,14 +46,11 @@ Required:
 - Alacritty under Hyprland
 - `hyprctl`
 - dunst with `dunstify`
-- one sound player:
-  - preferred: `canberra-gtk-play` (often packaged as `libcanberra`/`libcanberra-gtk3`)
-  - fallback: `paplay` plus the freedesktop sound theme
 
 The extension briefly marks the terminal title and resolves the exact client from `hyprctl clients -j`. It listens to Hyprland socket2 `activewindowv2` events and clears the notification when that address regains focus. Notification clicks dispatch:
 
 ```sh
-hyprctl dispatch focuswindow address:0x...
+hyprctl dispatch 'hl.dsp.focus({ window = "address:0x..." })'
 ```
 
 Only validated Hyprland addresses reach the helper. Notification text is never evaluated by a shell.
@@ -72,7 +69,7 @@ Normal behavior:
 - Completion title: `Pi · <project>` / `Ready for input`
 - Permission title: `Pi · <project>` / `Permission needed: <surface>`
 - Body: a normalized, Unicode-safe, bounded excerpt
-- Every emitted notification plays a sound.
+- Hyprland notifications are silent. macOS sound behavior follows the Hammerspoon notification settings.
 
 ## Troubleshooting
 
@@ -103,15 +100,6 @@ dunstify --action='default,Open terminal' --wait 'Pi test' 'Click me'
 ```
 
 Also ensure dunst is configured so a click invokes the default action.
-
-### No Linux sound
-
-Test one of:
-
-```sh
-canberra-gtk-play -i complete -d pi-desktop-notify
-paplay /usr/share/sounds/freedesktop/stereo/complete.oga
-```
 
 ### Unsupported environment
 

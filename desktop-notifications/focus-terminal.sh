@@ -12,4 +12,6 @@ if ! printf '%s' "$address" | grep -Eq '^0x[0-9a-fA-F]+$'; then
   exit 2
 fi
 
-exec hyprctl dispatch focuswindow "address:$address"
+# Hyprland's Lua configuration API requires a dispatcher expression rather
+# than the legacy `focuswindow address:...` dispatcher syntax.
+exec hyprctl dispatch "hl.dsp.focus({ window = \"address:$address\" })"
