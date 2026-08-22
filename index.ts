@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import claudeSkills from "./claude-skills/index.ts";
 import copyableCodeBlocks from "./code-blocks/index.ts";
 import desktopNotifications from "./desktop-notifications/index.ts";
-import plannotatorSidebar from "./plannotator-sidebar/index.ts";
+import atelier from "./pi-atelier/extensions/index.ts";
 
 /**
  * Entry point for personal Pi extensions.
@@ -14,5 +14,5 @@ export default function localExtensions(pi: ExtensionAPI): void {
 	claudeSkills(pi);
 	copyableCodeBlocks(pi);
 	desktopNotifications(pi);
-	plannotatorSidebar(pi);
+	atelier(pi);
 }

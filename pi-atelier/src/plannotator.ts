@@ -1,30 +1,13 @@
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, extname, relative, resolve } from "node:path";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { SidebarPanelContribution, SidebarPanelRow } from "./sidebar-panels.js";
 
-export const ATELIER_PANEL_CHANNEL = "pi-atelier:sidebar-panels";
-export const ATELIER_PANEL_VERSION = 1;
-export const PANEL_ID = "plannotator:progress";
-export const PANEL_SOURCE = "plannotator-sidebar";
-
+export const PLANNOTATOR_PANEL_ID = "plannotator:progress" as const;
 const MAX_ROWS = 24;
 const MAX_ROW_CHARS = 160;
 const DONE_MARKER = /\[DONE:(\d+)\]/gi;
 const CHECKBOX = /^[-*]\s*\[([ xX])\]\s+(.+)$/gm;
-
-export type PanelRole =
-	| "primary"
-	| "accent"
-	| "muted"
-	| "dim"
-	| "ready"
-	| "working"
-	| "warning"
-	| "error";
-
-export interface PanelRow {
-	text: string;
-	role?: PanelRole;
-}
 
 export interface ProgressItem {
 	step: number;
@@ -32,12 +15,15 @@ export interface ProgressItem {
 	completed: boolean;
 }
 
-export interface ProgressSnapshot {
-	planPath: string;
-	items: ProgressItem[];
-	completed: number;
-	total: number;
-}
+export type PlannotatorSnapshot =
+	| { phase: "planning"; planPath?: string }
+	| {
+			phase: "executing";
+			planPath: string;
+			items: ProgressItem[];
+			completed: number;
+			total: number;
+	  };
 
 export interface SessionEntryLike {
 	type?: unknown;
@@ -83,6 +69,19 @@ export function resolvePlanPath(cwd: string, submittedPath: string): string | un
 	return candidate;
 }
 
+export function validateReadablePlanPath(cwd: string, submittedPath: unknown): string | undefined {
+	if (typeof submittedPath !== "string" || !submittedPath.trim()) return undefined;
+	const candidate = resolvePlanPath(cwd, submittedPath.trim());
+	if (!candidate) return undefined;
+	try {
+		if (!statSync(candidate).isFile()) return undefined;
+		readFileSync(candidate, "utf8");
+		return submittedPath.trim();
+	} catch {
+		return undefined;
+	}
+}
+
 export function parseChecklist(markdown: string): ProgressItem[] {
 	const items: ProgressItem[] = [];
 	for (const match of markdown.matchAll(CHECKBOX)) {
@@ -110,17 +109,24 @@ export function applyDoneMarkers(text: string, items: ProgressItem[]): void {
 	}
 }
 
-/** Reconstruct the same active-plan view Plannotator rebuilds on resume/tree changes. */
-export function reconstructProgress(
+/** Reconstruct Plannotator's active phase from the current branch only. */
+export function reconstructPlannotator(
 	cwd: string,
 	entries: readonly SessionEntryLike[],
+	transientPlanPath?: string,
 	readPlan: (path: string) => string = (path) => readFileSync(path, "utf8"),
-): ProgressSnapshot | undefined {
+): PlannotatorSnapshot | undefined {
 	let state: PlannotatorState | undefined;
 	for (const entry of entries) {
 		if (entry.type === "custom" && entry.customType === "plannotator") {
 			state = record(entry.data) as PlannotatorState | undefined;
 		}
+	}
+	if (state?.phase === "planning") {
+		const submitted =
+			typeof state.lastSubmittedPath === "string" ? state.lastSubmittedPath : transientPlanPath;
+		const planPath = submitted ? validateReadablePlanPath(cwd, submitted) : undefined;
+		return { phase: "planning", ...(planPath ? { planPath } : {}) };
 	}
 	if (state?.phase !== "executing" || typeof state.lastSubmittedPath !== "string") return undefined;
 
@@ -147,18 +153,41 @@ export function reconstructProgress(
 		if (entry?.type === "message") applyDoneMarkers(assistantText(entry.message), items);
 	}
 	const completed = items.filter((item) => item.completed).length;
-	return { planPath: state.lastSubmittedPath, items, completed, total: items.length };
+	return {
+		phase: "executing",
+		planPath: state.lastSubmittedPath,
+		items,
+		completed,
+		total: items.length,
+	};
 }
 
 function bounded(value: string, limit = MAX_ROW_CHARS): string {
-	const clean = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim();
+	const clean = value
+		.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
 	const points = Array.from(clean);
 	return points.length <= limit ? clean : `${points.slice(0, limit - 1).join("")}…`;
 }
 
-export function snapshotRows(snapshot: ProgressSnapshot): PanelRow[] {
-	const rows: PanelRow[] = [
-		{ text: `${snapshot.completed}/${snapshot.total} complete`, role: snapshot.completed === snapshot.total ? "ready" : "accent" },
+export function plannotatorPanel(snapshot: PlannotatorSnapshot): SidebarPanelContribution {
+	if (snapshot.phase === "planning") {
+		return {
+			id: PLANNOTATOR_PANEL_ID,
+			title: "Plannotator",
+			role: "warning",
+			rows: [
+				{ text: "⏸ Planning", role: "warning" },
+				...(snapshot.planPath ? [{ text: bounded(snapshot.planPath), role: "muted" as const }] : []),
+			],
+		};
+	}
+	const rows: SidebarPanelRow[] = [
+		{
+			text: `${snapshot.completed}/${snapshot.total} complete`,
+			role: snapshot.completed === snapshot.total ? "ready" : "accent",
+		},
 	];
 	const available = MAX_ROWS - rows.length;
 	const visible = snapshot.items.slice(0, available);
@@ -174,17 +203,61 @@ export function snapshotRows(snapshot: ProgressSnapshot): PanelRow[] {
 			role: "muted",
 		};
 	}
-	return rows;
+	return { id: PLANNOTATOR_PANEL_ID, title: "Plan progress", rows, role: "accent" };
 }
 
-export function isAtelierDiscovery(value: unknown): value is { requestId: string } {
-	const event = record(value);
-	return (
-		event?.version === ATELIER_PANEL_VERSION &&
-		event.type === "discover" &&
-		typeof event.requestId === "string" &&
-		event.requestId.length > 0 &&
-		event.requestId.length <= 256 &&
-		!/[\u0000-\u001f\u007f-\u009f]/.test(event.requestId)
-	);
+export interface PlannotatorIntegration {
+	getSnapshot(ctx: ExtensionContext): PlannotatorSnapshot | undefined;
+	onToolStart(event: { toolName: string; args?: unknown }, ctx: ExtensionContext): void;
+	onToolEnd(event: { toolName: string }, ctx: ExtensionContext): void;
+	scheduleRefresh(ctx: ExtensionContext, requestRender: () => void): void;
+	dispose(): void;
+}
+
+export function createPlannotatorIntegration(): PlannotatorIntegration {
+	let transientPlanPath: string | undefined;
+	let generation = 0;
+	const timers = new Set<ReturnType<typeof setTimeout>>();
+
+	const clearWidget = (ctx: ExtensionContext): void => {
+		try {
+			ctx.ui.setWidget("plannotator-progress", undefined);
+		} catch {
+			// Session replacement can invalidate a captured context between events.
+		}
+	};
+
+	return {
+		getSnapshot: (ctx) => reconstructPlannotator(ctx.cwd, ctx.sessionManager.getBranch(), transientPlanPath),
+		onToolStart(event, ctx) {
+			if (event.toolName !== "plannotator_submit_plan") return;
+			const args = record(event.args);
+			transientPlanPath = validateReadablePlanPath(ctx.cwd, args?.filePath);
+		},
+		onToolEnd(event, ctx) {
+			if (event.toolName === "plannotator_submit_plan") transientPlanPath = undefined;
+			clearWidget(ctx);
+		},
+		scheduleRefresh(ctx, requestRender) {
+			const expected = generation;
+			const timer = setTimeout(() => {
+				timers.delete(timer);
+				if (expected !== generation) return;
+				clearWidget(ctx);
+				try {
+					requestRender();
+				} catch {
+					// Session replacement can retire the host between scheduling and refresh.
+				}
+			}, 0);
+			timer.unref?.();
+			timers.add(timer);
+		},
+		dispose() {
+			generation += 1;
+			transientPlanPath = undefined;
+			for (const timer of timers) clearTimeout(timer);
+			timers.clear();
+		},
+	};
 }
