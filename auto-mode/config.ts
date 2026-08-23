@@ -9,7 +9,7 @@
  * A project override at `<cwd>/.pi/extensions/auto-mode/config.json` is
  * merged over it, and only when the caller reports the project as trusted —
  * an untrusted repository must not be able to point the classifier at a
- * model it controls, or widen the trusted environment.
+ * model it controls or change future manual-mode policy hints.
  */
 
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -17,21 +17,18 @@ import { join } from "node:path";
 
 export const EXTENSION_ID = "auto-mode";
 
-/** The trusted environment auto mode arbitrates against. */
+/**
+ * Reserved manual-mode policy hints.
+ *
+ * Auto mode intentionally ignores these: its classifier judges the exact
+ * permission-system evidence case by case, and an unlisted path is not unsafe
+ * merely because it is unlisted. These fields are retained for compatibility
+ * and for a future manual-mode policy layer, where deterministic trusted roots
+ * can reduce prompts without influencing model judgment.
+ */
 export interface AutoModeEnvironment {
-	/**
-	 * Directory roots outside the working directory that auto mode may approve
-	 * while armed.
-	 *
-	 * Declared here rather than in the permission-system config on purpose: the
-	 * operator's manual-mode policy must stay exactly as written, so that
-	 * turning auto mode off is a true restore with nothing to reconcile.
-	 * Secret-bearing paths are refused even under a listed root.
-	 */
 	readonly trustedRoots: readonly string[];
-	/** Git remotes (or substrings) considered in-bounds for pushes. */
 	readonly trustedRemotes: readonly string[];
-	/** Network hosts considered in-bounds for fetches/uploads. */
 	readonly trustedDomains: readonly string[];
 }
 

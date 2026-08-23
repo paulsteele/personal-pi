@@ -44,7 +44,7 @@ mechanism lives here.
      "timeoutMs": 5000,
      "enabledByDefault": false,
      "contextUserTurns": 3,
-     "environment": { "trustedRemotes": [], "trustedDomains": [] }
+     "environment": { "trustedRoots": [], "trustedRemotes": [], "trustedDomains": [] }
    }
    ```
 
@@ -57,7 +57,7 @@ Auto Mode panel.
 
 A project override at `<cwd>/.pi/extensions/auto-mode/config.json` is merged over the global file,
 and only when Pi reports the project as trusted — an untrusted repository must not be able to point
-the classifier at a model it controls or widen the trusted environment.
+the classifier at a model it controls or change future manual-mode policy hints.
 
 ## Configuration
 
@@ -69,7 +69,7 @@ the classifier at a model it controls or widen the trusted environment.
 | `enabledByDefault` | `boolean`  | `false` | Whether a fresh session starts armed.                              |
 | `maxDecisionLog`   | `integer`  | `50`    | Decisions retained for the sidebar panel. 1–500.                   |
 | `contextUserTurns` | `integer`  | `3`     | Recent user messages given to the classifier. 0–20.                |
-| `environment`      | `object`   | empty   | `trustedRemotes` / `trustedDomains` treated as in-bounds.          |
+| `environment`      | `object`   | empty   | Reserved deterministic hints for future manual-mode policy; ignored by the auto classifier. |
 
 Without `provider` and `model`, the link defers everything — a safe no-op.
 
@@ -77,8 +77,9 @@ Without `provider` and `model`, the link defers everything — a safe no-op.
 
 The ask's gate-authoritative facts (surface, tool, value, matched rule, and — importantly —
 `executedUnit` and `commandContext`, which reveal a command hidden inside a wrapper or a
-substitution), plus the working directory, the repo's configured git remotes, your trusted
-environment, and the last few **user** messages.
+substitution), plus the working directory, the repo's configured git remotes, and the last few
+**user** messages. External paths are evaluated by operation, sensitivity, scope, and consequence;
+they are not denied merely for being outside the working directory.
 
 Assistant output is deliberately excluded. Repository content and command output are
 attacker-influencable, so feeding the agent's own text back into the safety classifier would let

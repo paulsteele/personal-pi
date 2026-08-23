@@ -21,13 +21,7 @@
 
 import { CONFIG_DIR_NAME, getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { classify, type ModelCaller, type ReviewContext, type ReviewFacts } from "./classifier.ts";
-import {
-	bashPathTokens,
-	describeEnvironmentDecision,
-	evaluatePaths,
-	toolCallPaths,
-	type EnvironmentDecision,
-} from "./environment.ts";
+
 import { loadAutoModeConfig, saveAutoModeModel, type AutoModeConfig, type ConfigLoadResult } from "./config.ts";
 import {
 	applyCap,
@@ -76,22 +70,8 @@ interface PermissionsServiceLike {
 	): () => void;
 }
 
-/** One environment arbitration, retained so the gate phase can reuse it. */
-interface EnvironmentVerdict {
-	decision: EnvironmentDecision;
-	paths: readonly string[];
-}
-
 interface Runtime {
 	ctx: ExtensionContext;
-	/**
-	 * Environment arbitration by tool-call id.
-	 *
-	 * Written at `tool_call` (before the gates run) and read by the chain link
-	 * when the `external_directory` gate fires for the same call, so the two
-	 * phases cannot disagree about what the call reaches.
-	 */
-	environmentVerdicts: Map<string, EnvironmentVerdict>;
 	config: AutoModeConfig;
 	load: ConfigLoadResult;
 	enabled: boolean;
@@ -425,7 +405,6 @@ export default function autoMode(pi: ExtensionAPI): void {
 			load,
 			enabled: load.config.enabledByDefault && load.usable,
 			cache: new VerdictCache(),
-			environmentVerdicts: new Map(),
 			log: new DecisionLog(load.config.maxDecisionLog),
 			panel: publishPanel(pi),
 			gitRemotes: [],
@@ -453,54 +432,6 @@ export default function autoMode(pi: ExtensionAPI): void {
 	// A verdict is scoped to the turn that produced it.
 	pi.on("turn_start", () => {
 		runtime?.cache.clear();
-		runtime?.environmentVerdicts.clear();
-	});
-
-	/**
-	 * The environment arbiter.
-	 *
-	 * Runs before the permission gates, which is the only place a plugin can
-	 * decide `external_directory` reach: by the time the gate fires, the chain's
-	 * bounded-delegation checkpoint has already made an `allow` impossible.
-	 *
-	 * This handler is **inert unless auto mode is armed**. With auto mode off it
-	 * inspects nothing and blocks nothing, so the operator's configured rules
-	 * apply exactly as written — which is what makes the toggle a true on/off
-	 * rather than a persistent change in behavior.
-	 *
-	 * It only ever *blocks*. An in-bounds verdict is recorded and execution
-	 * continues to the normal gates, so auto mode can never widen access beyond
-	 * what the operator's own policy already permits for in-environment paths.
-	 */
-	pi.on("tool_call", (event, _ctx) => {
-		if (!runtime?.enabled) return undefined;
-
-		const toolName = typeof event.toolName === "string" ? event.toolName : "";
-		const policy = { cwd: runtime.ctx.cwd, trustedRoots: runtime.config.environment.trustedRoots };
-
-		const paths =
-			toolName === "bash"
-				? bashPathTokens(
-						typeof (event.input as { command?: unknown })?.command === "string"
-							? ((event.input as { command: string }).command)
-							: "",
-						policy.cwd,
-					)
-				: toolCallPaths(toolName, event.input);
-
-		const decision = evaluatePaths(paths, policy);
-		if (typeof event.toolCallId === "string") {
-			runtime.environmentVerdicts.set(event.toolCallId, { decision, paths });
-		}
-
-		// This event is now observation-only. The real permission-system gate has
-		// exact tree-sitter parsing, cd folding, wrapper analysis, and canonical
-		// path evidence; the classifier consumes that complete PromptPayload and
-		// makes the final allow/deny/defer decision through the patched chain.
-		// Never block here based on the coarse screen — doing so caused legitimate
-		// targets such as /dev/null to be rejected before the real parser ran.
-		void decision;
-		return undefined;
 	});
 
 	pi.on("session_shutdown", () => {
