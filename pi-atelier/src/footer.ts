@@ -29,6 +29,7 @@ const WORKING_ANIMATION_INTERVAL_MS = 400;
 
 type FooterZone = "left" | "right";
 type FooterItemId =
+	| "auto"
 	| "plannotator"
 	| "status"
 	| "activity"
@@ -133,6 +134,22 @@ function buildItems(
 	const add = (item: FooterItem): void => {
 		if (!items.some((candidate) => candidate.id === item.id)) items.push(item);
 	};
+
+	// Auto mode leads the rail: when the classifier is deciding on the
+	// operator's behalf, that is the single most important thing the footer can
+	// say. Required and never dropped, so width pressure cannot hide it.
+	const autoMode = state.autoModeStatus ? sanitize(stripTerminalSequences(state.autoModeStatus)) : "";
+	if (autoMode) {
+		const rendered = palette.paint(autoMode.includes("⏵⏵") ? "ready" : "muted", autoMode);
+		add({
+			id: "auto",
+			zone: "left",
+			full: rendered,
+			compact: rendered,
+			dropRank: Number.POSITIVE_INFINITY,
+			required: true,
+		});
+	}
 
 	const plannotator = state.plannotatorStatus
 		? sanitize(stripTerminalSequences(state.plannotatorStatus))

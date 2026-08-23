@@ -58,4 +58,10 @@ export interface AtelierState {
 export interface FooterState extends AtelierState {
 	performance?: ResponsePerformance;
 	plannotatorStatus?: string;
+	/**
+	 * Compact auto-mode label (e.g. `⏵⏵ auto 12/1`), published by the local
+	 * auto-mode extension. Present only while auto mode is armed, so a manual
+	 * session's rail is unchanged.
+	 */
+	autoModeStatus?: string;
 }

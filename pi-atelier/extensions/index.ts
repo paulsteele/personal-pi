@@ -263,10 +263,13 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 					const branch = footerData.getGitBranch();
 					const statuses = footerData.getExtensionStatuses();
 					const plannotatorStatus = statuses.get("plannotator");
+					const autoModeStatus = statuses.get("auto-mode");
+					// Both are promoted to dedicated required items, so filter them out of
+					// the ordinary Statuses segment to avoid rendering them twice.
 					updateExtensionStatuses(
 						currentSession,
 						Array.from(statuses.entries())
-							.filter(([key]) => key !== "plannotator")
+							.filter(([key]) => key !== "plannotator" && key !== "auto-mode")
 							.map(([, value]) => value),
 					);
 					const performance = currentSession.runActivity.getSnapshot().performance;
@@ -275,6 +278,7 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 						...(branch ? { branch } : {}),
 						...(performance ? { performance } : {}),
 						...(plannotatorStatus ? { plannotatorStatus } : {}),
+						...(autoModeStatus ? { autoModeStatus } : {}),
 						extensionStatuses: currentSession.extensionStatuses,
 					};
 				},

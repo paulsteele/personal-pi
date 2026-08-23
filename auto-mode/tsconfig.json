@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "typeRoots": ["../pi-atelier/node_modules/@types"],
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@earendil-works/*": ["../pi-atelier/node_modules/@earendil-works/*", "../../../npm/node_modules/@earendil-works/*"],
+      "@gotgenes/pi-permission-system": ["../../../npm/node_modules/@gotgenes/pi-permission-system/dist/public.d.ts"],
+      "typebox": ["../../../npm/node_modules/typebox/build/index.d.mts"],
+      "bun:test": ["./types/bun-test.d.ts"]
+    }
+  },
+  "include": ["*.ts", "types/*.d.ts"]
+}

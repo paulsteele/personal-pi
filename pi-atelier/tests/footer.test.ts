@@ -507,6 +507,53 @@ describe("footer", () => {
 		expect(renderFooterLine(planning, plainTheme, 20)).toContain("⏸ plan");
 	});
 
+	it("keeps auto-mode status under narrow width pressure", () => {
+		const auto = { ...state, autoModeStatus: "⏵⏵ auto 12/1" };
+		expect(renderFooterLine(auto, plainTheme, 160)).toContain("⏵⏵ auto 12/1");
+		// Required and infinite drop rank: width pressure must never hide the fact
+		// that a classifier is approving actions on the operator's behalf.
+		expect(renderFooterLine(auto, plainTheme, 20)).toContain("⏵⏵ auto");
+	});
+
+	it("omits the auto-mode item when auto mode is not armed", () => {
+		// Assert on the mode glyphs rather than the bare word "auto", which also
+		// appears in the context segment's auto-compact indicator.
+		const line = renderFooterLine(state, plainTheme, 160);
+		expect(line).not.toContain("⏵⏵");
+		expect(line).not.toContain("⏸ manual");
+	});
+
+	it("renders auto-mode and Plannotator together without dropping either", () => {
+		const both = { ...state, autoModeStatus: "⏵⏵ auto", plannotatorStatus: "⏸ plan" };
+		const line = renderFooterLine(both, plainTheme, 160);
+		expect(line).toContain("⏵⏵ auto");
+		expect(line).toContain("⏸ plan");
+	});
+
+	it("suppresses the auto-mode footer item while the sidebar presents its panel", () => {
+		// The panel and the footer item are two renders of the same state, so
+		// exactly one must be visible at a time.
+		let presented = true;
+		const component = createFooterComponent({
+			getState: () => ({ ...state, autoModeStatus: "⏵⏵ auto 12/1" }),
+			isSidebarPresented: () => presented,
+			requestRender: () => {},
+			onBranchChange: () => () => {},
+			theme: plainTheme,
+		});
+		expect(component.render(160)).toEqual([]);
+		presented = false;
+		expect(stripAnsi(component.render(160).join(""))).toContain("⏵⏵ auto 12/1");
+		component.dispose();
+	});
+
+	it("sanitizes a hostile auto-mode status rather than emitting control sequences", () => {
+		const hostile = { ...state, autoModeStatus: "\u001b[31mauto\u001b[0m\nsecond line" };
+		const line = renderFooterLine(hostile, plainTheme, 160);
+		expect(line).not.toContain("\n");
+		expect(stripAnsi(line)).toContain("auto second line");
+	});
+
 	it("disposes its branch subscription exactly once", () => {
 		const unsubscribe = vi.fn();
 		let callback: (() => void) | undefined;
