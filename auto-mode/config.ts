@@ -207,18 +207,14 @@ export function applyConfigLayer(
 	};
 }
 
-/**
- * Persist a classifier selection to global auto-mode config without dropping
- * unknown/future fields. Uses an atomic rename so a crash cannot leave a
- * partially written policy file.
- */
-export function saveAutoModeModel(agentDir: string, provider: string, model: string): void {
+/** Update global auto-mode config without dropping unknown/future fields. */
+function updateGlobalConfig(agentDir: string, fields: Record<string, unknown>): void {
 	const path = globalConfigPath(agentDir);
 	const existing = readConfigFile(path);
 	if (existing.issue && Object.keys(existing.raw).length === 0) {
 		throw new Error(existing.issue);
 	}
-	const next = { ...existing.raw, provider, model };
+	const next = { ...existing.raw, ...fields };
 	const temp = `${path}.tmp`;
 	try {
 		mkdirSync(join(agentDir, "extensions", EXTENSION_ID), { recursive: true });
@@ -232,6 +228,16 @@ export function saveAutoModeModel(agentDir: string, provider: string, model: str
 		}
 		throw error;
 	}
+}
+
+/** Persist a classifier selection to global auto-mode config atomically. */
+export function saveAutoModeModel(agentDir: string, provider: string, model: string): void {
+	updateGlobalConfig(agentDir, { provider, model });
+}
+
+/** Persist the operator's mode choice for subsequent sessions and reloads. */
+export function saveAutoModeEnabled(agentDir: string, enabled: boolean): void {
+	updateGlobalConfig(agentDir, { enabledByDefault: enabled });
 }
 
 export interface LoadConfigOptions {
@@ -255,11 +261,17 @@ export function loadAutoModeConfig(options: LoadConfigOptions): ConfigLoadResult
 	const global = readConfigFile(globalConfigPath(options.agentDir));
 	if (global.issue) issues.push(global.issue);
 	config = applyConfigLayer(config, global.raw, issues);
+	const persistedEnabled = config.enabledByDefault;
 
 	if (options.projectTrusted && options.cwd) {
 		const project = readConfigFile(projectConfigPath(options.cwd, options.configDirName));
 		if (project.issue) issues.push(project.issue);
-		config = applyConfigLayer(config, project.raw, issues);
+		config = {
+			...applyConfigLayer(config, project.raw, issues),
+			// Mode is an operator-level persisted toggle. A repository may tune its
+			// classifier, but it cannot silently arm or disarm auto mode.
+			enabledByDefault: persistedEnabled,
+		};
 	}
 
 	const usable = config.provider !== "" && config.model !== "";

@@ -17,6 +17,9 @@ const fixedDarkRoles = [
 	["ready", rgb(110, 168, 254)],
 	["input", rgb(110, 168, 254)],
 	["context", rgb(110, 168, 254)],
+	["permissionPolicy", rgb(110, 168, 254)],
+	["permissionAuto", rgb(177, 140, 255)],
+	["permissionHuman", rgb(125, 211, 252)],
 	["output", rgb(177, 140, 255)],
 	["menu", rgb(177, 140, 255)],
 	["cache", rgb(125, 211, 252)],
@@ -50,7 +53,19 @@ describe("Fixed Dark Midnight Spectrum", () => {
 
 	it("uses neutral and semantic roles without RGB when color is disabled", () => {
 		const palette = createPalette(themed("light"), false);
-		for (const role of ["ready", "working", "input", "output", "cache", "cost", "context", "menu"] as const) {
+		for (const role of [
+			"ready",
+			"working",
+			"input",
+			"output",
+			"cache",
+			"cost",
+			"context",
+			"permissionPolicy",
+			"permissionAuto",
+			"permissionHuman",
+			"menu",
+		] as const) {
 			expect(palette.paint(role, "X")).toBe("<text>X</text>");
 		}
 		expect(palette.paint("accent", "X")).toBe("<accent>X</accent>");

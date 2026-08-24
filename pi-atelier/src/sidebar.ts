@@ -4,6 +4,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type Component, type OverlayHandle, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ThemeLike } from "./footer.js";
 import { aggregateMetrics, formatTokens } from "./metrics.js";
+import { activityLabel } from "./activity.js";
 import { type AtelierPalette, createPalette, type PaletteRole } from "./palette.js";
 import {
 	EMPTY_RUN_ACTIVITY,
@@ -189,17 +190,9 @@ function agentRows(
 	palette: AtelierPalette,
 	theme: ThemeLike,
 ): string[] {
-	const activity = `${snapshot.activity.slice(0, 1).toUpperCase()}${snapshot.activity.slice(1)}`;
-	const workingLabel =
-		snapshot.activity === "working" && snapshot.workingLabel
-			? sanitize(snapshot.workingLabel).toLowerCase()
-			: "";
-	const activityText = workingLabel ? `${activity} · ${workingLabel}` : activity;
+	const activity = activityLabel(snapshot.activity);
 	const status = theme.bold(
-		palette.paint(
-			activityRole(snapshot.activity),
-			`${activitySymbol(snapshot.activity)} ${activityText || "—"}`,
-		),
+		palette.paint(activityRole(snapshot.activity), `${activitySymbol(snapshot.activity)} ${activity}`),
 	);
 	const model = valueRow(snapshot.modelId, palette, "primary");
 	const provider = snapshot.provider ? palette.paint("muted", display(snapshot.provider).toUpperCase()) : "";
@@ -581,77 +574,187 @@ function toolStatusLabel(tool: ToolActivity, now: number): string {
 	return `${tool.status} ${duration}`;
 }
 
-function toolActivityRow(
+// Nerd Fonts v3 semantic glyphs. Keep whitespace outside each glyph: many
+// terminal fonts use nearly the full cell and become hard to scan when joined.
+const PERMISSION_SOURCE_ICON: Record<PermissionActivity["source"], string> = {
+	policy: "󰒃", // nf-md-security
+	auto: "󰚩", // nf-md-robot
+	human: "󰀄", // nf-md-account
+	authorizer: "󰌆", // nf-md-key
+	system: "󰀦", // nf-md-alert_circle
+};
+
+function permissionSourceRole(source: PermissionActivity["source"]): PaletteRole {
+	if (source === "policy") return "permissionPolicy";
+	if (source === "auto") return "permissionAuto";
+	if (source === "human") return "permissionHuman";
+	return "muted";
+}
+
+function permissionStateRole(permission: PermissionActivity): PaletteRole {
+	if (permission.state === "deny") return "error";
+	if (permission.state === "unsure" || permission.state === "pending") return "warning";
+	return permissionSourceRole(permission.source);
+}
+
+function permissionOutcome(permission: PermissionActivity): string {
+	return permission.state === "allow" ? "✓" : permission.state === "deny" ? "✕" : "?";
+}
+
+function sourceOutcome(
+	source: PermissionActivity["source"],
+	outcome: string,
+	outcomeRole: PaletteRole,
+	palette: AtelierPalette,
+): string {
+	return `${palette.paint(permissionSourceRole(source), PERMISSION_SOURCE_ICON[source])} ${palette.paint(
+		outcomeRole,
+		outcome,
+	)}`;
+}
+
+/** Render provenance as spaced semantic glyphs rather than letter abbreviations. */
+function permissionBadge(permission: PermissionActivity, palette: AtelierPalette): string {
+	const final = sourceOutcome(
+		permission.source,
+		permissionOutcome(permission),
+		permissionStateRole(permission),
+		palette,
+	);
+	if (permission.source !== "human") return final;
+	const prior =
+		permission.prior === "auto-unsure"
+			? sourceOutcome("auto", "?", "warning", palette)
+			: permission.prior === "policy-ask"
+				? sourceOutcome("policy", "?", "warning", palette)
+				: "";
+	return prior ? `${prior} ${palette.paint("dim", "→")} ${final}` : final;
+}
+
+const SUPERSCRIPT_DIGITS: Record<string, string> = {
+	"0": "⁰",
+	"1": "¹",
+	"2": "²",
+	"3": "³",
+	"4": "⁴",
+	"5": "⁵",
+	"6": "⁶",
+	"7": "⁷",
+	"8": "⁸",
+	"9": "⁹",
+};
+
+function superscriptCount(count: number): string {
+	return String(count)
+		.split("")
+		.map((digit) => SUPERSCRIPT_DIGITS[digit] ?? digit)
+		.join("");
+}
+
+interface PermissionBadgeGroup {
+	permission: PermissionActivity;
+	count: number;
+}
+
+/** Collapse only routine allows; exceptional checks stay individually visible. */
+function groupPermissionBadges(permissions: readonly PermissionActivity[]): PermissionBadgeGroup[] {
+	const groups: PermissionBadgeGroup[] = [];
+	const routineAllowIndex = new Map<string, number>();
+	for (const permission of permissions) {
+		const routine = permission.state === "allow" && !permission.reason;
+		const key = routine ? `${permission.source}:${permission.state}:${permission.prior ?? ""}` : "";
+		const existingIndex = key ? routineAllowIndex.get(key) : undefined;
+		if (existingIndex !== undefined) {
+			const existing = groups[existingIndex];
+			if (existing) groups[existingIndex] = { ...existing, count: existing.count + 1 };
+			continue;
+		}
+		if (key) routineAllowIndex.set(key, groups.length);
+		groups.push({ permission, count: 1 });
+	}
+	return groups;
+}
+
+function renderPermissionBadge(group: PermissionBadgeGroup, palette: AtelierPalette): string {
+	const badge = permissionBadge(group.permission, palette);
+	return group.count > 1 ? `${badge}${palette.paint("dim", superscriptCount(group.count))}` : badge;
+}
+
+function packBadgeRows(badges: readonly string[], width: number, prefix = "  "): string[] {
+	if (width <= visibleWidth(prefix)) return [];
+	const rows: string[] = [];
+	let row = prefix;
+	for (const badge of badges) {
+		const separator = row === prefix ? "" : "  ";
+		if (visibleWidth(row) + visibleWidth(separator) + visibleWidth(badge) <= width) {
+			row += `${separator}${badge}`;
+			continue;
+		}
+		if (row !== prefix) rows.push(row);
+		row = `${prefix}${truncateToWidth(badge, Math.max(0, width - visibleWidth(prefix)), "")}`;
+	}
+	if (row !== prefix) rows.push(row);
+	return rows;
+}
+
+function toolActivityRows(
 	tool: ToolActivity,
 	contentWidth: number,
 	palette: AtelierPalette,
 	now: number,
-): string {
+): string[] {
 	const safeName = sanitize(tool.name) || "tool";
 	const safeSummary = sanitize(tool.summary);
 	const status = toolStatusLabel(tool, now);
-	const statusWidth = visibleWidth(status);
+	const statusWidth = Math.min(visibleWidth(status), Math.max(0, contentWidth));
 	const nameWidth = Math.min(Math.max(visibleWidth(safeName), 4), 10, Math.max(0, contentWidth));
-	const summaryWidth = Math.max(0, contentWidth - nameWidth - statusWidth - 2);
-	const statusText = truncateToWidth(status, Math.max(0, contentWidth - nameWidth - summaryWidth - 2), "");
-	const row = `${padToWidth(palette.paint("muted", safeName), nameWidth)} ${padToWidth(
+	const middleWidth = Math.max(0, contentWidth - nameWidth - statusWidth - 2);
+	const groups = groupPermissionBadges(tool.permissions ?? []);
+	const badges = groups.map((group) => renderPermissionBadge(group, palette));
+	const minimumSummaryWidth = Math.min(visibleWidth(safeSummary || "—"), 6);
+	const inline: string[] = [];
+	let inlineWidth = 0;
+	for (const badge of badges) {
+		const nextWidth = inlineWidth + (inline.length > 0 ? 2 : 0) + visibleWidth(badge);
+		if (nextWidth + 2 + minimumSummaryWidth > middleWidth) break;
+		inline.push(badge);
+		inlineWidth = nextWidth;
+	}
+
+	const inlineBadges = inline.join("  ");
+	const summaryWidth = Math.max(0, middleWidth - (inline.length > 0 ? inlineWidth + 2 : 0));
+	const summary = padToWidth(
 		palette.paint(safeSummary ? "primary" : "dim", safeSummary || "—"),
 		summaryWidth,
-	)} ${palette.paint(toolStatusRole(tool.status), statusText)}`;
-	return truncateToWidth(row, contentWidth, "");
+	);
+	const middle = inline.length > 0 ? `${summary}  ${inlineBadges}` : summary;
+	const statusText = truncateToWidth(status, statusWidth, "");
+	const row = `${padToWidth(palette.paint("muted", safeName), nameWidth)} ${middle} ${palette.paint(
+		toolStatusRole(tool.status),
+		statusText,
+	)}`;
+	const overflowRows = packBadgeRows(badges.slice(inline.length), contentWidth);
+	const reasonRows = (tool.permissions ?? [])
+		.filter(
+			(permission) =>
+				permission.reason &&
+				(permission.state === "deny" || permission.state === "unsure" || permission.source === "system"),
+		)
+		.map((permission) =>
+			palette.paint("dim", truncateToWidth(`  ${sanitize(permission.reason ?? "")}`, contentWidth, "…")),
+		);
+	return [truncateToWidth(row, contentWidth, ""), ...overflowRows, ...reasonRows];
 }
 
-function permissionLabel(permission: PermissionActivity): string {
-	const outcome = permission.state === "pending" ? "ask" : permission.state;
-	const prefix =
-		permission.prior === "auto-unsure"
-			? "auto unsure → "
-			: permission.prior === "policy-ask"
-				? "policy ask → "
-				: "";
-	return `${prefix}${permission.source} ${outcome}`;
-}
-
-/** A distinct compact badge for every source/outcome pair. */
-function permissionIcon(permission: PermissionActivity): string {
-	const suffix = permission.state === "allow" ? "✓" : permission.state === "deny" ? "✕" : "?";
-	const source =
-		permission.source === "policy"
-			? "P"
-			: permission.source === "auto"
-				? "A"
-				: permission.source === "human"
-					? "H"
-					: permission.source === "authorizer"
-						? "X"
-						: "!";
-	const final = `${source}${suffix}`;
-	if (permission.source !== "human") return final;
-	if (permission.prior === "auto-unsure") return `A?→${final}`;
-	if (permission.prior === "policy-ask") return `P?→${final}`;
-	return final;
-}
-
-function permissionRows(
+function standalonePermissionRows(
 	permission: PermissionActivity,
 	contentWidth: number,
 	palette: AtelierPalette,
-	standalone = false,
 ): string[] {
-	const label = permissionLabel(permission);
-	const role: PaletteRole =
-		permission.state === "deny"
-			? "error"
-			: permission.state === "unsure" || permission.state === "pending"
-				? "warning"
-				: "ready";
-	const icon = permissionIcon(permission);
+	const badge = permissionBadge(permission, palette);
 	const surface = sanitize(permission.surface) || "permission";
-	// A correlated row sits directly beneath the tool, so repeating its command
-	// or path spends the entire width before the useful outcome can be seen.
-	// Standalone skill/forwarded checks have no parent row and retain their value.
-	const subject = standalone ? `${surface} ${sanitize(permission.value)}`.trim() : surface;
-	const rows = [palette.paint(role, truncateToWidth(`↳ ${icon} ${label} · ${subject}`, contentWidth, "…"))];
+	const subject = `${surface} ${sanitize(permission.value)}`.trim();
+	const rows = [truncateToWidth(`↳ ${badge}  ${subject}`, contentWidth, "…")];
 	if (
 		permission.reason &&
 		(permission.state === "deny" || permission.state === "unsure" || permission.source === "system")
@@ -692,23 +795,13 @@ function activityRows(
 		.sort((left, right) => left.tool.startedAt - right.tool.startedAt || left.index - right.index)
 		.map(({ tool }) => ({
 			id: tool.id,
-			rows: [
-				toolActivityRow(tool, contentWidth, palette, now),
-				...(tool.permissions ?? []).flatMap((permission) =>
-					permissionRows(permission, contentWidth, palette),
-				),
-			],
+			rows: toolActivityRows(tool, contentWidth, palette, now),
 		}));
 	const recent = activity.recentTools
 		.filter((tool) => !activeIds.has(tool.id))
 		.map((tool) => ({
 			id: tool.id,
-			rows: [
-				toolActivityRow(tool, contentWidth, palette, now),
-				...(tool.permissions ?? []).flatMap((permission) =>
-					permissionRows(permission, contentWidth, palette),
-				),
-			],
+			rows: toolActivityRows(tool, contentWidth, palette, now),
 		}));
 	const aggregateText = aggregateActivityText(activity);
 	return {
@@ -779,7 +872,7 @@ function activitySidebarGroups(
 			name: `activityPermission:${permission.requestId}`,
 			panel: "ACTIVITY",
 			panelRole,
-			rows: permissionRows(permission, contentWidth, palette, true),
+			rows: standalonePermissionRows(permission, contentWidth, palette),
 		})),
 		{
 			name: "activityAggregate",

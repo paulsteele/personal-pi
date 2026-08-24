@@ -31,7 +31,6 @@ const cleanInspection = {
 
 function createRuntime(
 	execResult = { stdout: "", stderr: "", code: 0, killed: false },
-	random: () => number = Math.random,
 	inspectWorkspace = vi.fn().mockResolvedValue(cleanInspection),
 ) {
 	const requestRender = vi.fn();
@@ -46,7 +45,6 @@ function createRuntime(
 		pi: { exec } as never,
 		ctx: ctx as never,
 		autoCompact: true,
-		random,
 		requestRender,
 		inspectWorkspace,
 	});
@@ -72,7 +70,7 @@ describe("AtelierRuntime", () => {
 			snapshot: { ...cleanInspection.snapshot, trackedFiles: 2, linesAdded: 12, linesRemoved: 3 },
 		};
 		const inspectWorkspace = vi.fn().mockResolvedValue(changed);
-		const { runtime } = createRuntime(undefined, Math.random, inspectWorkspace);
+		const { runtime } = createRuntime(undefined, inspectWorkspace);
 
 		expect(runtime.getState()).toMatchObject({ workspacePulse: { status: "inspecting" } });
 		await runtime.flushWorkspacePulseRefresh();
@@ -92,7 +90,7 @@ describe("AtelierRuntime", () => {
 			...cleanInspection,
 			snapshot: { ...cleanInspection.snapshot, untrackedFiles: 2 },
 		};
-		const { runtime } = createRuntime(undefined, Math.random, vi.fn().mockResolvedValue(untrackedOnly));
+		const { runtime } = createRuntime(undefined, vi.fn().mockResolvedValue(untrackedOnly));
 
 		await runtime.flushWorkspacePulseRefresh();
 
@@ -107,7 +105,7 @@ describe("AtelierRuntime", () => {
 			.fn()
 			.mockResolvedValueOnce(cleanInspection)
 			.mockResolvedValueOnce({ kind: "unavailable" });
-		const { runtime } = createRuntime(undefined, Math.random, inspectWorkspace);
+		const { runtime } = createRuntime(undefined, inspectWorkspace);
 
 		await runtime.flushWorkspacePulseRefresh();
 		await runtime.flushWorkspacePulseRefresh();
@@ -124,7 +122,7 @@ describe("AtelierRuntime", () => {
 
 	it("does not invalidate rendering when a refresh confirms the same Pulse", async () => {
 		const inspectWorkspace = vi.fn().mockResolvedValue(cleanInspection);
-		const { runtime, requestRender } = createRuntime(undefined, Math.random, inspectWorkspace);
+		const { runtime, requestRender } = createRuntime(undefined, inspectWorkspace);
 		await runtime.flushWorkspacePulseRefresh();
 		requestRender.mockClear();
 
@@ -150,7 +148,6 @@ describe("AtelierRuntime", () => {
 
 		const state = runtime.getState();
 		expect(state.branch).toBeUndefined();
-		expect(state.workingLabel).toBeUndefined();
 		expect(state.activity).toBe("ready");
 		expect(state.dirty).toBe(false);
 		expect(state.extensionStatuses).toEqual([]);
@@ -164,19 +161,15 @@ describe("AtelierRuntime", () => {
 		expect(state.workspacePulse).toEqual({ status: "unavailable" });
 	});
 
-	it("selects one stable label when a work cycle starts", () => {
-		const random = vi.fn().mockReturnValue(0.5);
-		const { runtime, requestRender } = createRuntime(undefined, random);
+	it("tracks working activity without decorative labels", () => {
+		const { runtime, requestRender } = createRuntime();
 		requestRender.mockClear();
 
 		runtime.setActivity("working");
-		const selected = runtime.getState().workingLabel;
 		runtime.setActivity("working");
 		runtime.refreshUsage();
 
-		expect(selected).toBe("PONDERING");
-		expect(runtime.getState()).toMatchObject({ activity: "working", workingLabel: "PONDERING" });
-		expect(random).toHaveBeenCalledOnce();
+		expect(runtime.getState()).toMatchObject({ activity: "working" });
 		expect(requestRender).toHaveBeenCalledTimes(2);
 	});
 });

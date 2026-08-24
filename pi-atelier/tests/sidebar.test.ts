@@ -44,7 +44,6 @@ afterEach(() => {
 
 const state: AtelierState = {
 	activity: "working",
-	workingLabel: "GITIFYING",
 	modelId: "gpt-5.6-sol",
 	provider: "openai-codex",
 	thinkingLevel: "medium",
@@ -887,9 +886,7 @@ describe("sidebar snapshot and layout", () => {
 		expect(text).not.toMatch(/PI ATELIER|ATELIER|▛▀▜/);
 		expect(contentRows(lines)[0]).toBe("AGENT");
 		expect(contentRows(lines)).toContain("pi-atelier · feature/sidebar ▲");
-		expect(contentRows(lines)).toContainEqual(
-			expect.stringMatching(/^◆ Working · gitifying\s+gpt-5\.6-sol$/),
-		);
+		expect(contentRows(lines)).toContainEqual(expect.stringMatching(/^◆ WORKING\s+gpt-5\.6-sol$/));
 	});
 
 	it("renders a scan-first Workspace Pulse without repeating the repository root path", () => {
@@ -1102,64 +1099,119 @@ describe("sidebar snapshot and layout", () => {
 		expect(rows).toContain(expected);
 	});
 
-	it("renders unified policy, auto, human, and standalone permission rows", () => {
-		const rows = contentRows(
-			renderSidebarLines(
-				withActivity({
-					phase: "running",
-					startedAt: 1_000,
-					activeTools: [
-						{
-							id: "bash-1",
-							name: "bash",
-							summary: "git push",
-							status: "running",
-							startedAt: 2_000,
-							permissions: [
-								{
-									requestId: "r1",
-									toolCallId: "bash-1",
-									surface: "bash",
-									value: "git push",
-									source: "human",
-									state: "deny",
-									prior: "auto-unsure",
-									reason: "not reviewed",
-									at: 3_000,
-								},
-							],
-						},
-					],
-					recentTools: [],
-					standalonePermissions: [
-						{
-							requestId: "skill-1",
-							toolCallId: null,
-							surface: "skill",
-							value: "deploy",
-							source: "policy",
-							state: "allow",
-							at: 4_000,
-						},
-					],
-					completedCount: 0,
-					failedCount: 0,
-				}),
-				theme,
-				44,
-				36,
-				false,
-				5_000,
-			),
+	it("renders spaced Nerd Font permission badges inline and keeps exception reasons below", () => {
+		const lines = renderSidebarLines(
+			withActivity({
+				phase: "running",
+				startedAt: 1_000,
+				activeTools: [
+					{
+						id: "bash-1",
+						name: "bash",
+						summary: "git push",
+						status: "running",
+						startedAt: 2_000,
+						permissions: [
+							{
+								requestId: "r1",
+								toolCallId: "bash-1",
+								surface: "bash",
+								value: "git push",
+								source: "human",
+								state: "deny",
+								prior: "auto-unsure",
+								reason: "not reviewed",
+								at: 3_000,
+							},
+						],
+					},
+				],
+				recentTools: [],
+				standalonePermissions: [
+					{
+						requestId: "skill-1",
+						toolCallId: null,
+						surface: "skill",
+						value: "deploy",
+						source: "policy",
+						state: "allow",
+						at: 4_000,
+					},
+					{
+						requestId: "forward-1",
+						toolCallId: null,
+						surface: "forward",
+						value: "tests",
+						source: "auto",
+						state: "allow",
+						at: 4_100,
+					},
+				],
+				completedCount: 0,
+				failedCount: 0,
+			}),
+			theme,
+			44,
+			36,
+			true,
+			5_000,
 		);
+		const rows = contentRows(lines);
 		expect(rows).toEqual(
 			expect.arrayContaining([
-				expect.stringContaining("A?→H✕ auto unsure → human deny"),
+				expect.stringMatching(/^bash\s+git push\s+󰚩 \? → 󰀄 ✕ 3s$/),
 				expect.stringContaining("not reviewed"),
-				expect.stringContaining("P✓ policy allow · skill deploy"),
+				expect.stringContaining("↳ 󰒃 ✓  skill deploy"),
+				expect.stringContaining("↳ 󰚩 ✓  forward tests"),
 			]),
 		);
-		expect(rows).not.toEqual(expect.arrayContaining([expect.stringContaining("human deny · bash git push")]));
+		expect(rows).not.toEqual(
+			expect.arrayContaining([
+				expect.stringMatching(/(?:auto|policy|human) (?:allow|deny|ask|unsure)/),
+				expect.stringMatching(/^\s*↳ 󰚩 \? → 󰀄 ✕/),
+			]),
+		);
+		const rendered = lines.join("\n");
+		expect(rendered).toContain("\u001b[38;2;110;168;254m󰒃\u001b[39m");
+		expect(rendered).toContain("\u001b[38;2;177;140;255m󰚩\u001b[39m");
+		expect(rendered).toContain("\u001b[38;2;125;211;252m󰀄\u001b[39m");
+	});
+
+	it("collapses routine allows by source and wraps only badges that do not fit inline", () => {
+		const permission = (requestId: string, source: "policy" | "auto") => ({
+			requestId,
+			toolCallId: "read-1",
+			surface: "read",
+			value: "src/really-long-component-name.ts",
+			source,
+			state: "allow" as const,
+			at: 3_000,
+		});
+		const activity: RunActivitySnapshot = {
+			phase: "running",
+			startedAt: 1_000,
+			activeTools: [
+				{
+					id: "read-1",
+					name: "read",
+					summary: "src/really-long-component-name.ts",
+					status: "running",
+					startedAt: 2_000,
+					permissions: [permission("p1", "policy"), permission("p2", "policy"), permission("a1", "auto")],
+				},
+			],
+			recentTools: [],
+			completedCount: 0,
+			failedCount: 0,
+		};
+
+		const wideRows = contentRows(renderSidebarLines(withActivity(activity), theme, 44, 36, false, 5_000));
+		expect(wideRows).toContainEqual(expect.stringMatching(/^read\s+.+󰒃 ✓²\s+󰚩 ✓ 3s$/));
+		expect(wideRows).not.toContainEqual(expect.stringMatching(/^\s+󰒃/));
+
+		const narrowRows = contentRows(renderSidebarLines(withActivity(activity), theme, 28, 36, false, 5_000));
+		expect(narrowRows).toContainEqual(expect.stringMatching(/^read\s+.+󰒃 ✓² 3s$/));
+		expect(narrowRows).toContain("  󰚩 ✓");
 	});
 
 	it("renders response performance as a compact optional Activity row", () => {

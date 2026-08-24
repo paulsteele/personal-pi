@@ -95,20 +95,39 @@ Primary files:
 The local `auto-mode` extension (`~/.pi/agent/extensions/local/auto-mode/`) publishes an `auto-mode`
 Pi extension status plus bounded state/decision events. The local permission-system Bun patch adds
 tool-call correlation and decision provenance to its prompt/final-decision events. Atelier joins these
-events into Activity, keeping one tool row and one indented permission row per check. The previous
-`auto-mode:status` contributed sidebar panel is deliberately not published.
+events into Activity. Permission decisions are packed into the owning tool row when space permits;
+routine allows with the same source/outcome collapse to one counted badge, and only overflow or
+exception details consume follow-up rows. The previous `auto-mode:status` contributed sidebar panel
+is deliberately not published.
 
 `FooterState.autoModeStatus` carries the compact label. It renders first in the left zone as a
 required item with an infinite drop rank, and is filtered out of the ordinary extension-statuses
 segment so it is never rendered twice.
 
 **Invariant:** Activity is the only sidebar permission timeline. It must correlate tool checks by
-`toolCallId`, retain each check rather than collapsing multi-gate calls, and visibly distinguish
-policy, auto, and human outcomes. While the sidebar is hidden, width pressure must never drop the
+`toolCallId` and preserve every exceptional decision. Repeated routine allows may be visually
+collapsed with a count, but must not be discarded from the activity model. Nerd Font semantic icons
+(`nf-md-security`, `nf-md-robot`, and `nf-md-account`) are the sole source labels, always separated
+from outcome marks by whitespace; adjacent copy must not repeat words such as `auto allow` or
+`policy allow`. Policy, auto, and human badges use distinct colors. While the sidebar is hidden,
+width pressure must never drop the
 auto-mode footer item: while a classifier is approving actions on the operator's behalf, that fact
 has to stay visible.
 
-### 6. Fixed personal feature set; no configuration or resize UI
+### 6. Plain activity labels
+
+Primary files:
+
+- `src/state.ts`
+- `src/footer.ts`
+- `src/sidebar.ts`
+
+Atelier reports only the useful activity state: `READY` or `WORKING`. The upstream randomized,
+Maxis-style working phrases are removed from runtime state and both UI surfaces.
+
+**Invariant:** do not reintroduce decorative activity phrase lists or randomized status copy.
+
+### 7. Fixed personal feature set; no configuration or resize UI
 
 Upstream `src/menu.ts` and `src/settings-workspace.ts`, their tests, all shortcuts, display editor,
 tool-list editor, model/tool/session actions, and enable/disable flows are removed. The sole command is

@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { applyConfigLayer, DEFAULT_CONFIG, loadAutoModeConfig, saveAutoModeModel } from "./config.ts";
+import {
+	applyConfigLayer,
+	DEFAULT_CONFIG,
+	loadAutoModeConfig,
+	saveAutoModeEnabled,
+	saveAutoModeModel,
+} from "./config.ts";
 import { EDIT_PREVIEW_MARKER, formatEditForClassifier, MAX_EDIT_PREVIEW_CHARS } from "./edit-preview.ts";
 import {
 	applyAuthorityPolicy,
@@ -331,6 +337,62 @@ describe("config", () => {
 		expect(saved.model).toBe("amod-claude-haiku-4-5");
 		expect(saved.timeoutMs).toBe(20_000);
 		expect(saved.futureField).toBe("keep");
+	});
+
+	test("persists the mode choice without dropping unrelated config fields", async () => {
+		const { mkdtempSync, mkdirSync, readFileSync, writeFileSync } = await import("node:fs");
+		const { tmpdir } = await import("node:os");
+		const { join } = await import("node:path");
+		const agentDir = mkdtempSync(join(tmpdir(), "auto-mode-enabled-save-"));
+		const dir = join(agentDir, "extensions", "auto-mode");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, "config.json"),
+			JSON.stringify({ provider: "litellm", model: "reviewer", enabledByDefault: false, futureField: "keep" }),
+		);
+
+		saveAutoModeEnabled(agentDir, true);
+		const enabled = JSON.parse(readFileSync(join(dir, "config.json"), "utf-8")) as Record<
+			string,
+			unknown
+		>;
+		expect(enabled.enabledByDefault).toBe(true);
+		expect(enabled.provider).toBe("litellm");
+		expect(enabled.futureField).toBe("keep");
+
+		saveAutoModeEnabled(agentDir, false);
+		const disabled = JSON.parse(readFileSync(join(dir, "config.json"), "utf-8")) as Record<
+			string,
+			unknown
+		>;
+		expect(disabled.enabledByDefault).toBe(false);
+	});
+
+	test("does not let a project override the persisted global mode choice", async () => {
+		const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+		const { tmpdir } = await import("node:os");
+		const { join } = await import("node:path");
+		const agentDir = mkdtempSync(join(tmpdir(), "auto-mode-global-state-"));
+		const cwd = mkdtempSync(join(tmpdir(), "auto-mode-project-state-"));
+		mkdirSync(join(agentDir, "extensions", "auto-mode"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "extensions", "auto-mode"), { recursive: true });
+		writeFileSync(
+			join(agentDir, "extensions", "auto-mode", "config.json"),
+			JSON.stringify({ provider: "global", model: "reviewer", enabledByDefault: true }),
+		);
+		writeFileSync(
+			join(cwd, ".pi", "extensions", "auto-mode", "config.json"),
+			JSON.stringify({ provider: "project", enabledByDefault: false }),
+		);
+
+		const result = loadAutoModeConfig({
+			agentDir,
+			cwd,
+			configDirName: ".pi",
+			projectTrusted: true,
+		});
+		expect(result.config.provider).toBe("project");
+		expect(result.config.enabledByDefault).toBe(true);
 	});
 
 	test("a missing config directory yields defaults and an unusable result", () => {

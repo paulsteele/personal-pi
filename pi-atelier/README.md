@@ -8,7 +8,7 @@ A source-owned personal Pi extension for this installation. Read [`FORK.md`](FOR
 - Pane-local transcript and sidebar text selection
 - Fixed responsive sizing: 44-column preferred width, shrinking to 28 columns before auto-hide below 92 terminal columns
 - Plannotator, Agent, unified Activity/tool-and-permission history, Alerts, Context, Workspace/Git/session, and Usage panels
-- Policy, auto-mode, and human permission outcomes rendered on the relevant Activity timeline rows
+- Policy, auto-mode, and human permission outcomes packed into tool rows with spaced Nerd Font badges, counted routine allows, and exception-only detail rows
 - Namespaced external panel contributions through Atelier's bounded event protocol
 - Zero-height footer while the sidebar is presented
 - Dense responsive status rail while the sidebar is hidden, including response performance

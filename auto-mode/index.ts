@@ -23,7 +23,13 @@ import { createHash } from "node:crypto";
 import { CONFIG_DIR_NAME, getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { classify, type ModelCaller, type ReviewContext, type ReviewFacts } from "./classifier.ts";
 
-import { loadAutoModeConfig, saveAutoModeModel, type AutoModeConfig, type ConfigLoadResult } from "./config.ts";
+import {
+	loadAutoModeConfig,
+	saveAutoModeEnabled,
+	saveAutoModeModel,
+	type AutoModeConfig,
+	type ConfigLoadResult,
+} from "./config.ts";
 import {
 	applyAuthorityPolicy,
 	cacheKey,
@@ -382,14 +388,24 @@ export default function autoMode(pi: ExtensionAPI): void {
 
 	function setEnabled(ctx: ExtensionContext, next: boolean): void {
 		if (!runtime) return;
+		try {
+			saveAutoModeEnabled(getAgentDir(), next);
+		} catch (error) {
+			ctx.ui.notify(
+				`Could not save auto-mode state: ${error instanceof Error ? error.message : String(error)}`,
+				"error",
+			);
+			return;
+		}
 		runtime.enabled = next;
+		runtime.config = { ...runtime.config, enabledByDefault: next };
 		// Claude Code drops every cached verdict on a mode change; a verdict
 		// decided under one mode must not silently carry into another.
 		runtime.cache.clear();
 		refreshPresentation();
 
 		if (!next) {
-			ctx.ui.notify("Auto mode off — every permission request will prompt.", "info");
+			ctx.ui.notify("Auto mode off — saved as the default for future sessions.", "info");
 			return;
 		}
 		if (!runtime.load.usable) {
@@ -400,7 +416,10 @@ export default function autoMode(pi: ExtensionAPI): void {
 			);
 			return;
 		}
-		ctx.ui.notify(`Auto mode on — ${runtime.config.provider}/${runtime.config.model} reviews each request.`, "info");
+		ctx.ui.notify(
+			`Auto mode on — ${runtime.config.provider}/${runtime.config.model} reviews each request (saved).`,
+			"info",
+		);
 	}
 
 	// ── Lifecycle ──────────────────────────────────────────────────────────
@@ -427,7 +446,7 @@ export default function autoMode(pi: ExtensionAPI): void {
 			ctx,
 			config: load.config,
 			load,
-			enabled: load.config.enabledByDefault && load.usable,
+			enabled: load.config.enabledByDefault,
 			cache: new VerdictCache(),
 			log: new DecisionLog(load.config.maxDecisionLog),
 			publisher: publishAutoMode(pi.events),
@@ -474,7 +493,7 @@ export default function autoMode(pi: ExtensionAPI): void {
 	// ── Operator controls ──────────────────────────────────────────────────
 
 	pi.registerCommand("auto-model", {
-		description: "Select the classifier model used by auto mode for this session",
+		description: "Select and persist the classifier model used by auto mode",
 		handler: async (args, ctx) => {
 			if (!runtime) return;
 
@@ -514,8 +533,7 @@ export default function autoMode(pi: ExtensionAPI): void {
 			}
 
 			if (!selected) return;
-			// Session-local by design: the command changes no files. Edit
-			// extensions/auto-mode/config.json when the selection should persist.
+			// Persist globally so the selection survives reloads and new sessions.
 			try {
 				saveAutoModeModel(getAgentDir(), selected.provider, selected.id);
 			} catch (error) {
@@ -546,7 +564,7 @@ export default function autoMode(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("auto", {
-		description: "Toggle auto mode (classifier-reviewed permissions)",
+		description: "Toggle and persist auto mode (classifier-reviewed permissions)",
 		handler: async (args, ctx) => {
 			if (!runtime) return;
 			const argument = args.trim().toLowerCase();
@@ -555,15 +573,15 @@ export default function autoMode(pi: ExtensionAPI): void {
 		},
 		getArgumentCompletions: (prefix: string) => {
 			const items = [
-				{ value: "on", label: "on", description: "Arm auto mode for this session" },
-				{ value: "off", label: "off", description: "Return to manual approval" },
+				{ value: "on", label: "on", description: "Arm auto mode and save the choice" },
+				{ value: "off", label: "off", description: "Use manual approval and save the choice" },
 			].filter((item) => item.value.startsWith(prefix.trim().toLowerCase()));
 			return items.length > 0 ? items : null;
 		},
 	});
 
 	pi.registerShortcut("ctrl+shift+a", {
-		description: "Toggle auto mode",
+		description: "Toggle and persist auto mode",
 		handler: async (ctx) => {
 			if (runtime) setEnabled(ctx as ExtensionContext, !runtime.enabled);
 		},

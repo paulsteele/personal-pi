@@ -193,13 +193,9 @@ describe("footer", () => {
 
 	it("uses state-specific activity colors", () => {
 		const ready = renderFooterLine(state, namedTheme("dark"), 180);
-		const working = renderFooterLine(
-			{ ...state, activity: "working", workingLabel: "PONDERING" },
-			namedTheme("dark"),
-			180,
-		);
+		const working = renderFooterLine({ ...state, activity: "working" }, namedTheme("dark"), 180);
 		expect(ready).toContain(`${darkRgb.blue}● READY\u001b[39m`);
-		expect(working).toContain(`${darkRgb.amber}● PONDERING...\u001b[39m`);
+		expect(working).toContain(`${darkRgb.amber}● WORKING...\u001b[39m`);
 	});
 
 	it("overrides context blue at warning and danger thresholds", () => {
@@ -394,21 +390,21 @@ describe("footer", () => {
 	});
 
 	it("reserves ellipsis width so animated frames never move the model", () => {
-		const working = { ...state, activity: "working" as const, workingLabel: "CLAUDING" };
+		const working = { ...state, activity: "working" as const };
 		const lines = ["...", "..", "."].map((dots) =>
 			stripAnsi(renderFooterLine(working, plainTheme, 160, true, dots)),
 		);
 		const modelColumns = lines.map((line) => line.indexOf("gpt-5.6-sol"));
 		expect(new Set(modelColumns).size).toBe(1);
-		expect(lines[0]).toContain("CLAUDING... · gpt-5.6-sol");
-		expect(lines[1]).toContain("CLAUDING..  · gpt-5.6-sol");
-		expect(lines[2]).toContain("CLAUDING.   · gpt-5.6-sol");
+		expect(lines[0]).toContain("WORKING... · gpt-5.6-sol");
+		expect(lines[1]).toContain("WORKING..  · gpt-5.6-sol");
+		expect(lines[2]).toContain("WORKING.   · gpt-5.6-sol");
 	});
 
-	it("animates shrinking dots every 400 ms while retaining the selected phrase", () => {
+	it("animates shrinking dots every 400 ms for the working status", () => {
 		vi.useFakeTimers();
 		const requestRender = vi.fn();
-		const working = { ...state, activity: "working" as const, workingLabel: "PHOTOSYNTHESIZING" };
+		const working = { ...state, activity: "working" as const };
 		const component = createFooterComponent({
 			getState: () => working,
 			requestRender,
@@ -417,16 +413,15 @@ describe("footer", () => {
 		});
 
 		try {
-			expect(component.render(160)[0]).toContain("PHOTOSYNTHESIZING...");
+			expect(component.render(160)[0]).toContain("WORKING...");
 			expect(vi.getTimerCount()).toBe(1);
 			vi.advanceTimersByTime(400);
 			expect(requestRender).toHaveBeenCalledTimes(1);
-			expect(component.render(160)[0]).toContain("PHOTOSYNTHESIZING..");
+			expect(component.render(160)[0]).toContain("WORKING..");
 			vi.advanceTimersByTime(400);
-			expect(component.render(160)[0]).toContain("PHOTOSYNTHESIZING.");
+			expect(component.render(160)[0]).toContain("WORKING.");
 			vi.advanceTimersByTime(400);
-			expect(component.render(160)[0]).toContain("PHOTOSYNTHESIZING...");
-			expect(component.render(160)[0]).not.toContain("WORKING");
+			expect(component.render(160)[0]).toContain("WORKING...");
 		} finally {
 			component.dispose();
 			vi.useRealTimers();
@@ -435,7 +430,7 @@ describe("footer", () => {
 
 	it("animates only when the full working status is visible and resets after stopping", () => {
 		vi.useFakeTimers();
-		let current: AtelierState = { ...state, activity: "working", workingLabel: "PONDERING" };
+		let current: AtelierState = { ...state, activity: "working" };
 		const requestRender = vi.fn();
 		const component = createFooterComponent({
 			getState: () => current,
@@ -444,12 +439,12 @@ describe("footer", () => {
 			theme: plainTheme,
 		});
 		try {
-			expect(component.render(20)[0]).not.toContain("PONDERING");
+			expect(component.render(20)[0]).not.toContain("WORKING...");
 			expect(vi.getTimerCount()).toBe(0);
-			expect(component.render(100)[0]).toContain("PONDERING...");
+			expect(component.render(100)[0]).toContain("WORKING...");
 			expect(vi.getTimerCount()).toBe(1);
 			vi.advanceTimersByTime(400);
-			expect(component.render(100)[0]).toContain("PONDERING..");
+			expect(component.render(100)[0]).toContain("WORKING..");
 			current = { ...state, activity: "ready" };
 			expect(component.render(100)[0]).toContain("READY");
 			expect(vi.getTimerCount()).toBe(0);
@@ -459,14 +454,14 @@ describe("footer", () => {
 		}
 	});
 
-	it("renders the full working phrase and dots in fixed amber for custom themes", () => {
+	it("renders the working status and dots in fixed amber for custom themes", () => {
 		const fg = vi.fn((_color: string, text: string) => text);
 		const bold = vi.fn((text: string) => `<b>${text}</b>`);
 		const italic = vi.fn((text: string) => `<i>${text}</i>`);
-		const working = { ...state, activity: "working" as const, workingLabel: "PONDERING" };
+		const working = { ...state, activity: "working" as const };
 		const line = renderFooterLine(working, { name: "nord", fg, bold, italic }, 160, true, "..");
 
-		expect(line).toContain(`${darkRgb.amber}<b>● PONDERING.. </b>\u001b[39m`);
+		expect(line).toContain(`${darkRgb.amber}<b>● WORKING.. </b>\u001b[39m`);
 		expect(fg).not.toHaveBeenCalled();
 		expect(italic).not.toHaveBeenCalled();
 	});
@@ -479,8 +474,8 @@ describe("footer", () => {
 		expect(line).toContain(activity === "working" ? `${expected}...` : expected);
 	});
 
-	it("keeps the longest working phrase within responsive width limits", () => {
-		const working = { ...state, activity: "working" as const, workingLabel: "PHOTOSYNTHESIZING" };
+	it("keeps the working status within responsive width limits", () => {
+		const working = { ...state, activity: "working" as const };
 		for (const width of [132, 131, 96, 95, 72, 71, 56, 55, 20]) {
 			expect(visibleWidth(renderFooterLine(working, plainTheme, width))).toBeLessThanOrEqual(width);
 		}
@@ -577,7 +572,7 @@ describe("footer", () => {
 	it("does not restart animation when rendered after disposal", () => {
 		vi.useFakeTimers();
 		const component = createFooterComponent({
-			getState: () => ({ ...state, activity: "working", workingLabel: "PONDERING" }),
+			getState: () => ({ ...state, activity: "working" }),
 			requestRender: vi.fn(),
 			onBranchChange: () => vi.fn(),
 			theme: plainTheme,
@@ -585,7 +580,7 @@ describe("footer", () => {
 
 		try {
 			component.dispose();
-			expect(component.render(160)[0]).toContain("PONDERING...");
+			expect(component.render(160)[0]).toContain("WORKING...");
 			expect(vi.getTimerCount()).toBe(0);
 		} finally {
 			component.dispose();
@@ -597,7 +592,7 @@ describe("footer", () => {
 		vi.useFakeTimers();
 		const requestRender = vi.fn();
 		const component = createFooterComponent({
-			getState: () => ({ ...state, activity: "working", workingLabel: "PONDERING" }),
+			getState: () => ({ ...state, activity: "working" }),
 			requestRender,
 			onBranchChange: () => vi.fn(),
 			theme: plainTheme,

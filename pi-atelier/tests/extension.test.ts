@@ -676,7 +676,7 @@ describe("extension registration", () => {
 		expect(sidebarText).toContain("running");
 		expect(sidebarText).toContain("bash");
 		expect(sidebarText).toContain("npm test");
-		expect(sidebarText).toContain("Working");
+		expect(sidebarText).toContain("WORKING");
 		expect(h.overlays[0]?.requestRender.mock.calls.length).toBeGreaterThan(0);
 
 		const footer = h.setFooter.mock.calls[0]?.[0](
@@ -864,7 +864,7 @@ describe("extension registration", () => {
 			const settledText = h.overlays[0]?.component.render(44).join("\n") ?? "";
 			expect(settledText).toContain("Last run · 3s");
 			expect(settledText).not.toContain("settled 3s");
-			expect(settledText).toContain("Ready");
+			expect(settledText).toContain("READY");
 
 			vi.advanceTimersByTime(3_000);
 			expect(h.overlays[0]?.requestRender.mock.calls.length).toBe(settledRenderCount);
@@ -929,7 +929,7 @@ describe("extension registration", () => {
 		await h.handlers.get("turn_start")?.({ type: "turn_start", turnIndex: 0, timestamp: 1_000 }, eventCtx);
 
 		const text = h.overlays[0]?.component.render(44).join("\n") ?? "";
-		expect(text).toContain("Working");
+		expect(text).toContain("WORKING");
 		expect(text).toContain("ACTIVITY");
 		expect(text).toContain("Turn 1");
 	});
@@ -971,7 +971,7 @@ describe("extension registration", () => {
 			expect(activeText).toContain("running");
 			expect(activeText).toContain("bash");
 			expect(activeText).toContain("npm run current");
-			expect(activeText).toContain("Working");
+			expect(activeText).toContain("WORKING");
 
 			await h.handlers.get("agent_start")?.({ type: "agent_start" }, oldCtx);
 			await h.handlers.get("tool_execution_start")?.(
@@ -1007,7 +1007,7 @@ describe("extension registration", () => {
 			expect(settledText).not.toContain("Turn 7");
 			expect(settledText).not.toContain("settled");
 			expect(settledText).toContain("done");
-			expect(settledText).toContain("Ready");
+			expect(settledText).toContain("READY");
 			expect(settledText).not.toContain("stale.ts");
 		} finally {
 			vi.useRealTimers();

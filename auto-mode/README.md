@@ -48,7 +48,8 @@ mechanism lives here.
    }
    ```
 
-3. Arm it in a session with `/auto` (or `/auto on` / `/auto off`, or `ctrl+shift+a`).
+3. Arm it with `/auto` (or `/auto on` / `/auto off`, or `ctrl+shift+a`). The choice is written
+   atomically to global `config.json` and becomes the default for reloads and future sessions.
 
 Use `/auto-model` to pick the classifier model from Pi's available model registry, or pass it
 directly as `/auto-model provider/model-id`. The selection is written atomically to the global
@@ -57,7 +58,8 @@ Auto Mode panel.
 
 A project override at `<cwd>/.pi/extensions/auto-mode/config.json` is merged over the global file,
 and only when Pi reports the project as trusted — an untrusted repository must not be able to point
-the classifier at a model it controls or change future manual-mode policy hints.
+the classifier at a model it controls or change future manual-mode policy hints. The persisted
+`enabledByDefault` toggle is always taken from global config, so a project cannot arm or disarm it.
 
 ## Configuration
 
@@ -66,7 +68,7 @@ the classifier at a model it controls or change future manual-mode policy hints.
 | `provider`         | `string`   | —       | Model provider, resolved against Pi's registry. Required.          |
 | `model`            | `string`   | —       | Model id within that provider. Required.                           |
 | `timeoutMs`        | `integer`  | `5000`  | Per-review budget; a timeout defers. 250–60000. Local config uses 20000. |
-| `enabledByDefault` | `boolean`  | `false` | Whether a fresh session starts armed.                              |
+| `enabledByDefault` | `boolean`  | `false` | Persisted mode state; `/auto` updates it for reloads and future sessions. |
 | `maxDecisionLog`   | `integer`  | `50`    | Decisions retained for the sidebar panel. 1–500.                   |
 | `contextUserTurns` | `integer`  | `3`     | Recent user messages given to the classifier. 0–20.                |
 | `environment`      | `object`   | empty   | Reserved deterministic hints for future manual-mode policy; ignored by the auto classifier. |

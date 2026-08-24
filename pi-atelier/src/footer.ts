@@ -4,6 +4,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import { activityLabel } from "./activity.js";
 import { formatTokens } from "./metrics.js";
 import { type AtelierPalette, createPalette, type PaletteRole } from "./palette.js";
 import { responsePerformanceValues } from "./run-activity.js";
@@ -115,12 +116,11 @@ function activityText(
 	workingDots: string,
 	compact: boolean,
 ): string {
-	const fallback = state.activity.toUpperCase();
-	const label = state.activity === "working" && !compact ? (state.workingLabel ?? fallback) : fallback;
+	const label = activityLabel(state.activity);
 	const dots =
 		state.activity === "working" && !compact ? workingDots.padEnd(WORKING_DOT_FRAMES[0].length, " ") : "";
 	const role: PaletteRole = state.activity === "working" ? "working" : "ready";
-	return palette.paint(role, theme.bold(`● ${sanitize(label)}${dots}`));
+	return palette.paint(role, theme.bold(`● ${label}${dots}`));
 }
 
 function buildItems(

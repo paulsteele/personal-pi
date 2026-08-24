@@ -10,6 +10,9 @@ export type PaletteRole =
 	| "cache"
 	| "cost"
 	| "context"
+	| "permissionPolicy"
+	| "permissionAuto"
+	| "permissionHuman"
 	| "menu"
 	| "warning"
 	| "error";
@@ -33,6 +36,9 @@ const FIXED_DARK: Record<PaletteRole, Rgb> = {
 	cache: [125, 211, 252],
 	cost: [255, 159, 67],
 	context: [110, 168, 254],
+	permissionPolicy: [110, 168, 254],
+	permissionAuto: [177, 140, 255],
+	permissionHuman: [125, 211, 252],
 	menu: [177, 140, 255],
 	warning: [255, 159, 67],
 	error: [255, 93, 115],
@@ -50,6 +56,9 @@ const UNNAMED_THEME: Record<PaletteRole, string> = {
 	cache: "syntaxType",
 	cost: "mdHeading",
 	context: "thinkingLow",
+	permissionPolicy: "thinkingLow",
+	permissionAuto: "thinkingHigh",
+	permissionHuman: "syntaxType",
 	menu: "thinkingHigh",
 	warning: "warning",
 	error: "error",
@@ -67,6 +76,9 @@ const NO_COLOR: Record<PaletteRole, string> = {
 	cache: "text",
 	cost: "text",
 	context: "text",
+	permissionPolicy: "text",
+	permissionAuto: "text",
+	permissionHuman: "text",
 	menu: "text",
 	warning: "warning",
 	error: "error",
