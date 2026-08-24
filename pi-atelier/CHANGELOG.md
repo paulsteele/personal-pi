@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Merge auto-mode and permission-system observations into the Activity timeline: policy, auto, and human outcomes are shown per permission check beneath the relevant tool, with standalone checks for uncorrelated skill/forwarded requests.
+- Retain the latest 12 completed tools across agent runs in one session, and render bounded denial/unsure reasons without a separate Auto Mode sidebar panel.
 - Maintain this package as a local source fork of upstream 0.8.2.
 - Render the fullscreen Sidebar as a real selectable pane and keep selections bounded to their originating pane.
 - Hide the status rail and reclaim its fullscreen row while the Sidebar is presented; restore the full rail when hidden.

@@ -9,6 +9,7 @@ import {
 	EMPTY_RUN_ACTIVITY,
 	formatDuration,
 	formatResponsePerformance,
+	type PermissionActivity,
 	type RunActivitySnapshot,
 	type ToolActivity,
 } from "./run-activity.js";
@@ -38,6 +39,14 @@ export interface SidebarSnapshotInput {
 	branchEntryCount: number;
 	extensionStatuses: readonly string[];
 	runActivity?: RunActivitySnapshot;
+	autoModeState?: {
+		enabled: boolean;
+		usable: boolean;
+		modelId: string;
+		allowed: number;
+		denied: number;
+		escalated: number;
+	};
 	sidebarPanels?: readonly SidebarPanelData[];
 }
 
@@ -49,6 +58,14 @@ export interface SidebarSnapshot extends AtelierState {
 	persisted: boolean;
 	branchEntryCount: number;
 	runActivity: RunActivitySnapshot;
+	autoModeState?: {
+		enabled: boolean;
+		usable: boolean;
+		modelId: string;
+		allowed: number;
+		denied: number;
+		escalated: number;
+	};
 	sidebarPanels?: readonly SidebarPanelData[];
 }
 
@@ -69,6 +86,7 @@ export function buildSidebarSnapshot(input: SidebarSnapshotInput): SidebarSnapsh
 		branchEntryCount: input.branchEntryCount,
 		extensionStatuses: input.extensionStatuses,
 		runActivity: input.runActivity ?? EMPTY_RUN_ACTIVITY,
+		...(input.autoModeState ? { autoModeState: input.autoModeState } : {}),
 		sidebarPanels: input.sidebarPanels ?? [],
 	};
 }
@@ -470,8 +488,8 @@ function statusDetailRows(snapshot: SidebarSnapshot, palette: AtelierPalette): s
 
 interface ActivityGroups {
 	core: string[];
-	active: Array<{ id: string; row: string }>;
-	recent: Array<{ id: string; row: string }>;
+	active: Array<{ id: string; rows: string[] }>;
+	recent: Array<{ id: string; rows: string[] }>;
 	aggregate: string[];
 }
 
@@ -583,6 +601,40 @@ function toolActivityRow(
 	return truncateToWidth(row, contentWidth, "");
 }
 
+function permissionLabel(permission: PermissionActivity): string {
+	const outcome = permission.state === "pending" ? "ask" : permission.state;
+	const prefix =
+		permission.prior === "auto-unsure"
+			? "auto unsure → "
+			: permission.prior === "policy-ask"
+				? "policy ask → "
+				: "";
+	return `${prefix}${permission.source} ${outcome}`;
+}
+
+function permissionRows(
+	permission: PermissionActivity,
+	contentWidth: number,
+	palette: AtelierPalette,
+): string[] {
+	const label = permissionLabel(permission);
+	const role: PaletteRole =
+		permission.state === "deny"
+			? "error"
+			: permission.state === "unsure" || permission.state === "pending"
+				? "warning"
+				: "ready";
+	const detail = `${sanitize(permission.surface) || "permission"} ${sanitize(permission.value)}`.trim();
+	const rows = [palette.paint(role, truncateToWidth(`↳ ${detail} · ${label}`, contentWidth, "…"))];
+	if (
+		permission.reason &&
+		(permission.state === "deny" || permission.state === "unsure" || permission.source === "system")
+	) {
+		rows.push(palette.paint("dim", truncateToWidth(`  ${sanitize(permission.reason)}`, contentWidth, "…")));
+	}
+	return rows;
+}
+
 function runSummaryRow(activity: RunActivitySnapshot, palette: AtelierPalette, now: number): string {
 	if (activity.phase === "idle") return palette.paint("ready", "Ready");
 	const duration =
@@ -603,6 +655,7 @@ function responsePerformanceRow(activity: RunActivitySnapshot, palette: AtelierP
 
 function activityRows(
 	activity: RunActivitySnapshot,
+	autoModeState: SidebarSnapshot["autoModeState"],
 	contentWidth: number,
 	palette: AtelierPalette,
 	now: number,
@@ -611,14 +664,44 @@ function activityRows(
 	const active = activity.activeTools
 		.map((tool, index) => ({ index, tool }))
 		.sort((left, right) => left.tool.startedAt - right.tool.startedAt || left.index - right.index)
-		.map(({ tool }) => ({ id: tool.id, row: toolActivityRow(tool, contentWidth, palette, now) }));
+		.map(({ tool }) => ({
+			id: tool.id,
+			rows: [
+				toolActivityRow(tool, contentWidth, palette, now),
+				...(tool.permissions ?? []).flatMap((permission) =>
+					permissionRows(permission, contentWidth, palette),
+				),
+			],
+		}));
 	const recent = activity.recentTools
 		.filter((tool) => !activeIds.has(tool.id))
-		.slice(0, 3)
-		.map((tool) => ({ id: tool.id, row: toolActivityRow(tool, contentWidth, palette, now) }));
+		.map((tool) => ({
+			id: tool.id,
+			rows: [
+				toolActivityRow(tool, contentWidth, palette, now),
+				...(tool.permissions ?? []).flatMap((permission) =>
+					permissionRows(permission, contentWidth, palette),
+				),
+			],
+		}));
 	const aggregateText = aggregateActivityText(activity);
 	return {
-		core: [runSummaryRow(activity, palette, now), responsePerformanceRow(activity, palette)],
+		core: [
+			...(autoModeState
+				? [
+						palette.paint(
+							autoModeState.enabled ? "ready" : "dim",
+							`${autoModeState.enabled ? "auto" : "manual"} · ${autoModeState.modelId}`,
+						),
+						palette.paint(
+							"muted",
+							`auto ${autoModeState.allowed} allow · ${autoModeState.denied} deny · ${autoModeState.escalated} asked`,
+						),
+					]
+				: []),
+			runSummaryRow(activity, palette, now),
+			responsePerformanceRow(activity, palette),
+		],
 		active,
 		recent,
 		aggregate: aggregateText
@@ -640,7 +723,7 @@ function activitySidebarGroups(
 	palette: AtelierPalette,
 	now: number,
 ): SidebarGroup[] {
-	const groups = activityRows(snapshot.runActivity, contentWidth, palette, now);
+	const groups = activityRows(snapshot.runActivity, snapshot.autoModeState, contentWidth, palette, now);
 	const panelRole: PaletteRole =
 		snapshot.runActivity.phase === "running"
 			? "working"
@@ -654,17 +737,23 @@ function activitySidebarGroups(
 			panelRole,
 			rows: groups.core,
 		},
-		...groups.active.map((active, index, rows) => ({
+		...groups.active.map((active) => ({
 			name: `activityActive:${active.id}`,
 			panel: "ACTIVITY",
 			panelRole,
-			rows: [active.row],
+			rows: active.rows,
 		})),
-		...groups.recent.map((recent, index) => ({
+		...groups.recent.map((recent) => ({
 			name: `activityRecent:${recent.id}`,
 			panel: "ACTIVITY",
 			panelRole,
-			rows: [recent.row],
+			rows: recent.rows,
+		})),
+		...(snapshot.runActivity.standalonePermissions ?? []).map((permission) => ({
+			name: `activityPermission:${permission.requestId}`,
+			panel: "ACTIVITY",
+			panelRole,
+			rows: permissionRows(permission, contentWidth, palette),
 		})),
 		{
 			name: "activityAggregate",

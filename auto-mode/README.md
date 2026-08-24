@@ -104,8 +104,10 @@ exempts only the explicitly configured `auto` link from that envelope. The link 
 auto mode is off, and deterministic `deny` rules still block before the authorizer chain runs.
 
 The patch is version-pinned in `~/.pi/agent/npm/package.json` and reapplied by Bun from
-`~/.pi/agent/npm/patches/`. When upgrading `@gotgenes/pi-permission-system`, port and test that
-patch before changing the exact dependency version.
+`~/.pi/agent/npm/patches/`. In addition to the narrow `auto` delegation exception, it adds
+additive prompt/final-decision `toolCallId` correlation and decision provenance fields so Atelier
+can render the unified timeline without parsing the review JSONL. When upgrading
+`@gotgenes/pi-permission-system`, port and test that patch before changing the exact dependency version.
 
 ## Observability
 
@@ -134,15 +136,14 @@ forge a key collision and inherit another action's cached `allow`.
 
 ## UI
 
-The extension publishes to the local Atelier fork over its public sidebar-panel protocol, and sets
-a Pi extension status. Because the fork's footer collapses while the sidebar is presented, the two
-surfaces are naturally exclusive:
+Auto mode publishes bounded private state and decision events for the local Atelier fork. Atelier
+merges them into its **Activity** timeline: the header shows auto/manual state, selected model, and
+allow/deny/asked counts, while each permission check is shown under its tool as `auto allow`,
+`auto deny`, or `auto unsure → human allow/deny`. Denial and unsure reasons remain on a compact
+second line. The legacy separate **Auto Mode** sidebar panel is no longer published.
 
-- **Sidebar presented** — an `Auto Mode` panel with the mode, selected classifier model,
-  allow/deny/asked counts, and recent decisions including denial reasons.
-- **Sidebar hidden** — a compact, never-dropped footer item (`⏵⏵ auto 12/1`).
-
-Atelier is optional. Without it, the status alone is used and nothing breaks.
+The compact, never-dropped footer status (`⏵⏵ auto 12/1`) remains while the sidebar is hidden.
+Atelier is optional: without a listener, event broadcasts are harmless and only that status is used.
 
 ## Development
 

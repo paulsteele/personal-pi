@@ -142,7 +142,7 @@ describe("run activity tracker transitions", () => {
 		expect(onChange).toHaveBeenCalledTimes(5);
 	});
 
-	it("keeps newest-first recent history capped at three entries", () => {
+	it("keeps newest-first recent history capped at twelve entries", () => {
 		const tracker = createRunActivityTracker({ cwd: "/repo" });
 		tracker.startRun(0);
 		for (let index = 1; index <= 4; index += 1) {
@@ -167,7 +167,12 @@ describe("run activity tracker transitions", () => {
 			);
 		}
 
-		expect(tracker.getSnapshot().recentTools.map((tool) => tool.id)).toEqual(["tool-4", "tool-3", "tool-2"]);
+		expect(tracker.getSnapshot().recentTools.map((tool) => tool.id)).toEqual([
+			"tool-4",
+			"tool-3",
+			"tool-2",
+			"tool-1",
+		]);
 	});
 
 	it("ignores unknown completion IDs without notifying", () => {
@@ -259,7 +264,7 @@ describe("run activity tracker transitions", () => {
 		expect(tracker.isRunning()).toBe(false);
 	});
 
-	it("startRun resets prior run state", () => {
+	it("startRun resets prior run metrics while retaining session tool history", () => {
 		const tracker = createRunActivityTracker({ cwd: "/repo" });
 		tracker.startRun(1_000);
 		tracker.startTool(
@@ -281,12 +286,65 @@ describe("run activity tracker transitions", () => {
 			phase: "running",
 			startedAt: 10_000,
 			activeTools: [],
-			recentTools: [],
+			recentTools: [expect.objectContaining({ id: "read-1", status: "done" })],
 			completedCount: 0,
 			failedCount: 0,
 		});
 		expect(snapshot).not.toHaveProperty("turnNumber");
 		expect(snapshot).not.toHaveProperty("performance");
+	});
+
+	it("merges permission prompt, auto-unsure, and human outcome across tool lifecycle races", () => {
+		const tracker = createRunActivityTracker({ cwd: "/repo" });
+		tracker.recordPermission({
+			requestId: "r1",
+			toolCallId: "bash-1",
+			surface: "bash",
+			value: "git push",
+			source: "auto",
+			state: "unsure",
+			prior: "auto-unsure",
+			reason: "remote unclear",
+			at: 1,
+		});
+		tracker.startTool(
+			{ type: "tool_execution_start", toolCallId: "bash-1", toolName: "bash", args: { command: "git push" } },
+			2,
+		);
+		tracker.recordPermission({
+			requestId: "r1",
+			toolCallId: "bash-1",
+			surface: "bash",
+			value: "git push",
+			source: "human",
+			state: "deny",
+			prior: "policy-ask",
+			reason: "not yet",
+			at: 3,
+		});
+		const permission = tracker.getSnapshot().activeTools[0]?.permissions?.[0];
+		expect(permission).toMatchObject({
+			source: "human",
+			state: "deny",
+			prior: "auto-unsure",
+			reason: "not yet",
+		});
+	});
+
+	it("retains bounded standalone permission checks", () => {
+		const tracker = createRunActivityTracker({ cwd: "/repo" });
+		for (let index = 0; index < 14; index += 1)
+			tracker.recordPermission({
+				requestId: `skill-${index}`,
+				toolCallId: null,
+				surface: "skill",
+				value: `s${index}`,
+				source: "policy",
+				state: "allow",
+				at: index,
+			});
+		expect(tracker.getSnapshot().standalonePermissions).toHaveLength(12);
+		expect(tracker.getSnapshot().standalonePermissions?.[0]?.requestId).toBe("skill-13");
 	});
 
 	it("returns frozen snapshots with isolated arrays and cloned tool records", () => {

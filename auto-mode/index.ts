@@ -38,7 +38,7 @@ import {
 	type Verdict,
 } from "./core.ts";
 import { formatEditForClassifier } from "./edit-preview.ts";
-import { publishPanel, type PanelPublisher } from "./panel.ts";
+import { publishAutoMode, type AutoModePublisher } from "./events.ts";
 
 /** The chain-link name the operator must list in `authorizerChain`. */
 const LINK_NAME = "auto";
@@ -82,7 +82,7 @@ interface Runtime {
 	enabled: boolean;
 	cache: VerdictCache;
 	log: DecisionLog;
-	panel: PanelPublisher;
+	publisher: AutoModePublisher;
 	gitRemotes: readonly string[];
 	disposers: Array<() => void>;
 	notifiedIssues: boolean;
@@ -119,7 +119,7 @@ export default function autoMode(pi: ExtensionAPI): void {
 			// exactly as it did before this extension was installed.
 			runtime.ctx.ui.setStatus(STATUS_KEY, current.enabled ? footerLabel(current) : undefined);
 		}
-		runtime.panel.update(current);
+		runtime.publisher.update(current);
 	}
 
 	// ── Review pipeline ────────────────────────────────────────────────────
@@ -134,6 +134,7 @@ export default function autoMode(pi: ExtensionAPI): void {
 		modelCalled: boolean,
 		latencyMs: number | null,
 		cached: boolean,
+		toolCallId: string | null,
 	): void {
 		const entry: DecisionRecord = {
 			requestId,
@@ -148,6 +149,7 @@ export default function autoMode(pi: ExtensionAPI): void {
 			at: Date.now(),
 		};
 		runtime?.log.add(entry);
+		runtime?.publisher.decision(entry, toolCallId);
 		// One durable entry per handled ask, joinable to the gate's own records
 		// by requestId. A misconfiguration that silently defers everything shows
 		// up here as a run of deferReason entries rather than an empty log.
@@ -238,6 +240,7 @@ export default function autoMode(pi: ExtensionAPI): void {
 			unknown
 		>;
 		const requestId = typeof details.requestId === "string" ? details.requestId : "unknown";
+		const toolCallId = typeof details.toolCallId === "string" ? details.toolCallId : null;
 
 		// 1. The runtime toggle is authoritative. Config drift grants nothing.
 		if (!runtime?.enabled) {
@@ -245,14 +248,14 @@ export default function autoMode(pi: ExtensionAPI): void {
 			return DEFER;
 		}
 		if (!runtime.load.usable) {
-			record(log, requestId, { surface: "unknown", value: "" }, DEFER, "config-unusable", false, null, false);
+			record(log, requestId, { surface: "unknown", value: "" }, DEFER, "config-unusable", false, null, false, toolCallId);
 			return DEFER;
 		}
 
 		// 2. Determine the gate surface the rule actually fired on.
 		const surface = resolveGateSurface(details as never);
 		if (surface === undefined) {
-			record(log, requestId, { surface: "unknown", value: "" }, DEFER, "unknown-surface", false, null, false);
+			record(log, requestId, { surface: "unknown", value: "" }, DEFER, "unknown-surface", false, null, false, toolCallId);
 			return DEFER;
 		}
 
@@ -273,7 +276,7 @@ export default function autoMode(pi: ExtensionAPI): void {
 		const key = cacheKey(surface, facts.value, facts.agentName, factsDigest);
 		const cached = runtime.cache.get(key);
 		if (cached) {
-			record(log, requestId, facts, cached, null, false, null, true);
+			record(log, requestId, facts, cached, null, false, null, true, toolCallId);
 			return cached;
 		}
 
@@ -287,11 +290,11 @@ export default function autoMode(pi: ExtensionAPI): void {
 			model = undefined;
 		}
 		if (!model) {
-			record(log, requestId, facts, DEFER, "model-unresolved", false, null, false);
+			record(log, requestId, facts, DEFER, "model-unresolved", false, null, false, toolCallId);
 			return DEFER;
 		}
 		if (!runtime.ctx.modelRegistry.hasConfiguredAuth(model)) {
-			record(log, requestId, facts, DEFER, "auth-failed", false, null, false);
+			record(log, requestId, facts, DEFER, "auth-failed", false, null, false, toolCallId);
 			return DEFER;
 		}
 
@@ -327,7 +330,7 @@ export default function autoMode(pi: ExtensionAPI): void {
 		});
 
 		runtime.cache.set(key, verdict);
-		record(log, requestId, facts, verdict, deferReason, result.modelCalled, result.latencyMs, false);
+		record(log, requestId, facts, verdict, deferReason, result.modelCalled, result.latencyMs, false, toolCallId);
 		return verdict;
 	}
 
@@ -411,7 +414,7 @@ export default function autoMode(pi: ExtensionAPI): void {
 				// A failed disposer must not block a new session.
 			}
 		}
-		runtime?.panel.dispose();
+		runtime?.publisher.dispose();
 
 		const load = loadAutoModeConfig({
 			agentDir: getAgentDir(),
@@ -427,7 +430,7 @@ export default function autoMode(pi: ExtensionAPI): void {
 			enabled: load.config.enabledByDefault && load.usable,
 			cache: new VerdictCache(),
 			log: new DecisionLog(load.config.maxDecisionLog),
-			panel: publishPanel(pi),
+			publisher: publishAutoMode(pi.events),
 			gitRemotes: [],
 			disposers: [],
 			notifiedIssues: false,
@@ -463,7 +466,7 @@ export default function autoMode(pi: ExtensionAPI): void {
 				// Best-effort teardown.
 			}
 		}
-		runtime?.panel.dispose();
+		runtime?.publisher.dispose();
 		if (runtime?.ctx.hasUI) runtime.ctx.ui.setStatus(STATUS_KEY, undefined);
 		runtime = undefined;
 	});

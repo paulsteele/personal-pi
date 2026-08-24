@@ -83,7 +83,7 @@ Primary files:
 The feature, config key, event subscription, process spawning, and tests are removed. The separate
 local `desktop-notifications` extension remains the only desktop notification owner.
 
-### 5. Auto-mode status as a required footer item
+### 5. Unified permission activity and auto-mode footer status
 
 Primary files:
 
@@ -93,18 +93,20 @@ Primary files:
 - `tests/footer.test.ts`
 
 The local `auto-mode` extension (`~/.pi/agent/extensions/local/auto-mode/`) publishes an `auto-mode`
-Pi extension status and an `auto-mode:status` sidebar panel. The panel needs no fork code: it arrives
-through Atelier's existing public contribution protocol. This patch adds only the footer projection.
+Pi extension status plus bounded state/decision events. The local permission-system Bun patch adds
+tool-call correlation and decision provenance to its prompt/final-decision events. Atelier joins these
+events into Activity, keeping one tool row and one indented permission row per check. The previous
+`auto-mode:status` contributed sidebar panel is deliberately not published.
 
 `FooterState.autoModeStatus` carries the compact label. It renders first in the left zone as a
 required item with an infinite drop rank, and is filtered out of the ordinary extension-statuses
 segment so it is never rendered twice.
 
-**Invariant:** the panel and the footer item are two renders of one state and are mutually exclusive.
-The fork's footer already returns `[]` while the sidebar is presented (patch 2), so the panel shows
-with the sidebar up and the footer item shows with it hidden. Width pressure must never drop the
-auto-mode item: while a classifier is approving actions on the operator's behalf, that fact has to
-stay visible.
+**Invariant:** Activity is the only sidebar permission timeline. It must correlate tool checks by
+`toolCallId`, retain each check rather than collapsing multi-gate calls, and visibly distinguish
+policy, auto, and human outcomes. While the sidebar is hidden, width pressure must never drop the
+auto-mode footer item: while a classifier is approving actions on the operator's behalf, that fact
+has to stay visible.
 
 ### 6. Fixed personal feature set; no configuration or resize UI
 

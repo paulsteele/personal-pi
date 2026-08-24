@@ -4,6 +4,21 @@ import type { DisplayValue, ResponsePerformance } from "./types.js";
 
 export type ToolActivityStatus = "running" | "done" | "failed";
 
+export type PermissionSource = "policy" | "auto" | "human" | "authorizer" | "system";
+export type PermissionState = "pending" | "allow" | "deny" | "unsure";
+
+export interface PermissionActivity {
+	requestId: string;
+	toolCallId: string | null;
+	surface: string;
+	value: string;
+	source: PermissionSource;
+	state: PermissionState;
+	prior?: "policy-ask" | "auto-unsure";
+	reason?: string;
+	at: number;
+}
+
 export interface ToolActivity {
 	id: string;
 	name: string;
@@ -11,6 +26,7 @@ export interface ToolActivity {
 	status: ToolActivityStatus;
 	startedAt: number;
 	durationMs?: number;
+	permissions?: readonly PermissionActivity[];
 }
 
 export interface RunActivitySnapshot {
@@ -21,6 +37,7 @@ export interface RunActivitySnapshot {
 	performance?: ResponsePerformance;
 	activeTools: readonly ToolActivity[];
 	recentTools: readonly ToolActivity[];
+	standalonePermissions?: readonly PermissionActivity[];
 	completedCount: number;
 	failedCount: number;
 }
@@ -49,6 +66,7 @@ export interface RunActivityTracker {
 	finishResponse(outputTokens: number, now?: number): void;
 	startTool(event: ToolExecutionStartEvent, now?: number): void;
 	finishTool(event: ToolExecutionEndEvent, now?: number): void;
+	recordPermission(permission: PermissionActivity): void;
 	settle(now?: number): void;
 	reset(): void;
 	isRunning(): boolean;
@@ -61,12 +79,15 @@ export interface RunActivityTrackerOptions {
 }
 
 const MAX_SUMMARY_COLUMNS = 26;
-const MAX_RECENT_TOOLS = 3;
+const MAX_RECENT_TOOLS = 12;
+const MAX_STANDALONE_PERMISSIONS = 12;
+const MAX_PENDING_PERMISSIONS = 96;
 
 export const EMPTY_RUN_ACTIVITY: RunActivitySnapshot = Object.freeze({
 	phase: "idle",
 	activeTools: Object.freeze([]),
 	recentTools: Object.freeze([]),
+	standalonePermissions: Object.freeze([]),
 	completedCount: 0,
 	failedCount: 0,
 });
@@ -150,6 +171,8 @@ class DefaultRunActivityTracker implements RunActivityTracker {
 	private performance: ResponsePerformance | undefined;
 	private activeTools = new Map<string, ToolActivity>();
 	private recentTools: ToolActivity[] = [];
+	private standalonePermissions: PermissionActivity[] = [];
+	private pendingPermissions = new Map<string, PermissionActivity[]>();
 	private completedCount = 0;
 	private failedCount = 0;
 	private readonly cwd: string;
@@ -169,7 +192,7 @@ class DefaultRunActivityTracker implements RunActivityTracker {
 		this.firstTokenAt = undefined;
 		this.performance = undefined;
 		this.activeTools = new Map<string, ToolActivity>();
-		this.recentTools = [];
+		// Keep cross-prompt history; startRun resets only live-run state/counts.
 		this.completedCount = 0;
 		this.failedCount = 0;
 		this.notify();
@@ -254,10 +277,48 @@ class DefaultRunActivityTracker implements RunActivityTracker {
 			summary: summarizeTool(event.toolName, event.args, this.cwd),
 			status: "running",
 			startedAt: normalizeTimestamp(now ?? Date.now()),
+			permissions: this.takePending(id),
 		});
 		this.phase = "running";
 		this.durationMs = undefined;
 		this.activeTools.set(id, tool);
+		this.notify();
+	}
+
+	recordPermission(permission: PermissionActivity): void {
+		const safe = freezePermission(permission);
+		if (!safe.requestId) return;
+		if (!safe.toolCallId) {
+			this.standalonePermissions = [
+				safe,
+				...this.standalonePermissions.filter((item) => item.requestId !== safe.requestId),
+			].slice(0, MAX_STANDALONE_PERMISSIONS);
+			this.notify();
+			return;
+		}
+		const attach = (tool: ToolActivity): ToolActivity =>
+			freezeTool({ ...tool, permissions: mergePermissions(tool.permissions ?? [], safe) });
+		const active = this.activeTools.get(safe.toolCallId);
+		if (active) {
+			this.activeTools.set(safe.toolCallId, attach(active));
+			this.notify();
+			return;
+		}
+		const recentIndex = this.recentTools.findIndex((tool) => tool.id === safe.toolCallId);
+		if (recentIndex >= 0) {
+			this.recentTools[recentIndex] = attach(this.recentTools[recentIndex]!);
+			this.notify();
+			return;
+		}
+		this.pendingPermissions.set(
+			safe.toolCallId,
+			mergePermissions(this.pendingPermissions.get(safe.toolCallId) ?? [], safe),
+		);
+		while (this.pendingPermissions.size > MAX_PENDING_PERMISSIONS) {
+			const oldest = this.pendingPermissions.keys().next().value as string | undefined;
+			if (!oldest) break;
+			this.pendingPermissions.delete(oldest);
+		}
 		this.notify();
 	}
 
@@ -318,6 +379,8 @@ class DefaultRunActivityTracker implements RunActivityTracker {
 		this.performance = undefined;
 		this.activeTools = new Map<string, ToolActivity>();
 		this.recentTools = [];
+		this.standalonePermissions = [];
+		this.pendingPermissions.clear();
 		this.completedCount = 0;
 		this.failedCount = 0;
 		this.notify();
@@ -330,6 +393,7 @@ class DefaultRunActivityTracker implements RunActivityTracker {
 	getSnapshot(): RunActivitySnapshot {
 		const activeTools = freezeToolArray(Array.from(this.activeTools.values()));
 		const recentTools = freezeToolArray(this.recentTools);
+		const standalonePermissions = Object.freeze(this.standalonePermissions.map(freezePermission));
 		const snapshot: RunActivitySnapshot = {
 			phase: this.phase,
 			...(this.turnNumber === undefined ? {} : { turnNumber: this.turnNumber }),
@@ -338,10 +402,17 @@ class DefaultRunActivityTracker implements RunActivityTracker {
 			...(this.performance === undefined ? {} : { performance: freezePerformance(this.performance) }),
 			activeTools,
 			recentTools,
+			standalonePermissions,
 			completedCount: this.completedCount,
 			failedCount: this.failedCount,
 		};
 		return Object.freeze(snapshot);
+	}
+
+	private takePending(toolCallId: string): readonly PermissionActivity[] {
+		const pending = this.pendingPermissions.get(toolCallId) ?? [];
+		this.pendingPermissions.delete(toolCallId);
+		return pending;
 	}
 
 	private notify(): void {
@@ -359,6 +430,8 @@ class DefaultRunActivityTracker implements RunActivityTracker {
 			this.performance === undefined &&
 			this.activeTools.size === 0 &&
 			this.recentTools.length === 0 &&
+			this.standalonePermissions.length === 0 &&
+			this.pendingPermissions.size === 0 &&
 			this.completedCount === 0 &&
 			this.failedCount === 0
 		);
@@ -375,7 +448,34 @@ function freezePerformance(performance: ResponsePerformance): ResponsePerformanc
 }
 
 function freezeTool(tool: ToolActivity): ToolActivity {
-	return Object.freeze({ ...tool });
+	return Object.freeze({
+		...tool,
+		permissions: Object.freeze((tool.permissions ?? []).map(freezePermission)),
+	});
+}
+
+function freezePermission(permission: PermissionActivity): PermissionActivity {
+	const reason = permission.reason ? sanitizeText(permission.reason).slice(0, 500) || undefined : undefined;
+	return Object.freeze({
+		...permission,
+		requestId: sanitizeText(permission.requestId).slice(0, 160),
+		toolCallId: permission.toolCallId ? sanitizeText(permission.toolCallId).slice(0, 160) || null : null,
+		surface: sanitizeText(permission.surface).slice(0, 100),
+		value: sanitizeText(permission.value).slice(0, 500),
+		...(reason ? { reason } : {}),
+		at: normalizeTimestamp(permission.at),
+	});
+}
+
+function mergePermissions(
+	current: readonly PermissionActivity[],
+	next: PermissionActivity,
+): PermissionActivity[] {
+	const previous = current.find((item) => item.requestId === next.requestId);
+	const merged = previous?.prior && next.prior !== "auto-unsure" ? { ...next, prior: previous.prior } : next;
+	return [...current.filter((item) => item.requestId !== next.requestId), merged].sort(
+		(left, right) => left.at - right.at,
+	);
 }
 
 function cloneTool(tool: ToolActivity): ToolActivity {

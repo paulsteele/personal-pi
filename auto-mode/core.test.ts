@@ -629,6 +629,29 @@ describe("panel rendering", () => {
 		expect(text).toContain("classifier was unsure");
 	});
 
+	test("publishes replayable state and correlated classifier decisions", async () => {
+		const { AUTO_MODE_DECISION_CHANNEL, AUTO_MODE_DISCOVER_CHANNEL, AUTO_MODE_STATE_CHANNEL, publishAutoMode } = await import("./events.ts");
+		const listeners = new Map<string, (data: unknown) => void>();
+		const emitted: Array<{ channel: string; data: unknown }> = [];
+		const publisher = publishAutoMode({
+			on: (channel, handler) => {
+				listeners.set(channel, handler);
+				return () => listeners.delete(channel);
+			},
+			emit: (channel, data) => emitted.push({ channel, data }),
+		});
+		publisher.update({ enabled: true, usable: true, modelId: "p/m", allowed: 1, denied: 0, escalated: 0, recent: [] });
+		listeners.get(AUTO_MODE_DISCOVER_CHANNEL)?.({});
+		publisher.decision(record({ requestId: "request-1", verdict: "defer", deferReason: "non-decisive-verdict", reason: "need target" }), "tool-1");
+		expect(emitted.filter((event) => event.channel === AUTO_MODE_STATE_CHANNEL)).toHaveLength(2);
+		const decision = emitted.find((event) => event.channel === AUTO_MODE_DECISION_CHANNEL)?.data as Record<string, unknown> | undefined;
+		expect(decision?.requestId).toBe("request-1");
+		expect(decision?.toolCallId).toBe("tool-1");
+		expect(decision?.verdict).toBe("defer");
+		expect(decision?.reason).toBe("need target");
+		publisher.dispose();
+	});
+
 	test("shows the classifier's specific defer reason when available", async () => {
 		const { buildPanelRows } = await import("./panel.ts");
 		const rows = buildPanelRows({

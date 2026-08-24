@@ -1102,6 +1102,65 @@ describe("sidebar snapshot and layout", () => {
 		expect(rows).toContain(expected);
 	});
 
+	it("renders unified policy, auto, human, and standalone permission rows", () => {
+		const rows = contentRows(
+			renderSidebarLines(
+				withActivity({
+					phase: "running",
+					startedAt: 1_000,
+					activeTools: [
+						{
+							id: "bash-1",
+							name: "bash",
+							summary: "git push",
+							status: "running",
+							startedAt: 2_000,
+							permissions: [
+								{
+									requestId: "r1",
+									toolCallId: "bash-1",
+									surface: "bash",
+									value: "git push",
+									source: "human",
+									state: "deny",
+									prior: "auto-unsure",
+									reason: "not reviewed",
+									at: 3_000,
+								},
+							],
+						},
+					],
+					recentTools: [],
+					standalonePermissions: [
+						{
+							requestId: "skill-1",
+							toolCallId: null,
+							surface: "skill",
+							value: "deploy",
+							source: "policy",
+							state: "allow",
+							at: 4_000,
+						},
+					],
+					completedCount: 0,
+					failedCount: 0,
+				}),
+				theme,
+				44,
+				36,
+				false,
+				5_000,
+			),
+		);
+		expect(rows).toEqual(
+			expect.arrayContaining([
+				expect.stringContaining("auto unsure → human"),
+				expect.stringContaining("not reviewed"),
+				expect.stringContaining("policy allow"),
+			]),
+		);
+	});
+
 	it("renders response performance as a compact optional Activity row", () => {
 		const ttftOnly = contentRows(
 			renderSidebarLines(
@@ -1382,13 +1441,13 @@ describe("sidebar snapshot and layout", () => {
 				20_000,
 			),
 		);
-		const recentRows = rows.filter((row) => /^(bash|edit|write)\s+/.test(row));
-		expect(recentRows).toHaveLength(3);
+		const recentRows = rows.filter((row) => /^(bash|edit|write|grep)\s+/.test(row));
+		expect(recentRows).toHaveLength(4);
 		expect(recentRows[0]).toMatch(/^bash\s+n+/);
 		expect(recentRows[1]).toMatch(/^edit\s+middle\s+done 1s$/);
 		expect(recentRows[2]).toMatch(/^write\s+older\s+done 1s$/);
+		expect(recentRows[3]).toMatch(/^grep\s+oldest\s+done 1s$/);
 		expect(rows).not.toEqual(expect.arrayContaining([expect.stringContaining("duplicate")]));
-		expect(rows).not.toEqual(expect.arrayContaining([expect.stringContaining("oldest")]));
 		expect(rows.every((row) => visibleWidth(row) <= 32)).toBe(true);
 	});
 

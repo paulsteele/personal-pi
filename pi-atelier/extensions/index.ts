@@ -12,7 +12,13 @@ import {
 	plannotatorPanel,
 	type PlannotatorIntegration,
 } from "../src/plannotator.js";
-import { createRunActivityTracker, type RunActivityTracker } from "../src/run-activity.js";
+import {
+	createRunActivityTracker,
+	type PermissionActivity,
+	type PermissionSource,
+	type PermissionState,
+	type RunActivityTracker,
+} from "../src/run-activity.js";
 import {
 	buildSidebarSnapshot,
 	createSidebarController,
@@ -73,6 +79,17 @@ interface ActiveSession {
 	readonly retiredState: AtelierState;
 	readonly retiredCwd: string;
 	footerDisposer: (() => void) | undefined;
+	permissionDisposers: Array<() => void>;
+	autoModeState:
+		| {
+				enabled: boolean;
+				usable: boolean;
+				modelId: string;
+				allowed: number;
+				denied: number;
+				escalated: number;
+		  }
+		| undefined;
 	footerGeneration: number;
 	retired: boolean;
 	requestFooterRender: () => void;
@@ -138,6 +155,92 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 		targetSession.plannotator.scheduleRefresh(targetSession.ctx, () => refreshPlannotator(targetSession));
 	}
 
+	function permissionFromDecision(raw: unknown): PermissionActivity | undefined {
+		if (typeof raw !== "object" || raw === null) return undefined;
+		const event = raw as Record<string, unknown>;
+		if (
+			typeof event.requestId !== "string" ||
+			typeof event.surface !== "string" ||
+			typeof event.value !== "string"
+		)
+			return undefined;
+		const result = event.result === "allow" || event.result === "deny" ? event.result : undefined;
+		if (!result) return undefined;
+		const decidedBy = event.decidedBy as { kind?: unknown; name?: unknown } | undefined;
+		const kind = decidedBy?.kind;
+		const source: PermissionSource =
+			kind === "user"
+				? "human"
+				: kind === "authorizer" && decidedBy?.name === "auto"
+					? "auto"
+					: kind === "authorizer"
+						? "authorizer"
+						: kind === "gate_error" || kind === "unavailable"
+							? "system"
+							: "policy";
+		const resolution = event.resolution;
+		const reason = typeof event.reason === "string" ? event.reason : undefined;
+		return {
+			requestId: event.requestId,
+			toolCallId: typeof event.toolCallId === "string" ? event.toolCallId : null,
+			surface: event.surface,
+			value: event.value,
+			source,
+			state: result,
+			...(source === "human" && kind === "user" ? { prior: "policy-ask" as const } : {}),
+			...(resolution === "confirmation_unavailable" || resolution === "gate_error"
+				? { source: "system" as const }
+				: {}),
+			...(reason ? { reason } : {}),
+			at: Date.now(),
+		};
+	}
+
+	function permissionFromPrompt(raw: unknown): PermissionActivity | undefined {
+		if (typeof raw !== "object" || raw === null) return undefined;
+		const event = raw as Record<string, unknown>;
+		if (
+			typeof event.requestId !== "string" ||
+			typeof event.surface !== "string" ||
+			typeof event.value !== "string"
+		)
+			return undefined;
+		return {
+			requestId: event.requestId,
+			toolCallId: typeof event.toolCallId === "string" ? event.toolCallId : null,
+			surface: event.surface,
+			value: event.value,
+			source: "human",
+			state: "pending",
+			prior: "policy-ask",
+			at: Date.now(),
+		};
+	}
+
+	function permissionFromAuto(raw: unknown): PermissionActivity | undefined {
+		if (typeof raw !== "object" || raw === null) return undefined;
+		const event = raw as Record<string, unknown>;
+		if (
+			typeof event.requestId !== "string" ||
+			typeof event.surface !== "string" ||
+			typeof event.value !== "string"
+		)
+			return undefined;
+		const verdict = event.verdict;
+		if (verdict !== "allow" && verdict !== "deny" && verdict !== "defer") return undefined;
+		return {
+			requestId: event.requestId,
+			toolCallId: typeof event.toolCallId === "string" ? event.toolCallId : null,
+			surface: event.surface,
+			value: event.value,
+			source: "auto",
+			state: verdict === "defer" ? "unsure" : verdict,
+			...(verdict === "defer" ? { prior: "auto-unsure" as const } : {}),
+			...(typeof event.reason === "string" ? { reason: event.reason } : {}),
+			at: typeof event.at === "number" ? event.at : Date.now(),
+		};
+	}
+
 	function getSidebarSnapshot(targetSession: ActiveSession): SidebarSnapshot {
 		if (targetSession.retired || activeSession !== targetSession) {
 			return buildSidebarSnapshot({
@@ -163,6 +266,7 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 			branchEntryCount: ctx.sessionManager.getBranch().length,
 			extensionStatuses: targetSession.extensionStatuses,
 			runActivity: runActivity.getSnapshot(),
+			...(targetSession.autoModeState ? { autoModeState: targetSession.autoModeState } : {}),
 			sidebarPanels: panelRegistry.getAvailable(),
 		});
 	}
@@ -221,6 +325,7 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 		clearFooter(session, options.clearFooter === true);
 		cleanup(() => session.sidebar.dispose());
 		cleanup(() => session.panelRegistry.dispose());
+		for (const dispose of session.permissionDisposers.splice(0)) cleanup(dispose);
 		cleanup(() => session.runtime.dispose());
 		cleanup(() => session.runActivity.reset());
 		cleanup(() => session.plannotator.dispose());
@@ -409,6 +514,8 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 				retiredState: createInertAtelierState(autoCompact),
 				retiredCwd: initializationContext.cwd,
 				footerDisposer: undefined,
+				permissionDisposers: [],
+				autoModeState: undefined,
 				footerGeneration: 0,
 				retired: false,
 				requestFooterRender: noopRender,
@@ -423,6 +530,44 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 			activeSession = nextSession;
 			publishedSession = nextSession;
 			if (previousSession) disposeSession(previousSession, { clearFooter: true });
+
+			const trackPermission =
+				(factory: (raw: unknown) => PermissionActivity | undefined) => (raw: unknown) => {
+					if (activeSession !== nextSession || nextSession.retired) return;
+					const permission = factory(raw);
+					if (permission) nextSession.runActivity.recordPermission(permission);
+				};
+			nextSession.permissionDisposers.push(
+				pi.events.on("permissions:ui_prompt", trackPermission(permissionFromPrompt)),
+				pi.events.on("permissions:decision", trackPermission(permissionFromDecision)),
+				pi.events.on("auto-mode:decision", trackPermission(permissionFromAuto)),
+				pi.events.on("auto-mode:state", (raw) => {
+					if (activeSession !== nextSession || typeof raw !== "object" || raw === null) return;
+					const state = raw as Record<string, unknown>;
+					if (
+						typeof state.enabled !== "boolean" ||
+						typeof state.usable !== "boolean" ||
+						typeof state.modelId !== "string"
+					)
+						return;
+					if (
+						![state.allowed, state.denied, state.escalated].every(
+							(value) => typeof value === "number" && Number.isFinite(value),
+						)
+					)
+						return;
+					nextSession.autoModeState = {
+						enabled: state.enabled,
+						usable: state.usable,
+						modelId: state.modelId,
+						allowed: state.allowed as number,
+						denied: state.denied as number,
+						escalated: state.escalated as number,
+					};
+					nextSession.sidebar.requestRender();
+				}),
+			);
+			pi.events.emit("auto-mode:discover", {});
 
 			if (isFresh() && activeSession === nextSession) {
 				installFooter(nextSession);

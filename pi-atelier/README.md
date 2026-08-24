@@ -7,7 +7,8 @@ A source-owned personal Pi extension for this installation. Read [`FORK.md`](FOR
 - Fullscreen-only sidebar implemented as a real layout pane
 - Pane-local transcript and sidebar text selection
 - Fixed responsive sizing: 44-column preferred width, shrinking to 28 columns before auto-hide below 92 terminal columns
-- Plannotator, Agent, Activity/tool history, Alerts, Context, Workspace/Git/session, and Usage panels
+- Plannotator, Agent, unified Activity/tool-and-permission history, Alerts, Context, Workspace/Git/session, and Usage panels
+- Policy, auto-mode, and human permission outcomes rendered on the relevant Activity timeline rows
 - Namespaced external panel contributions through Atelier's bounded event protocol
 - Zero-height footer while the sidebar is presented
 - Dense responsive status rail while the sidebar is hidden, including response performance
@@ -26,7 +27,7 @@ A source-owned personal Pi extension for this installation. Read [`FORK.md`](FOR
 
 The sidebar starts visible in Pi's fullscreen TUI and hides when the terminal is too narrow. Scroll over the sidebar to browse every panel independently of the transcript. Layout and behavior are intentionally fixed in source rather than user configuration.
 
-Plannotator progress appears during planning and execution. Pi supports one custom footer at a time; this extension owns it, renders zero rows while its fullscreen sidebar is presented, and restores the fallback status rail when hidden. Regular and unknown renderers fail closed without layout mutation or overlay presentation.
+Plannotator progress appears during planning and execution. Auto mode contributes state and per-request classifier observations to Activity; the permission system contributes final policy/human outcomes. Pi supports one custom footer at a time; this extension owns it, renders zero rows while its fullscreen sidebar is presented, and restores the fallback status rail when hidden. Regular and unknown renderers fail closed without layout mutation or overlay presentation.
 
 ## Privacy
 
