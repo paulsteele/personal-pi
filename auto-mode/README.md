@@ -86,6 +86,13 @@ attacker-influencable, so feeding the agent's own text back into the safety clas
 injected content argue for its own approval. The user-message block is explicitly marked untrusted
 data in the system prompt.
 
+For `edit`, auto mode registers a permission-system input formatter that renders the proposed
+`oldText`/`newText` replacements as bounded patch-like evidence before execution. It does not read
+the filesystem. The preview is marked as untrusted data, capped at 8,000 characters overall, and
+budgeted per replacement so one large change cannot hide later replacements. Full shell-command
+evidence receives a separate 2,000-character budget so a gated fragment such as `node` or a variable
+assignment can be judged together with the enclosing command.
+
 That context is what lets the classifier honor boundaries you state in conversation ("don't push",
 "wait until I review") and judge whether an action has escalated beyond what you asked for.
 
@@ -106,7 +113,9 @@ Every handled ask writes one `auto_mode.decision` entry to pi-permission-system'
 (`~/.pi/agent/extensions/pi-permission-system/logs/pi-permission-system-permission-review.jsonl`),
 keyed by `requestId` so it joins to the gate's own records:
 
-`requestId`, `surface`, `verdict`, `deferReason`, `modelCalled`, `latencyMs`, `cached`, `modelId`.
+`requestId`, `surface`, `verdict`, `reason`, `deferReason`, `modelCalled`, `latencyMs`, `cached`, `modelId`.
+The classifier is required to explain both `deny` and `defer`; a defer explanation names the missing
+fact that requires the operator's decision.
 
 Cheaper detail (`auto_mode.short_circuit`, `auto_mode.model_reply`) goes to the debug log, and only
 when pi-permission-system's `debugLog` toggle is on.
@@ -116,9 +125,9 @@ everything shows up as a run of `deferReason` entries rather than an empty log.
 
 ## Verdict caching
 
-Verdicts are cached per turn, keyed by surface + value + agent, and dropped on every `turn_start`
-and on any mode toggle. This stops a loop that runs the same command repeatedly from paying for a
-classifier call each time. `defer` is never cached — a human's answer is not ours to remember.
+Verdicts are cached per turn, keyed by surface + value + agent + decision evidence, and dropped on
+every `turn_start` and on any mode toggle. This stops a loop that runs the same command repeatedly
+from paying for a classifier call each time. `defer` is never cached — a human's answer is not ours to remember.
 
 The cache key is length-prefixed rather than delimiter-joined, so a crafted command value cannot
 forge a key collision and inherit another action's cached `allow`.

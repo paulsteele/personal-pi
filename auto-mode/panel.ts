@@ -49,7 +49,7 @@ export function buildPanelRows(snapshot: AutoModeSnapshot): Array<{ text: string
 			// So is an escalation: "why did auto mode still interrupt me?" is the
 			// question this panel most needs to answer.
 			if (decision.verdict === "defer") {
-				const why = explainDefer(decision.deferReason);
+				const why = decision.reason ?? explainDefer(decision.deferReason);
 				if (why) rows.push({ text: `  ${why}`, role: "dim" });
 			}
 		}

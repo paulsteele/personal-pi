@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { applyConfigLayer, DEFAULT_CONFIG, loadAutoModeConfig, saveAutoModeModel } from "./config.ts";
+import { EDIT_PREVIEW_MARKER, formatEditForClassifier, MAX_EDIT_PREVIEW_CHARS } from "./edit-preview.ts";
 import {
 	applyAuthorityPolicy,
 	cacheKey,
@@ -76,7 +77,14 @@ describe("parseVerdict — every malformed reply defers", () => {
 		});
 	}
 
-	test("an explicit defer is recorded as non-decisive, not as a parse failure", () => {
+	test("an explicit defer keeps its diagnostic reason", () => {
+		expect(parseVerdict({ verdict: "defer", reason: "Need the target environment." })).toEqual({
+			verdict: { kind: "defer", reason: "Need the target environment." },
+			deferReason: "non-decisive-verdict",
+		});
+	});
+
+	test("an explicit defer without a reason remains safely usable", () => {
 		expect(parseVerdict({ verdict: "defer" })).toEqual({
 			verdict: { kind: "defer" },
 			deferReason: "non-decisive-verdict",
@@ -161,10 +169,13 @@ describe("VerdictCache", () => {
 		expect(cache.size).toBe(0);
 	});
 
-	test("distinguishes surface, value, and agent", () => {
+	test("distinguishes surface, value, agent, and decision evidence", () => {
 		expect(cacheKey("bash", "a", null)).not.toBe(cacheKey("bash", "b", null));
 		expect(cacheKey("bash", "a", null)).not.toBe(cacheKey("write", "a", null));
 		expect(cacheKey("bash", "a", null)).not.toBe(cacheKey("bash", "a", "Explore"));
+		expect(cacheKey("edit", "edit", null, "old A/new B")).not.toBe(
+			cacheKey("edit", "edit", null, "old C/new D"),
+		);
 	});
 
 	test("a separator cannot be forged across fields", () => {
@@ -335,6 +346,44 @@ describe("config", () => {
 	});
 });
 
+describe("edit classifier preview", () => {
+	test("renders proposed old/new replacements before execution", () => {
+		const preview = formatEditForClassifier({
+			path: "/w/src/app.ts",
+			edits: [{ oldText: "const enabled = false;", newText: "const enabled = true;" }],
+		});
+		expect(preview).toContain(EDIT_PREVIEW_MARKER);
+		expect(preview).toContain("file: /w/src/app.ts");
+		expect(preview).toContain("- const enabled = false;");
+		expect(preview).toContain("+ const enabled = true;");
+	});
+
+	test("supports the legacy single-replacement shape", () => {
+		const preview = formatEditForClassifier({ path: "/w/a.ts", oldText: "old", newText: "new" });
+		expect(preview).toContain("replacements: 1");
+		expect(preview).toContain("- old");
+		expect(preview).toContain("+ new");
+	});
+
+	test("bounds large proposals and preserves later replacement headings", () => {
+		const preview = formatEditForClassifier({
+			path: "/w/a.ts",
+			edits: [
+				{ oldText: "a".repeat(20_000), newText: "b".repeat(20_000) },
+				{ oldText: "later old", newText: "later new" },
+			],
+		});
+		expect(preview).toBeDefined();
+		expect(preview?.length).toBeLessThanOrEqual(MAX_EDIT_PREVIEW_CHARS);
+		expect(preview).toContain("@@ replacement 2/2 @@");
+		expect(preview).toContain("later new");
+	});
+
+	test("declines malformed edit input so the built-in summary remains available", () => {
+		expect(formatEditForClassifier({ path: "/w/a.ts", edits: [{ oldText: "missing new" }] })).toBeUndefined();
+	});
+});
+
 describe("classifier prompt", () => {
 	const config = { ...DEFAULT_CONFIG, provider: "p", model: "m" };
 	const facts = {
@@ -369,6 +418,33 @@ describe("classifier prompt", () => {
 		const nested = { ...facts, commandContext: "command_substitution" };
 		const prompt = buildPrompt(nested, { cwd: "/w", gitRemotes: [], recentUserTurns: [] }, config);
 		expect(prompt).toContain("nested in: command_substitution");
+	});
+
+	test("keeps substantially more full-command evidence than generic evidence", async () => {
+		const { buildPrompt } = await import("./classifier.ts");
+		const long = "x".repeat(1500);
+		const prompt = buildPrompt(
+			{ ...facts, evidence: [{ label: "full command", text: long, detail: null }] },
+			{ cwd: "/w", gitRemotes: [], recentUserTurns: [] },
+			config,
+		);
+		expect(prompt).toContain(long);
+	});
+
+	test("keeps a bounded proposed edit as classifier evidence", async () => {
+		const { buildPrompt } = await import("./classifier.ts");
+		const preview = formatEditForClassifier({
+			path: "/w/app.ts",
+			edits: [{ oldText: "x".repeat(1000), newText: "y".repeat(1000) }],
+		});
+		expect(preview).toBeDefined();
+		const prompt = buildPrompt(
+			{ ...facts, surface: "edit", toolName: "edit", value: "edit", evidence: [{ label: "input", text: preview ?? "", detail: null }] },
+			{ cwd: "/w", gitRemotes: [], recentUserTurns: [] },
+			config,
+		);
+		expect(prompt).toContain(EDIT_PREVIEW_MARKER);
+		expect(prompt).toContain("y".repeat(700));
 	});
 
 	test("bounds an enormous value so the prompt cannot be flooded", async () => {
@@ -460,6 +536,17 @@ describe("classify — every failure path defers", () => {
 		expect(result.verdict).toEqual({ kind: "deny", reason: "unknown remote" });
 	});
 
+	test("a defer carries its diagnostic reason", async () => {
+		const result = await run(async () => ({
+			stopReason: "stop",
+			content: [
+				{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "defer", reason: "Need deployment target." } },
+			],
+		}));
+		expect(result.verdict).toEqual({ kind: "defer", reason: "Need deployment target." });
+		expect(result.deferReason).toBe("non-decisive-verdict");
+	});
+
 	test("an already-aborted turn makes no model call", async () => {
 		const controller = new AbortController();
 		controller.abort();
@@ -540,5 +627,19 @@ describe("panel rendering", () => {
 		expect(text).toContain("asked 1");
 		expect(text).toContain("→ external_directory: /tmp");
 		expect(text).toContain("classifier was unsure");
+	});
+
+	test("shows the classifier's specific defer reason when available", async () => {
+		const { buildPanelRows } = await import("./panel.ts");
+		const rows = buildPanelRows({
+			enabled: true,
+			usable: true,
+			modelId: "p/m",
+			allowed: 0,
+			denied: 0,
+			escalated: 1,
+			recent: [record({ verdict: "defer", reason: "Need deployment target.", deferReason: "non-decisive-verdict" })],
+		});
+		expect(rows.map((row) => row.text).join("\n")).toContain("Need deployment target.");
 	});
 });

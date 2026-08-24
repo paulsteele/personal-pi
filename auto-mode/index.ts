@@ -19,6 +19,7 @@
  *    permission-system config; it never writes it.
  */
 
+import { createHash } from "node:crypto";
 import { CONFIG_DIR_NAME, getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { classify, type ModelCaller, type ReviewContext, type ReviewFacts } from "./classifier.ts";
 
@@ -36,6 +37,7 @@ import {
 	type DeferReason,
 	type Verdict,
 } from "./core.ts";
+import { formatEditForClassifier } from "./edit-preview.ts";
 import { publishPanel, type PanelPublisher } from "./panel.ts";
 
 /** The chain-link name the operator must list in `authorizerChain`. */
@@ -66,6 +68,10 @@ interface PermissionsServiceLike {
 	registerAuthorizer?(
 		name: string,
 		authorize: (details: unknown, query: unknown, log: AuthorizerLogLike) => Promise<Verdict>,
+	): () => void;
+	registerToolInputFormatter?(
+		toolName: string,
+		formatter: (input: Record<string, unknown>) => string | undefined,
 	): () => void;
 }
 
@@ -149,6 +155,7 @@ export default function autoMode(pi: ExtensionAPI): void {
 			requestId,
 			surface: entry.surface,
 			verdict: entry.verdict,
+			reason: entry.reason,
 			deferReason: entry.deferReason,
 			modelCalled: entry.modelCalled,
 			latencyMs: entry.latencyMs,
@@ -258,7 +265,12 @@ export default function autoMode(pi: ExtensionAPI): void {
 		//    parser into this plugin. Every other authorizer remains capped.
 
 		// 4. Turn-scoped cache: one verdict per distinct action per turn.
-		const key = cacheKey(surface, facts.value, facts.agentName);
+		// Generic tool values (notably `edit`) can be identical for materially
+		// different actions. Digest every fact the classifier receives so one
+		// proposed change cannot inherit another's verdict, without retaining a
+		// potentially huge shell command in the cache key.
+		const factsDigest = createHash("sha256").update(JSON.stringify(facts)).digest("hex");
+		const key = cacheKey(surface, facts.value, facts.agentName, factsDigest);
 		const cached = runtime.cache.get(key);
 		if (cached) {
 			record(log, requestId, facts, cached, null, false, null, true);
@@ -336,8 +348,14 @@ export default function autoMode(pi: ExtensionAPI): void {
 				| PermissionsServiceLike
 				| undefined;
 			if (typeof service?.registerAuthorizer !== "function") return;
-			const dispose = service.registerAuthorizer(LINK_NAME, authorize);
-			runtime.disposers.push(dispose);
+			const disposeAuthorizer = service.registerAuthorizer(LINK_NAME, authorize);
+			runtime.disposers.push(disposeAuthorizer);
+			// The permission system invokes this before execution with the raw edit
+			// arguments, then carries the result as prompt evidence to the classifier.
+			if (typeof service.registerToolInputFormatter === "function") {
+				const disposeFormatter = service.registerToolInputFormatter("edit", formatEditForClassifier);
+				runtime.disposers.push(disposeFormatter);
+			}
 		} catch {
 			// Absent, incompatible, or already registered — auto mode stays inert
 			// and every ask keeps prompting exactly as it does today.

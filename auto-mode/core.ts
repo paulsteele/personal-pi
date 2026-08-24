@@ -103,9 +103,9 @@ export interface ParsedVerdict {
 /**
  * Convert a model reply into a verdict.
  *
- * A `deny` keeps its teaching reason so the agent can self-correct. Anything
- * that is not an exact, recognized decisive verdict becomes `defer` — including
- * an explicit `"defer"`, a misspelling, a non-string, or a missing field.
+ * A `deny` keeps its teaching reason so the agent can self-correct. An explicit
+ * `defer` keeps its diagnostic reason for the audit log and sidebar. Anything
+ * that is not an exact, recognized verdict becomes a reasonless `defer`.
  */
 export function parseVerdict(raw: RawVerdict | null | undefined): ParsedVerdict {
 	if (!raw || typeof raw !== "object") {
@@ -120,7 +120,11 @@ export function parseVerdict(raw: RawVerdict | null | undefined): ParsedVerdict 
 		return { verdict: reason ? { kind: "deny", reason } : { kind: "deny" }, deferReason: null };
 	}
 	if (kind === "defer") {
-		return { verdict: DEFER, deferReason: "non-decisive-verdict" };
+		const reason = sanitizeReason(raw.reason);
+		return {
+			verdict: reason ? { kind: "defer", reason } : DEFER,
+			deferReason: "non-decisive-verdict",
+		};
 	}
 	return { verdict: DEFER, deferReason: "unparseable-reply" };
 }
@@ -149,9 +153,9 @@ export function applyAuthorityPolicy(
  * an unrelated entry and inherit its cached `allow`. Encoding each field's
  * length makes the key injective for any input.
  */
-export function cacheKey(surface: string, value: string, agentName: string | null): string {
+export function cacheKey(surface: string, value: string, agentName: string | null, evidence = ""): string {
 	const agent = agentName ?? "";
-	return `${agent.length}:${agent}|${surface.length}:${surface}|${value.length}:${value}`;
+	return `${agent.length}:${agent}|${surface.length}:${surface}|${value.length}:${value}|${evidence.length}:${evidence}`;
 }
 
 /**
