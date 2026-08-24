@@ -22,22 +22,10 @@ export interface Verdict {
 
 export const DEFER: Verdict = { kind: "defer" };
 
-/**
- * Surfaces on which pi-permission-system caps a link's `allow` down to
- * `defer` (`src/authority/delegation-envelope.ts`).
- *
- * Mirrored here so we can short-circuit *before* paying for a model call on a
- * verdict that would be discarded anyway. This is a performance and cost
- * optimization layered on top of the real enforcement, never a replacement
- * for it: the chain owner caps these regardless of what we return.
- */
-export const CAPPED_SURFACES: ReadonlySet<string> = new Set(["external_directory", "path"]);
-
 /** Why a review did not produce a decisive verdict. Recorded to the review log. */
 export type DeferReason =
 	| "toggle-off"
 	| "config-unusable"
-	| "capped-surface"
 	| "unknown-surface"
 	| "model-unresolved"
 	| "auth-failed"
@@ -101,13 +89,6 @@ export function resolveGateSurface(details: {
 	return undefined;
 }
 
-/** Whether a link's `allow` on this surface would be capped to `defer` upstream. */
-export function isCappedSurface(surface: string | undefined): boolean {
-	// Fail safe: an indeterminate surface is treated as capped, matching
-	// pi-permission-system's own `isExcludedSurface`.
-	return surface === undefined || CAPPED_SURFACES.has(surface);
-}
-
 /** The raw shape a classifier reply is expected to take. */
 export interface RawVerdict {
 	verdict?: unknown;
@@ -145,17 +126,18 @@ export function parseVerdict(raw: RawVerdict | null | undefined): ParsedVerdict 
 }
 
 /**
- * Apply the local capped-surface guard to a verdict.
+ * Preserve the classifier's decision for every recognized gate surface.
  *
- * Mirrors pi-permission-system's bounded-delegation checkpoint: an `allow` on a
- * capped surface becomes `defer`. `deny` and `defer` pass through untouched,
- * because tightening is always permitted.
+ * The installed permission-system patch grants the explicitly configured
+ * `auto` link authority over `path` and `external_directory`; applying the
+ * stock delegation cap again here would silently undo that patch.
  */
-export function applyCap(verdict: Verdict, surface: string | undefined): ParsedVerdict {
-	if (verdict.kind === "allow" && isCappedSurface(surface)) {
-		return { verdict: DEFER, deferReason: "capped-surface" };
-	}
-	return { verdict, deferReason: null };
+export function applyAuthorityPolicy(
+	verdict: Verdict,
+	deferReason: DeferReason | null,
+	_surface: string,
+): ParsedVerdict {
+	return { verdict, deferReason };
 }
 
 /**
@@ -272,18 +254,9 @@ export function describeDecision(record: DecisionRecord, maxChars = 60): string 
 	return text.length > maxChars ? `${text.slice(0, maxChars - 1)}…` : text;
 }
 
-/**
- * Operator-facing explanation of why an ask reached them despite auto mode.
- *
- * `capped-surface` means the local Bun patch is missing or stale: this setup
- * explicitly delegates `path` and `external_directory` to the named `auto`
- * link. If upstream's stock envelope still caps the verdict, the patch was not
- * applied (usually after an unreviewed dependency upgrade).
- */
+/** Operator-facing explanation of why an ask reached them despite auto mode. */
 export function explainDefer(reason: DeferReason | null): string | null {
 	switch (reason) {
-		case "capped-surface":
-			return "auto authority patch missing or stale";
 		case "config-unusable":
 			return "no classifier model configured";
 		case "model-unresolved":

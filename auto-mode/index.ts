@@ -12,8 +12,8 @@
  *    while auto mode is off, so a stale `authorizerChain` entry left in the
  *    permission-system config can never grant authority on its own.
  * 2. **Every uncertainty defers.** Missing config, unresolved model, auth
- *    failure, timeout, malformed reply, capped surface — all fall through to
- *    the human prompt. Auto mode can only remove a prompt it is confident
+ *    failure, timeout, malformed reply, or unknown surface — all fall through
+ *    to the human prompt. Auto mode can only remove a prompt it is confident
  *    about, or add a denial.
  * 3. **The permission policy is never rewritten.** This extension reads the
  *    permission-system config; it never writes it.
@@ -24,12 +24,11 @@ import { classify, type ModelCaller, type ReviewContext, type ReviewFacts } from
 
 import { loadAutoModeConfig, saveAutoModeModel, type AutoModeConfig, type ConfigLoadResult } from "./config.ts";
 import {
-	applyCap,
+	applyAuthorityPolicy,
 	cacheKey,
 	DecisionLog,
 	DEFER,
 	footerLabel,
-	isCappedSurface,
 	resolveGateSurface,
 	VerdictCache,
 	type AutoModeSnapshot,
@@ -299,10 +298,14 @@ export default function autoMode(pi: ExtensionAPI): void {
 			signal: runtime.ctx.signal,
 		});
 
-		// 7. Local mirror of the bounded-delegation cap, belt and braces.
-		const capped = applyCap(result.verdict, surface);
-		const verdict = capped.verdict;
-		const deferReason = capped.deferReason ?? result.deferReason;
+		// 7. Return the classifier verdict unchanged. The installed permission-system
+		//    patch deliberately exempts this explicitly configured `auto` link from
+		//    the bounded-delegation envelope, including for path/external_directory.
+		//    Reapplying that cap here would make the patch ineffective and force every
+		//    such allow back to the human prompt.
+		const applied = applyAuthorityPolicy(result.verdict, result.deferReason, surface);
+		const verdict = applied.verdict;
+		const deferReason = applied.deferReason;
 
 		log.debug("auto_mode.model_reply", {
 			requestId,

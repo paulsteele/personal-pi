@@ -1,14 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { applyConfigLayer, DEFAULT_CONFIG, loadAutoModeConfig, saveAutoModeModel } from "./config.ts";
 import {
-	applyCap,
-	CAPPED_SURFACES,
+	applyAuthorityPolicy,
 	cacheKey,
 	DecisionLog,
 	describeDecision,
 	explainDefer,
 	footerLabel,
-	isCappedSurface,
 	MAX_REASON_CHARS,
 	parseVerdict,
 	resolveGateSurface,
@@ -106,31 +104,25 @@ describe("sanitizeReason", () => {
 	});
 });
 
-describe("capped surfaces", () => {
-	test("mirrors pi-permission-system's excluded set", () => {
-		expect([...CAPPED_SURFACES].sort()).toEqual(["external_directory", "path"]);
-	});
-
-	test("an allow on a capped surface is downgraded to defer", () => {
-		for (const surface of CAPPED_SURFACES) {
-			expect(applyCap({ kind: "allow" }, surface)).toEqual({ verdict: { kind: "defer" }, deferReason: "capped-surface" });
+describe("authority policy", () => {
+	test("preserves allow for the patched path surfaces", () => {
+		for (const surface of ["path", "external_directory"]) {
+			expect(applyAuthorityPolicy({ kind: "allow" }, null, surface)).toEqual({
+				verdict: { kind: "allow" },
+				deferReason: null,
+			});
 		}
 	});
 
-	test("deny and defer are never capped", () => {
-		expect(applyCap({ kind: "deny", reason: "r" }, "path").verdict).toEqual({ kind: "deny", reason: "r" });
-		expect(applyCap({ kind: "defer" }, "path").verdict).toEqual({ kind: "defer" });
-	});
-
-	test("an allow on an allow-capable surface passes through", () => {
-		for (const surface of ["bash", "write", "edit", "read", "mcp", "skill"]) {
-			expect(applyCap({ kind: "allow" }, surface).verdict).toEqual({ kind: "allow" });
-		}
-	});
-
-	test("an indeterminate surface is treated as capped", () => {
-		expect(isCappedSurface(undefined)).toBe(true);
-		expect(applyCap({ kind: "allow" }, undefined).verdict.kind).toBe("defer");
+	test("preserves deny and defer outcomes", () => {
+		expect(applyAuthorityPolicy({ kind: "deny", reason: "unsafe" }, null, "path")).toEqual({
+			verdict: { kind: "deny", reason: "unsafe" },
+			deferReason: null,
+		});
+		expect(applyAuthorityPolicy({ kind: "defer" }, "timeout", "external_directory")).toEqual({
+			verdict: { kind: "defer" },
+			deferReason: "timeout",
+		});
 	});
 });
 
@@ -202,7 +194,7 @@ describe("DecisionLog", () => {
 		log.add(record({ verdict: "allow" }));
 		log.add(record({ verdict: "allow" }));
 		log.add(record({ verdict: "deny" }));
-		log.add(record({ verdict: "defer", deferReason: "capped-surface" }));
+		log.add(record({ verdict: "defer", deferReason: "non-decisive-verdict" }));
 		expect(log.counts).toEqual({ allowed: 2, denied: 1, escalated: 1 });
 	});
 
@@ -216,10 +208,6 @@ describe("DecisionLog", () => {
 });
 
 describe("defer explanations", () => {
-	test("treats a capped auto verdict as a missing or stale local patch", () => {
-		expect(explainDefer("capped-surface")).toBe("auto authority patch missing or stale");
-	});
-
 	test("distinguishes classifier failure modes for troubleshooting", () => {
 		expect(explainDefer("timeout")).toBe("classifier timed out");
 		expect(explainDefer("auth-failed")).toBe("classifier auth unavailable");
@@ -542,13 +530,15 @@ describe("panel rendering", () => {
 			allowed: 0,
 			denied: 0,
 			escalated: 1,
-			recent: [record({ verdict: "defer", deferReason: "capped-surface", surface: "external_directory", value: "/tmp" })],
+			recent: [
+				record({ verdict: "defer", deferReason: "non-decisive-verdict", surface: "external_directory", value: "/tmp" }),
+			],
 		});
 		const text = rows.map((row) => row.text).join("\n");
 		// The count must not read "allowed 0 denied 0" while auto mode is armed
 		// and still interrupting — that was the original misleading render.
 		expect(text).toContain("asked 1");
 		expect(text).toContain("→ external_directory: /tmp");
-		expect(text).toContain("auto authority patch missing or stale");
+		expect(text).toContain("classifier was unsure");
 	});
 });

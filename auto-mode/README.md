@@ -12,8 +12,8 @@ routine work. Deferring falls through to the normal permission prompt.
 1. **The runtime toggle is the sole authority.** The link defers everything while auto mode is off,
    so a stale `authorizerChain` entry in the permission-system config cannot grant authority.
 2. **Every uncertainty defers.** Missing config, unresolved model, missing auth, timeout, malformed
-   reply, capped surface, or unknown surface all fall through to a human prompt. Auto mode can only
-   *remove* a prompt it is confident about, or *add* a denial.
+   reply, or unknown surface all fall through to a human prompt. Auto mode can only *remove* a
+   prompt it is confident about, or *add* a denial.
 3. **The permission policy is never rewritten.** This extension only reads the permission-system
    config. Your allow/ask/deny rules stay exactly as you wrote them.
 
@@ -89,17 +89,16 @@ data in the system prompt.
 That context is what lets the classifier honor boundaries you state in conversation ("don't push",
 "wait until I review") and judge whether an action has escalated beyond what you asked for.
 
-## The capped surfaces
+## Path and external-directory authority
 
-pi-permission-system caps any chain link's `allow` on the `path` and `external_directory` surfaces
-down to `defer` (its bounded-delegation checkpoint). Auto mode mirrors that cap locally and
-short-circuits those asks *before* paying for a model call.
+The stock permission system caps every authorizer link's `allow` on the `path` and
+`external_directory` surfaces down to `defer`. This installation carries a narrow Bun patch that
+exempts only the explicitly configured `auto` link from that envelope. The link remains inert while
+auto mode is off, and deterministic `deny` rules still block before the authorizer chain runs.
 
-In practice this is narrow. Because a `path` rule that resolves to `allow` makes the `path` gate
-skip entirely, ordinary in-project file work reaches the allow-capable per-tool surface
-(`write`, `edit`, `read`) and *is* auto-decidable. What stays human-gated is exactly what should:
-paths matching an explicit `deny` rule (such as `*.env`) and genuine out-of-working-directory
-access.
+The patch is version-pinned in `~/.pi/agent/npm/package.json` and reapplied by Bun from
+`~/.pi/agent/npm/patches/`. When upgrading `@gotgenes/pi-permission-system`, port and test that
+patch before changing the exact dependency version.
 
 ## Observability
 
