@@ -1154,11 +1154,12 @@ describe("sidebar snapshot and layout", () => {
 		);
 		expect(rows).toEqual(
 			expect.arrayContaining([
-				expect.stringContaining("auto unsure → human"),
+				expect.stringContaining("A?→H✕ auto unsure → human deny"),
 				expect.stringContaining("not reviewed"),
-				expect.stringContaining("policy allow"),
+				expect.stringContaining("P✓ policy allow · skill deploy"),
 			]),
 		);
+		expect(rows).not.toEqual(expect.arrayContaining([expect.stringContaining("human deny · bash git push")]));
 	});
 
 	it("renders response performance as a compact optional Activity row", () => {

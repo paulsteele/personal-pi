@@ -612,10 +612,31 @@ function permissionLabel(permission: PermissionActivity): string {
 	return `${prefix}${permission.source} ${outcome}`;
 }
 
+/** A distinct compact badge for every source/outcome pair. */
+function permissionIcon(permission: PermissionActivity): string {
+	const suffix = permission.state === "allow" ? "✓" : permission.state === "deny" ? "✕" : "?";
+	const source =
+		permission.source === "policy"
+			? "P"
+			: permission.source === "auto"
+				? "A"
+				: permission.source === "human"
+					? "H"
+					: permission.source === "authorizer"
+						? "X"
+						: "!";
+	const final = `${source}${suffix}`;
+	if (permission.source !== "human") return final;
+	if (permission.prior === "auto-unsure") return `A?→${final}`;
+	if (permission.prior === "policy-ask") return `P?→${final}`;
+	return final;
+}
+
 function permissionRows(
 	permission: PermissionActivity,
 	contentWidth: number,
 	palette: AtelierPalette,
+	standalone = false,
 ): string[] {
 	const label = permissionLabel(permission);
 	const role: PaletteRole =
@@ -624,8 +645,13 @@ function permissionRows(
 			: permission.state === "unsure" || permission.state === "pending"
 				? "warning"
 				: "ready";
-	const detail = `${sanitize(permission.surface) || "permission"} ${sanitize(permission.value)}`.trim();
-	const rows = [palette.paint(role, truncateToWidth(`↳ ${detail} · ${label}`, contentWidth, "…"))];
+	const icon = permissionIcon(permission);
+	const surface = sanitize(permission.surface) || "permission";
+	// A correlated row sits directly beneath the tool, so repeating its command
+	// or path spends the entire width before the useful outcome can be seen.
+	// Standalone skill/forwarded checks have no parent row and retain their value.
+	const subject = standalone ? `${surface} ${sanitize(permission.value)}`.trim() : surface;
+	const rows = [palette.paint(role, truncateToWidth(`↳ ${icon} ${label} · ${subject}`, contentWidth, "…"))];
 	if (
 		permission.reason &&
 		(permission.state === "deny" || permission.state === "unsure" || permission.source === "system")
@@ -753,7 +779,7 @@ function activitySidebarGroups(
 			name: `activityPermission:${permission.requestId}`,
 			panel: "ACTIVITY",
 			panelRole,
-			rows: permissionRows(permission, contentWidth, palette),
+			rows: permissionRows(permission, contentWidth, palette, true),
 		})),
 		{
 			name: "activityAggregate",
