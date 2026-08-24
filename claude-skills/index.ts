@@ -10,7 +10,7 @@ function isDirectory(path: string): boolean {
 	}
 }
 
-function findProjectClaudeSkillPaths(cwd: string): string[] {
+export function findProjectClaudeSkillPaths(cwd: string): string[] {
 	const paths: string[] = [];
 	let directory = resolve(cwd);
 

@@ -25,3 +25,9 @@ The extension is auto-discovered from:
 The parent `local/index.ts` imports this plugin. Add future personal plugins as sibling subdirectories and register them from that same entry point.
 
 Run `/reload` in an existing Pi session, or restart Pi.
+
+## Tests
+
+```sh
+bun test ~/.pi/agent/extensions/local/code-blocks/core.test.ts
+```

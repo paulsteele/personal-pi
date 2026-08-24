@@ -8,8 +8,13 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import {
+	CODE_BLOCK_MARKER as MARKER,
+	extractMarkedBlocks,
+	markCodeBlocks,
+	type CodeBlock,
+} from "./core.ts";
 
-const MARKER = "pi-copyable-block";
 const COPY_URL_PREFIX = "pi-copy-code://";
 // Version these keys whenever a prototype hook changes. Pi's /reload keeps the
 // shared TUI module alive, so an old patch marker must not suppress a newer hook.
@@ -17,11 +22,6 @@ const PATCH_KEY = Symbol.for("pi.copyable-code-blocks.markdown-patch.v4");
 const CLICK_PATCH_KEY = Symbol.for("pi.copyable-code-blocks.click-patch.v2");
 const SHARED_STATE_KEY = Symbol.for("pi.copyable-code-blocks.shared-state.v1");
 const RENDER_REVISION_KEY = Symbol.for("pi.copyable-code-blocks.render-revision.v1");
-
-type CodeBlock = {
-	language: string;
-	code: string;
-};
 
 type MarkdownInternals = {
 	theme: {
@@ -86,64 +86,6 @@ function registerClickableBlock(block: CodeBlock): string {
 		state.codeById.set(id, block);
 	}
 	return `${COPY_URL_PREFIX}${id}`;
-}
-
-function openingFence(line: string): { indent: string; fence: string; info: string } | undefined {
-	const match = /^( {0,3})(`{3,}|~{3,})([^\r\n]*)$/.exec(line);
-	if (!match) return undefined;
-	return { indent: match[1], fence: match[2], info: match[3].trim() };
-}
-
-function isClosingFence(line: string, fence: string): boolean {
-	const character = fence[0];
-	const match = new RegExp(`^ {0,3}${character === "`" ? "`" : "~"}{${fence.length},}\\s*$`).exec(line);
-	return match !== null;
-}
-
-/** Mark fenced blocks without changing the underlying session or model context. */
-export function markCodeBlocks(markdown: string): string {
-	const lines = markdown.split("\n");
-	let activeFence: string | undefined;
-
-	for (let index = 0; index < lines.length; index++) {
-		const line = lines[index];
-		if (activeFence) {
-			if (isClosingFence(line, activeFence)) activeFence = undefined;
-			continue;
-		}
-
-		const opening = openingFence(line);
-		if (!opening || opening.info.includes(MARKER)) continue;
-		const separator = opening.info ? " " : "";
-		lines[index] = `${opening.indent}${opening.fence}${opening.info}${separator}${MARKER}`;
-		activeFence = opening.fence;
-	}
-
-	return lines.join("\n");
-}
-
-/** Extract marked blocks from transformed Markdown. Also supports an unfinished streaming block. */
-export function extractMarkedBlocks(markdown: string): CodeBlock[] {
-	const lines = markdown.split("\n");
-	const blocks: CodeBlock[] = [];
-
-	for (let index = 0; index < lines.length; index++) {
-		const opening = openingFence(lines[index]);
-		if (!opening || !opening.info.split(/\s+/).includes(MARKER)) continue;
-
-		const language = opening.info
-			.split(/\s+/)
-			.filter((part) => part && part !== MARKER)[0] ?? "";
-		const body: string[] = [];
-		index++;
-		while (index < lines.length && !isClosingFence(lines[index], opening.fence)) {
-			body.push(lines[index]);
-			index++;
-		}
-		blocks.push({ language, code: body.join("\n") });
-	}
-
-	return blocks;
 }
 
 function styledPanelLine(
