@@ -22,6 +22,8 @@ import {
 import { type Config, loadConfig, saveAutoEnabled, saveAutoModel } from "./config.ts";
 import { ReviewLogger } from "./logging.ts";
 import { PathNormalizer } from "./path-normalizer.ts";
+import { presentPermissionPrompt } from "./prompt/component.ts";
+import { buildPermissionPromptPayload, type PermissionPromptPayload } from "./prompt/payload.ts";
 import {
   type EventBus,
   emitDecision,
@@ -168,15 +170,6 @@ async function refreshGitRemotes(pi: ExtensionAPI, runtime: Runtime): Promise<vo
   }
 }
 
-function promptText(surface: string, value: string, pattern: string | null): string {
-  return [
-    `Permission required`,
-    `surface: ${surface}`,
-    `value: ${value}`,
-    ...(pattern ? [`rule: ${pattern}`] : []),
-  ].join("\n");
-}
-
 async function humanDecision(
   runtime: Runtime,
   request: {
@@ -188,14 +181,12 @@ async function humanDecision(
     category?: string;
     reason?: string;
     source?: "tool_call" | "skill_input" | "skill_read";
+    payload?: PermissionPromptPayload;
   },
 ): Promise<{ allowed: boolean; reason: string | null }> {
   const { ctx } = runtime;
   if (!ctx.hasUI) return { allowed: false, reason: "No interactive human authority is available." };
   const noteEnabled = runtime.enabled;
-  const options = noteEnabled
-    ? ["y approve", "a approve + note", "n deny", "d deny + note"]
-    : ["y approve", "n deny"];
   emitUiPrompt(runtime.events, {
     requestId: request.id,
     toolCallId: request.toolCallId || null,
@@ -203,13 +194,19 @@ async function humanDecision(
     surface: request.surface,
     value: request.value,
   });
-  const choice = await ctx.ui.select(
-    promptText(request.surface, request.value, request.pattern),
-    options,
-  );
+  const payload =
+    request.payload ??
+    buildPermissionPromptPayload({
+      surface: request.surface,
+      value: request.value,
+      matchedPattern: request.pattern,
+      category: request.category,
+      reason: request.reason,
+    });
+  const choice = await presentPermissionPrompt(ctx, "Permission Required", payload, noteEnabled);
   if (!choice) return { allowed: false, reason: "Human cancelled permission confirmation." };
-  const allow = choice.startsWith("y") || choice.startsWith("a");
-  const noteChoice = choice.startsWith("a") || choice.startsWith("d");
+  const allow = choice === "approve" || choice === "approve_note";
+  const noteChoice = choice === "approve_note" || choice === "deny_note";
   if (noteChoice) {
     const draft = await ctx.ui.input("Classifier note for this session");
     const note = normalizeNote(draft);
@@ -707,6 +704,26 @@ export default function permissionSystem(pi: ExtensionAPI): void {
     const policyValue = selected.value;
     const policy = selected.decision;
     const promptSource = matchedSkill ? "skill_read" : "tool_call";
+    const promptPayload = (category?: string, reason?: string): PermissionPromptPayload =>
+      buildPermissionPromptPayload({
+        surface: selected.surface,
+        value: policyValue,
+        matchedPattern: policy.matchedPattern,
+        category,
+        reason,
+        toolName,
+        command,
+        cwd: ctx.cwd,
+        commandUnits: program?.guardCommands(),
+        paths: paths.map((path) => ({
+          value: path.value(),
+          resolved: path.resolvedAlias(),
+        })),
+        inputPreview:
+          toolName === "edit" && input && typeof input === "object"
+            ? formatEditForClassifier(input as Record<string, unknown>)
+            : undefined,
+      });
     // Persistent policy deny is stronger than a deterministic escalation.
     if (policy.state === "deny") {
       decision(current, {
@@ -746,6 +763,7 @@ export default function permissionSystem(pi: ExtensionAPI): void {
         category: safety.category,
         reason: safety.reason,
         source: promptSource,
+        payload: promptPayload(safety.category, safety.reason),
       });
       decision(current, {
         requestId: req,
@@ -811,6 +829,7 @@ export default function permissionSystem(pi: ExtensionAPI): void {
       value: policyValue,
       pattern: policy.matchedPattern,
       source: promptSource,
+      payload: promptPayload(),
     });
     decision(current, {
       requestId: req,

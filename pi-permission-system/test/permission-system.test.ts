@@ -65,7 +65,7 @@ function setup(options?: {
   const ctx = {
     cwd: "/repo",
     hasUI: true,
-    mode: "tui",
+    mode: "rpc",
     signal: undefined,
     sessionManager: { getBranch: () => options?.branch ?? [], appendCustomEntry: vi.fn() },
     ui: { setStatus: vi.fn(), select: vi.fn(), input: vi.fn(), notify: vi.fn() },
@@ -108,7 +108,7 @@ describe("integrated permission system", () => {
 
   it("keeps an already-confirmed note decision authoritative when note input is blank", async () => {
     const h = setup();
-    h.ctx.ui.select.mockResolvedValueOnce("a approve + note");
+    h.ctx.ui.select.mockResolvedValueOnce("a approve + classifier note");
     h.ctx.ui.input.mockResolvedValueOnce("");
     await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
     const result = await h.handlers.get("tool_call")?.(

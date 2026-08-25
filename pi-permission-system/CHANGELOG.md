@@ -12,4 +12,7 @@
 - Enforced explicit skill invocation and skill-directory reads, matched path policies against
   canonical aliases, restored classifier request/environment context, propagated cancellation,
   protected invalid configuration from overwrite, and removed raw decision text from review logs.
+- Restored rich inline permission prompts with aligned request facts, warning-yellow command/path
+  highlights, bounded evidence and edit previews, and `Ctrl+O` expansion while retaining one-press
+  one-shot decisions.
 

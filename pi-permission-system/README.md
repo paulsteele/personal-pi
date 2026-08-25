@@ -72,10 +72,12 @@ Presentation and review-log field limits are fixed in code.
 All human decisions are one-shot and commit on the first selection. With auto off, prompts offer only
 `y` approve and `n` deny. With auto on, they offer exactly `y` approve, `a` approve + classifier note,
 `n` deny, and `d` deny + classifier note. There is no follow-up confirmation. The selected allow/deny
-is authoritative immediately; a cancelled or blank note never retries or changes it. Notes are capped
-at 500 characters, reconstructed from the active session branch, and bounded to the newest eight /
-2,000 prompt characters. They affect only
-later classifier calls and never appear in Activity, agent-facing denial copy, or review JSONL.
+is authoritative immediately; a cancelled or blank note never retries or changes it. In the TUI, the
+prompt restores the upstream-style aligned facts, warning-yellow highlighting for decision-relevant
+commands and paths, bounded evidence and edit previews, and `Ctrl+O` expansion for the complete
+request. Notes are capped at 500 characters, reconstructed from the active session branch, and bounded
+to the newest eight / 2,000 prompt characters. They affect only later classifier calls and never appear
+in Activity, agent-facing denial copy, or review JSONL.
 
 ## Events and Activity
 
