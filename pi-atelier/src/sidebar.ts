@@ -578,6 +578,7 @@ function toolStatusLabel(tool: ToolActivity, now: number): string {
 // terminal fonts use nearly the full cell and become hard to scan when joined.
 const PERMISSION_SOURCE_ICON: Record<PermissionActivity["source"], string> = {
 	policy: "󰒃", // nf-md-security
+	security: "󰒃", // deterministic safety guard
 	auto: "󰚩", // nf-md-robot
 	human: "󰀄", // nf-md-account
 	authorizer: "󰌆", // nf-md-key
@@ -586,6 +587,7 @@ const PERMISSION_SOURCE_ICON: Record<PermissionActivity["source"], string> = {
 
 function permissionSourceRole(source: PermissionActivity["source"]): PaletteRole {
 	if (source === "policy") return "permissionPolicy";
+	if (source === "security") return "permissionSecurity";
 	if (source === "auto") return "permissionAuto";
 	if (source === "human") return "permissionHuman";
 	return "muted";

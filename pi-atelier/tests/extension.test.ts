@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
 import { initTheme } from "@earendil-works/pi-coding-agent";
+import { describe, expect, it, vi } from "vitest";
 import atelierExtension, { SIDEBAR_PANEL_EVENT_CHANNEL } from "../extensions/index.js";
 
 function deferred<T>() {
@@ -647,6 +647,111 @@ describe("extension registration", () => {
 		statuses = new Map([["one", "extension two"]]);
 		footer.render(120);
 		expect(h.overlays[0]?.requestRender).toHaveBeenCalledTimes(4);
+	});
+
+	it("attaches correlated policy and auto decisions to their own tool rows", async () => {
+		const h = harness();
+		await start(h);
+		await command(h, "on");
+		await h.handlers.get("agent_start")?.({ type: "agent_start" }, h.ctx);
+		for (const [toolCallId, toolName, args, event] of [
+			[
+				"read-policy",
+				"read",
+				{ path: "/tmp/project/policy.ts" },
+				{
+					requestId: "policy-1",
+					toolCallId: "read-policy",
+					surface: "read",
+					value: "/tmp/project/policy.ts",
+					result: "allow",
+					resolution: "policy_allow",
+					decidedBy: { kind: "policy", pattern: "*" },
+				},
+			],
+			[
+				"bash-auto",
+				"bash",
+				{ command: "npm test" },
+				{
+					requestId: "auto-1",
+					toolCallId: "bash-auto",
+					surface: "bash",
+					value: "npm test",
+					result: "allow",
+					resolution: "auto_approved",
+					decidedBy: { kind: "auto", verdict: "allow" },
+				},
+			],
+		] as const) {
+			await h.handlers.get("tool_execution_start")?.(
+				{ type: "tool_execution_start", toolCallId, toolName, args },
+				h.ctx,
+			);
+			h.pi.events.emit("permissions:decision", event);
+		}
+		const rows = h.overlays[0]?.component.render(44).join("\n") ?? "";
+		const plain = rows.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+		expect(plain).toMatch(/read.+󰒃 ✓/);
+		expect(plain).toMatch(/bash.+󰚩 ✓/);
+		expect(plain).not.toContain("↳ 󰒃 ✓  read");
+	});
+
+	it("keeps all correlated decision sources on their tool rows across reload and timing", async () => {
+		const h = harness();
+		await start(h);
+		await command(h, "on");
+		await h.handlers.get("agent_start")?.({ type: "agent_start" }, h.ctx);
+		const cases = [
+			["policy-deny", "write", { path: "/tmp/project/deny.ts" }, "policy_deny", "policy", "deny"],
+			["auto-deny", "bash", { command: "curl bad" }, "auto_denied", "auto", "deny"],
+			["auto-defer", "bash", { command: "unknown" }, "user_denied", "human", "deny"],
+			["guard-deny", "read", { path: "/home/me/.ssh/id" }, "guard_denied", "guard", "deny"],
+			["guard-human", "bash", { command: "git push" }, "user_approved", "human", "allow"],
+			["skill-check", "skill", { name: "release" }, "policy_deny", "policy", "deny"],
+			["gate-error", "bash", { command: "broken" }, "gate_error", "gate_error", "deny"],
+		] as const;
+		for (const [index, [toolCallId, toolName, args, resolution, kind, result]] of cases.entries()) {
+			const event = {
+				requestId: `edge-${index}`,
+				toolCallId,
+				surface: toolName,
+				value: toolCallId,
+				result,
+				resolution,
+				decidedBy:
+					kind === "auto"
+						? { kind, verdict: result }
+						: kind === "guard"
+							? { kind, category: "test" }
+							: { kind },
+			};
+			if (index % 2 === 0) h.pi.events.emit("permissions:decision", event);
+			await h.handlers.get("tool_execution_start")?.(
+				{ type: "tool_execution_start", toolCallId, toolName, args },
+				h.ctx,
+			);
+			if (index % 2 !== 0) h.pi.events.emit("permissions:decision", event);
+			await h.handlers.get("tool_execution_end")?.(
+				{ type: "tool_execution_end", toolCallId, toolName, args, result: { content: [], isError: false } },
+				h.ctx,
+			);
+		}
+		const beforeReload = (h.overlays.at(-1)?.component.render(70).join("\n") ?? "").replace(
+			/\u001b\[[0-?]*[ -/]*[@-~]/g,
+			"",
+		);
+		await h.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "reload" }, h.ctx);
+		await h.handlers.get("session_start")?.({ type: "session_start" }, h.ctx);
+		const reloaded = (h.overlays.at(-1)?.component.render(70).join("\n") ?? "").replace(
+			/\u001b\[[0-?]*[ -/]*[@-~]/g,
+			"",
+		);
+		for (const [, toolName] of cases) expect(beforeReload).toContain(toolName);
+		expect(beforeReload).not.toMatch(
+			/↳.*(policy-deny|auto-deny|auto-defer|guard-deny|guard-human|skill-check|gate-error)/,
+		);
+		expect(reloaded).toContain("Ready");
 	});
 
 	it("forwards run and turn events into sidebar activity without putting tool history in the footer", async () => {

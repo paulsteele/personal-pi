@@ -4,7 +4,7 @@ import type { DisplayValue, ResponsePerformance } from "./types.js";
 
 export type ToolActivityStatus = "running" | "done" | "failed";
 
-export type PermissionSource = "policy" | "auto" | "human" | "authorizer" | "system";
+export type PermissionSource = "policy" | "security" | "auto" | "human" | "authorizer" | "system";
 export type PermissionState = "pending" | "allow" | "deny" | "unsure";
 
 export interface PermissionActivity {
@@ -14,7 +14,7 @@ export interface PermissionActivity {
 	value: string;
 	source: PermissionSource;
 	state: PermissionState;
-	prior?: "policy-ask" | "auto-unsure";
+	prior?: "policy-ask" | "auto-unsure" | "security-review";
 	reason?: string;
 	at: number;
 }
@@ -472,7 +472,12 @@ function mergePermissions(
 	next: PermissionActivity,
 ): PermissionActivity[] {
 	const previous = current.find((item) => item.requestId === next.requestId);
-	const merged = previous?.prior && next.prior !== "auto-unsure" ? { ...next, prior: previous.prior } : next;
+	const merged =
+		previous?.source === "security" && next.source === "human"
+			? { ...next, prior: "security-review" as const }
+			: previous?.prior && next.prior !== "auto-unsure"
+				? { ...next, prior: previous.prior }
+				: next;
 	return [...current.filter((item) => item.requestId !== next.requestId), merged].sort(
 		(left, right) => left.at - right.at,
 	);

@@ -331,6 +331,41 @@ describe("run activity tracker transitions", () => {
 		});
 	});
 
+	it("merges a security guard escalation into its human outcome", () => {
+		const tracker = createRunActivityTracker({ cwd: "/repo" });
+		tracker.startTool(
+			{ type: "tool_execution_start", toolCallId: "bash-2", toolName: "bash", args: { command: "git push" } },
+			1,
+		);
+		tracker.recordPermission({
+			requestId: "guard-1",
+			toolCallId: "bash-2",
+			surface: "bash",
+			value: "vcs_remote_mutation",
+			source: "security",
+			state: "unsure",
+			prior: "security-review",
+			at: 2,
+		});
+		tracker.recordPermission({
+			requestId: "guard-1",
+			toolCallId: "bash-2",
+			surface: "bash",
+			value: "git push",
+			source: "human",
+			state: "allow",
+			at: 3,
+		});
+		expect(tracker.getSnapshot().activeTools[0]?.permissions).toEqual([
+			expect.objectContaining({
+				requestId: "guard-1",
+				source: "human",
+				state: "allow",
+				prior: "security-review",
+			}),
+		]);
+	});
+
 	it("retains bounded standalone permission checks", () => {
 		const tracker = createRunActivityTracker({ cwd: "/repo" });
 		for (let index = 0; index < 14; index += 1)

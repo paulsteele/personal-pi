@@ -9,8 +9,8 @@ import { createFooterComponent, type ThemeLike } from "../src/footer.js";
 import {
 	createPlannotatorIntegration,
 	PLANNOTATOR_PANEL_ID,
-	plannotatorPanel,
 	type PlannotatorIntegration,
+	plannotatorPanel,
 } from "../src/plannotator.js";
 import {
 	createRunActivityTracker,
@@ -169,15 +169,17 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 		const decidedBy = event.decidedBy as { kind?: unknown; name?: unknown } | undefined;
 		const kind = decidedBy?.kind;
 		const source: PermissionSource =
-			kind === "user"
-				? "human"
-				: kind === "authorizer" && decidedBy?.name === "auto"
-					? "auto"
-					: kind === "authorizer"
-						? "authorizer"
-						: kind === "gate_error" || kind === "unavailable"
-							? "system"
-							: "policy";
+			kind === "guard"
+				? "security"
+				: kind === "human" || kind === "user"
+					? "human"
+					: kind === "auto" || (kind === "authorizer" && decidedBy?.name === "auto")
+						? "auto"
+						: kind === "authorizer"
+							? "authorizer"
+							: kind === "gate_error" || kind === "unavailable"
+								? "system"
+								: "policy";
 		const resolution = event.resolution;
 		const reason = typeof event.reason === "string" ? event.reason : undefined;
 		return {
@@ -187,7 +189,9 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 			value: event.value,
 			source,
 			state: result,
-			...(source === "human" && kind === "user" ? { prior: "policy-ask" as const } : {}),
+			...(source === "human" && (kind === "user" || kind === "human")
+				? { prior: "policy-ask" as const }
+				: {}),
 			...(resolution === "confirmation_unavailable" || resolution === "gate_error"
 				? { source: "system" as const }
 				: {}),
@@ -228,14 +232,17 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 			return undefined;
 		const verdict = event.verdict;
 		if (verdict !== "allow" && verdict !== "deny" && verdict !== "defer") return undefined;
+		const mechanism = event.mechanism === "guard" ? "guard" : "model";
 		return {
 			requestId: event.requestId,
 			toolCallId: typeof event.toolCallId === "string" ? event.toolCallId : null,
 			surface: event.surface,
 			value: event.value,
-			source: "auto",
+			source: mechanism === "guard" ? "security" : "auto",
 			state: verdict === "defer" ? "unsure" : verdict,
-			...(verdict === "defer" ? { prior: "auto-unsure" as const } : {}),
+			...(verdict === "defer"
+				? { prior: mechanism === "guard" ? ("security-review" as const) : ("auto-unsure" as const) }
+				: {}),
 			...(typeof event.reason === "string" ? { reason: event.reason } : {}),
 			at: typeof event.at === "number" ? event.at : Date.now(),
 		};

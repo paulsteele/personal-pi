@@ -92,10 +92,9 @@ Primary files:
 - `extensions/index.ts`
 - `tests/footer.test.ts`
 
-The local `auto-mode` extension (`~/.pi/agent/extensions/local/auto-mode/`) publishes an `auto-mode`
-Pi extension status plus bounded state/decision events. The local permission-system Bun patch adds
-tool-call correlation and decision provenance to its prompt/final-decision events. Atelier joins these
-events into Activity. Permission decisions are packed into the owning tool row when space permits;
+The source-owned local permission-system fork (`~/.pi/agent/extensions/local/pi-permission-system/`)
+owns integrated auto mode and publishes bounded `auto-mode:*` state/decision events plus correlated
+permission prompt/final-decision events. Atelier joins these events into Activity. Permission decisions are packed into the owning tool row when space permits;
 routine allows with the same source/outcome collapse to one counted badge, and only overflow or
 exception details consume follow-up rows. The previous `auto-mode:status` contributed sidebar panel
 is deliberately not published.
@@ -104,12 +103,14 @@ is deliberately not published.
 required item with an infinite drop rank, and is filtered out of the ordinary extension-statuses
 segment so it is never rendered twice.
 
-**Invariant:** Activity is the only sidebar permission timeline. It must correlate tool checks by
-`toolCallId` and preserve every exceptional decision. Repeated routine allows may be visually
+**Invariant:** Activity is the only sidebar permission timeline. It must correlate every policy,
+auto, guard, and human tool decision by `toolCallId` and preserve every exceptional decision. Deterministic guard events use a distinct
+`security` source; model decisions use `auto`; terminal answers use `human`. A one-shot
+security-to-human escalation shares `requestId` and must merge rather than appear twice. Repeated routine allows may be visually
 collapsed with a count, but must not be discarded from the activity model. Nerd Font semantic icons
 (`nf-md-security`, `nf-md-robot`, and `nf-md-account`) are the sole source labels, always separated
 from outcome marks by whitespace; adjacent copy must not repeat words such as `auto allow` or
-`policy allow`. Policy, auto, and human badges use distinct colors. While the sidebar is hidden,
+`policy allow`. Policy, security, auto, and human badges use distinct colors. While the sidebar is hidden,
 width pressure must never drop the
 auto-mode footer item: while a classifier is approving actions on the operator's behalf, that fact
 has to stay visible.

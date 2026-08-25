@@ -11,6 +11,7 @@ export type PaletteRole =
 	| "cost"
 	| "context"
 	| "permissionPolicy"
+	| "permissionSecurity"
 	| "permissionAuto"
 	| "permissionHuman"
 	| "menu"
@@ -37,6 +38,7 @@ const FIXED_DARK: Record<PaletteRole, Rgb> = {
 	cost: [255, 159, 67],
 	context: [110, 168, 254],
 	permissionPolicy: [110, 168, 254],
+	permissionSecurity: [255, 170, 64],
 	permissionAuto: [177, 140, 255],
 	permissionHuman: [125, 211, 252],
 	menu: [177, 140, 255],
@@ -57,6 +59,7 @@ const UNNAMED_THEME: Record<PaletteRole, string> = {
 	cost: "mdHeading",
 	context: "thinkingLow",
 	permissionPolicy: "thinkingLow",
+	permissionSecurity: "warning",
 	permissionAuto: "thinkingHigh",
 	permissionHuman: "syntaxType",
 	menu: "thinkingHigh",
@@ -77,6 +80,7 @@ const NO_COLOR: Record<PaletteRole, string> = {
 	cost: "text",
 	context: "text",
 	permissionPolicy: "text",
+	permissionSecurity: "warning",
 	permissionAuto: "text",
 	permissionHuman: "text",
 	menu: "text",
