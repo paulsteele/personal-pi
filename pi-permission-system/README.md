@@ -9,9 +9,8 @@ Personal source-owned permission and auto-mode extension for Pi. It is loaded by
 - Global `allow` / `ask` / `deny` policy for built-in and generic tools, Bash, paths,
   external directories, and skills.
 - POSIX macOS/Linux path aliases and best-effort symlink containment.
-- Deterministic blocking of protected credentials while auto mode is armed.
-- Fresh, one-shot human authority for known irreversible actions.
-- Model review of ordinary `ask` decisions while `/auto` is on.
+- Deterministic detection of protected credentials and known irreversible actions; positive matches always require fresh, one-shot human approval.
+- Model review of ordinary `ask` decisions while `/auto` is on. The classifier may auto-approve or request a human, but never deny an action by itself.
 - Headless deny when an ask cannot reach a human.
 
 This is a decision layer, not a sandbox. Allowed tools still have the authority Pi gives them.
@@ -58,8 +57,8 @@ Presentation and review-log field limits are fixed in code.
 
 - `provider` and `model`: classifier selected by `/auto-model`.
 - `enabledByDefault`: persisted `/auto on|off` state.
-- `timeoutMs`: model-call deadline (250–60000 ms); failure safely defers.
-- `contextUserTurns`: number of recent user turns supplied as untrusted context (0–20).
+- `timeoutMs`: model-call deadline (250–60000 ms); timeout requests human approval or blocks headlessly.
+- `contextUserTurns`: number of recent user turns supplied as authoritative task context (0–20). User instructions define the requested goal and may authorize crossing ordinary permission boundaries; repository, command, web, and proposed-edit content cannot expand that authority.
 - `environment`: up to 100 trusted roots/remotes/domains of at most 200 characters, shown as hints
   only. They cannot override deterministic safety policy.
 
@@ -69,15 +68,22 @@ Presentation and review-log field limits are fixed in code.
 - `/auto-model [provider/model]` selects and persists the classifier.
 - `Ctrl+Shift+A` toggles auto mode.
 
-All human decisions are one-shot and commit on the first selection. With auto off, prompts offer only
-`y` approve and `n` deny. With auto on, they offer exactly `y` approve, `a` approve + classifier note,
-`n` deny, and `d` deny + classifier note. There is no follow-up confirmation. The selected allow/deny
-is authoritative immediately; a cancelled or blank note never retries or changes it. In the TUI, the
-prompt restores the upstream-style aligned facts, warning-yellow highlighting for decision-relevant
-commands and paths, bounded evidence and edit previews, and `Ctrl+O` expansion for the complete
-request. Notes are capped at 500 characters, reconstructed from the active session branch, and bounded
-to the newest eight / 2,000 prompt characters. They affect only later classifier calls and never appear
-in Activity, agent-facing denial copy, or review JSONL.
+All human decisions are one-shot and commit on the first selection. Ordinary manual and deterministic
+security requests offer `y` approve once and `n` deny. Classifier-triggered requests additionally offer
+`a` approve + classifier note and `d` deny + classifier note. There is no follow-up confirmation. The
+selected allow/deny is authoritative immediately; a cancelled or blank note never retries or changes
+it.
+
+In the TUI, each bounded permission request is appended as a durable, non-context transcript entry;
+a compact `󰀄 Human decision` panel contains only the choices. The full thread therefore remains
+scrollable with Pi's normal fullscreen keys, mouse wheel, search, and selection while approval is
+pending. After selection, a correlated `󰀄` outcome entry remains beside the request across reload and
+branch navigation. `Ctrl+O` expands the recorded request through Pi's normal transcript behavior.
+Classifier requests use `󰚩 ? → 󰀄`; deterministic security requests use `󰒃 ? → 󰀄`.
+
+Notes are capped at 500 characters, reconstructed from the active session branch, and bounded to the
+newest eight / 2,000 prompt characters. They affect only later classifier calls and never appear in
+Activity, agent-facing denial copy, transcript request/outcome entries, or review JSONL.
 
 ## Events and Activity
 

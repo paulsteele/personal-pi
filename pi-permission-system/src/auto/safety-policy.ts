@@ -37,7 +37,7 @@ export interface SafetyContext {
 export type SafetyDecision =
   | { readonly kind: "continue"; readonly riskMarkers: readonly string[] }
   | {
-      readonly kind: "deny" | "require_human";
+      readonly kind: "require_human";
       readonly category: string;
       readonly reason: string;
       readonly riskMarkers: readonly string[];
@@ -401,11 +401,9 @@ export function evaluateSafety(
       const reason = sensitivePathReason(alias, context.platform, environment);
       if (reason) {
         return {
-          kind: autoEnabled ? "deny" : "require_human",
+          kind: "require_human",
           category: "sensitive_path",
-          reason: autoEnabled
-            ? `Auto mode blocks access to a ${reason}. Turn auto mode off to request one-time human approval.`
-            : `Access to a ${reason} requires fresh human approval.`,
+          reason: `Access to a ${reason} requires fresh human approval${autoEnabled ? " while auto mode is armed" : ""}.`,
           riskMarkers: [...risks],
         };
       }

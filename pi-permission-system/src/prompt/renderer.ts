@@ -50,6 +50,15 @@ export function renderPermissionPrompt(
 
 function promptFacts(payload: PermissionPromptPayload): Fact[] {
   const facts: Fact[] = [];
+  if (payload.review.source === "classifier") {
+    facts.push({ label: "󰚩 Classifier review", text: "Human approval requested" });
+    facts.push({ label: "reason", text: payload.review.reason });
+  } else if (payload.review.source === "guard") {
+    facts.push({ label: "󰒃 Security check", text: payload.review.category });
+    facts.push({ label: "reason", text: payload.review.reason });
+  } else if (payload.review.reason) {
+    facts.push({ label: "󰒃 Policy review", text: payload.review.reason });
+  }
   const valueLabel =
     payload.surface === "bash"
       ? "command"
@@ -62,8 +71,10 @@ function promptFacts(payload: PermissionPromptPayload): Fact[] {
   if (payload.surface !== payload.toolName && payload.surface !== valueLabel)
     facts.push({ label: "surface", text: payload.surface });
   if (payload.matchedPattern) facts.push({ label: "rule", text: payload.matchedPattern });
-  if (payload.category) facts.push({ label: "safety", text: payload.category });
-  if (payload.reason) facts.push({ label: "reason", text: payload.reason });
+  if (payload.category && payload.review.source !== "guard")
+    facts.push({ label: "safety", text: payload.category });
+  if (payload.reason && !payload.review.reason)
+    facts.push({ label: "reason", text: payload.reason });
   if (payload.value && payload.value !== payload.toolName)
     facts.push({ label: valueLabel, text: payload.value, highlighted: true });
   if (payload.executedUnit && payload.executedUnit !== payload.value)

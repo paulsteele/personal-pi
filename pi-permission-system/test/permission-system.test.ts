@@ -19,6 +19,8 @@ function setup(options?: {
   enabledByDefault?: boolean;
   modelReply?: unknown;
   branch?: unknown[];
+  mode?: "rpc" | "tui";
+  signal?: AbortSignal;
 }) {
   const agentDir = mkdtempSync(join(tmpdir(), "local-permission-system-"));
   const configDir = join(agentDir, "extensions", "pi-permission-system");
@@ -56,19 +58,31 @@ function setup(options?: {
       for (const handler of listeners.get(channel) ?? []) handler(data);
     },
   };
+  const entries: Array<{ customType: string; data: unknown }> = [];
+  const entryRenderers = new Map<string, (...args: any[]) => unknown>();
   const pi = {
     on: (name: string, handler: Handler) => handlers.set(name, handler),
     events,
     registerCommand: vi.fn(),
     registerShortcut: vi.fn(),
+    appendEntry: vi.fn((customType: string, data: unknown) => entries.push({ customType, data })),
+    registerEntryRenderer: vi.fn((customType: string, renderer: (...args: any[]) => unknown) =>
+      entryRenderers.set(customType, renderer),
+    ),
   };
   const ctx = {
     cwd: "/repo",
     hasUI: true,
-    mode: "rpc",
-    signal: undefined,
+    mode: options?.mode ?? "rpc",
+    signal: options?.signal,
     sessionManager: { getBranch: () => options?.branch ?? [], appendCustomEntry: vi.fn() },
-    ui: { setStatus: vi.fn(), select: vi.fn(), input: vi.fn(), notify: vi.fn() },
+    ui: {
+      setStatus: vi.fn(),
+      select: vi.fn(),
+      input: vi.fn(),
+      notify: vi.fn(),
+      custom: vi.fn(),
+    },
     modelRegistry: {
       getAvailable: () => [],
       find: () =>
@@ -78,7 +92,7 @@ function setup(options?: {
     },
   };
   permissionSystem(pi as never);
-  return { agentDir, previous, handlers, events, ctx };
+  return { agentDir, previous, handlers, events, ctx, pi, entries, entryRenderers };
 }
 
 afterEach(() => {
@@ -124,9 +138,11 @@ describe("integrated permission system", () => {
     rmSync(h.agentDir, { recursive: true, force: true });
   });
 
-  it("commits an auto-mode human fallback with one selection", async () => {
+  it("commits an unavailable-classifier human fallback with one selection", async () => {
     const h = setup({ enabledByDefault: true });
-    h.ctx.ui.select.mockResolvedValueOnce("y approve");
+    h.ctx.ui.select.mockResolvedValueOnce("y approve once");
+    const autoEvents: any[] = [];
+    h.events.on("auto-mode:decision", (event) => autoEvents.push(event));
     await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
     const result = await h.handlers.get("tool_call")?.(
       { toolName: "write", toolCallId: "write-once", input: { path: "/repo/a.ts" } },
@@ -134,6 +150,129 @@ describe("integrated permission system", () => {
     );
     expect(result).toEqual({});
     expect(h.ctx.ui.select).toHaveBeenCalledTimes(1);
+    expect(h.ctx.ui.select.mock.calls[0]?.[0]).toContain("classifier model is unavailable");
+    expect(autoEvents.at(-1)).toMatchObject({
+      verdict: "require_human",
+      cause: "model-unavailable",
+    });
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("persists bounded request and outcome transcript entries for TUI human review", async () => {
+    const h = setup({ enabledByDefault: false, mode: "tui" });
+    h.ctx.ui.custom = vi.fn(async () => "approve");
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    const result = await h.handlers.get("tool_call")?.(
+      { toolName: "write", toolCallId: "write-entry", input: { path: "/repo/a.ts" } },
+      h.ctx,
+    );
+    expect(result).toEqual({});
+    expect(h.entries.map((entry) => entry.customType)).toEqual([
+      "pi-permission-system:permission-request:v1",
+      "pi-permission-system:permission-outcome:v1",
+    ]);
+    expect(h.entries[0]?.data).toMatchObject({
+      requestId: "perm-write-entry",
+      toolCallId: "write-entry",
+      payload: { review: { source: "policy" } },
+    });
+    expect(JSON.stringify(h.entries)).not.toContain("classifier note");
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("routes classifier deny to human approval and shows its reason", async () => {
+    const h = setup({
+      modelReply: {
+        content: [
+          {
+            type: "toolCall",
+            name: "submit_verdict",
+            arguments: { verdict: "deny", reason: "The remote is outside the stated scope." },
+          },
+        ],
+      },
+    });
+    h.ctx.ui.select.mockResolvedValueOnce("y approve once");
+    const autoEvents: any[] = [];
+    h.events.on("auto-mode:decision", (event) => autoEvents.push(event));
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    const result = await h.handlers.get("tool_call")?.(
+      { toolName: "write", toolCallId: "write-review", input: { path: "/repo/a.ts" } },
+      h.ctx,
+    );
+    expect(result).toEqual({});
+    expect(h.ctx.ui.select.mock.calls[0]?.[0]).toContain("The remote is outside the stated scope.");
+    expect(h.ctx.ui.select.mock.calls[0]?.[1]).toEqual([
+      "y approve once",
+      "a approve + classifier note",
+      "n deny",
+      "d deny + classifier note",
+    ]);
+    expect(autoEvents.at(-1)).toMatchObject({ verdict: "require_human", cause: "classifier" });
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("routes classifier review for explicit skills through human authority", async () => {
+    const h = setup({
+      modelReply: {
+        content: [
+          {
+            type: "toolCall",
+            name: "submit_verdict",
+            arguments: { verdict: "require_human", reason: "Skill scope needs confirmation." },
+          },
+        ],
+      },
+    });
+    h.ctx.ui.select.mockResolvedValueOnce("n deny");
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    const result = await h.handlers.get("input")?.(
+      { text: "/skill:release publish", source: "interactive" },
+      h.ctx,
+    );
+    expect(result).toEqual({ action: "handled" });
+    expect(h.ctx.ui.select.mock.calls[0]?.[0]).toContain("Skill scope needs confirmation.");
+    expect(h.ctx.ui.select.mock.calls[0]?.[1]).toHaveLength(4);
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("does not prompt after external classifier cancellation", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const h = setup({
+      signal: controller.signal,
+      modelReply: {
+        content: [{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "allow" } }],
+      },
+    });
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    const result = await h.handlers.get("tool_call")?.(
+      { toolName: "write", toolCallId: "write-cancelled", input: { path: "/repo/a.ts" } },
+      h.ctx,
+    );
+    expect(result).toMatchObject({ block: true, reason: "Permission review cancelled." });
+    expect(h.ctx.ui.select).not.toHaveBeenCalled();
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("routes an armed sensitive-path guard to human approval without classifier notes", async () => {
+    const home = process.env.HOME ?? "/Users/test";
+    const h = setup({ enabledByDefault: true });
+    h.ctx.ui.select.mockResolvedValueOnce("y approve once");
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    const result = await h.handlers.get("tool_call")?.(
+      {
+        toolName: "read",
+        toolCallId: "guard-human",
+        input: { path: `${home}/.ssh/id_ed25519` },
+      },
+      h.ctx,
+    );
+    expect(result).toEqual({});
+    const [title, labels] = h.ctx.ui.select.mock.calls[0] ?? [];
+    expect(title).toContain("Security check");
+    expect(labels).toEqual(["y approve once", "n deny"]);
+    expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
     rmSync(h.agentDir, { recursive: true, force: true });
   });
 
@@ -146,6 +285,24 @@ describe("integrated permission system", () => {
       h.ctx,
     );
     expect(result).toMatchObject({ block: true });
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("fails closed for a headless sensitive-path escalation", async () => {
+    const home = process.env.HOME ?? "/Users/test";
+    const h = setup({ enabledByDefault: true });
+    h.ctx.hasUI = false;
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    const result = await h.handlers.get("tool_call")?.(
+      {
+        toolName: "read",
+        toolCallId: "headless-guard",
+        input: { path: `${home}/.ssh/id_ed25519` },
+      },
+      h.ctx,
+    );
+    expect(result).toMatchObject({ block: true });
+    expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
     rmSync(h.agentDir, { recursive: true, force: true });
   });
 

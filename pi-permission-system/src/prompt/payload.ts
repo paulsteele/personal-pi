@@ -1,5 +1,18 @@
 import type { BashCommandContext } from "../types.ts";
 
+export type PermissionReview =
+  | { readonly source: "policy"; readonly reason?: string | null }
+  | {
+      readonly source: "classifier";
+      readonly reason: string;
+      readonly cause?: string | null;
+    }
+  | {
+      readonly source: "guard";
+      readonly reason: string;
+      readonly category: string;
+    };
+
 /** Complete, presentation-neutral facts for one local permission prompt. */
 export interface PermissionPromptPayload {
   readonly surface: string;
@@ -8,6 +21,7 @@ export interface PermissionPromptPayload {
   readonly matchedPattern: string | null;
   readonly category: string | null;
   readonly reason: string | null;
+  readonly review: PermissionReview;
   readonly commandContext: BashCommandContext | null;
   readonly executedUnit: string | null;
   readonly evidence: readonly PermissionPromptEvidence[];
@@ -27,6 +41,7 @@ export interface RichPromptFacts {
   readonly matchedPattern: string | null;
   readonly category?: string;
   readonly reason?: string;
+  readonly review?: PermissionReview;
   readonly toolName?: string | null;
   readonly command?: string | null;
   readonly cwd?: string;
@@ -82,6 +97,9 @@ export function buildPermissionPromptPayload(facts: RichPromptFacts): Permission
   add("input", facts.inputPreview);
 
   const matchingUnit = facts.commandUnits?.find((unit) => unit.text === facts.value);
+  const review =
+    facts.review ??
+    ({ source: "policy", ...(facts.reason ? { reason: facts.reason } : {}) } as const);
   return {
     surface: facts.surface,
     toolName: facts.toolName ?? null,
@@ -89,9 +107,49 @@ export function buildPermissionPromptPayload(facts: RichPromptFacts): Permission
     matchedPattern: facts.matchedPattern,
     category: facts.category ?? null,
     reason: facts.reason ?? null,
+    review,
     commandContext: matchingUnit?.context ?? null,
     executedUnit: matchingUnit?.executedUnit ?? null,
     evidence,
+  };
+}
+
+/** Bound data before it is persisted as a TUI-only transcript entry. */
+export function boundPermissionPromptPayload(
+  payload: PermissionPromptPayload,
+): PermissionPromptPayload {
+  const bounded = (value: string | null, max: number): string | null =>
+    value === null ? null : Array.from(value).slice(0, max).join("");
+  const review: PermissionReview =
+    payload.review.source === "classifier"
+      ? {
+          source: "classifier",
+          reason: bounded(payload.review.reason, 500) ?? "Human approval requested.",
+          cause: bounded(payload.review.cause ?? null, 100),
+        }
+      : payload.review.source === "guard"
+        ? {
+            source: "guard",
+            reason: bounded(payload.review.reason, 500) ?? "Human approval requested.",
+            category: bounded(payload.review.category, 100) ?? "security",
+          }
+        : { source: "policy", reason: bounded(payload.review.reason ?? null, 500) };
+  return {
+    surface: bounded(payload.surface, 100) ?? "unknown",
+    toolName: bounded(payload.toolName, 100),
+    value: bounded(payload.value, 2_000) ?? "",
+    matchedPattern: bounded(payload.matchedPattern, 500),
+    category: bounded(payload.category, 100),
+    reason: bounded(payload.reason, 500),
+    review,
+    commandContext: payload.commandContext,
+    executedUnit: bounded(payload.executedUnit, 2_000),
+    evidence: payload.evidence.slice(0, 12).map((item) => ({
+      label: bounded(item.label, 100) ?? "detail",
+      text: bounded(item.text, 2_000) ?? "",
+      detail: bounded(item.detail, 2_000),
+      highlighted: item.highlighted,
+    })),
   };
 }
 

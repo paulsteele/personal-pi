@@ -12,7 +12,13 @@
 - Enforced explicit skill invocation and skill-directory reads, matched path policies against
   canonical aliases, restored classifier request/environment context, propagated cancellation,
   protected invalid configuration from overwrite, and removed raw decision text from review logs.
-- Restored rich inline permission prompts with aligned request facts, warning-yellow command/path
-  highlights, bounded evidence and edit previews, and `Ctrl+O` expansion while retaining one-press
-  one-shot decisions.
+- Restored rich permission request facts with warning-highlighted command/path evidence and bounded
+  edit previews.
+- Narrowed classifier authority to allow-or-require-human and changed every positive deterministic
+  safety match to fresh human approval; explicit policy deny remains terminal and headless escalation
+  remains fail-closed.
+- Persisted bounded permission requests and correlated human outcomes as TUI-only transcript entries,
+  leaving a compact decision-control panel and the full conversation scrollable. Shared Atelier's
+  `󰚩` classifier, `󰀄` human, and `󰒃` security/policy provenance glyphs and replaced auto-deny
+  accounting with classifier allow/human-asked counts.
 

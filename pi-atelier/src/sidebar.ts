@@ -45,8 +45,7 @@ export interface SidebarSnapshotInput {
 		usable: boolean;
 		modelId: string;
 		allowed: number;
-		denied: number;
-		escalated: number;
+		asked: number;
 	};
 	sidebarPanels?: readonly SidebarPanelData[];
 }
@@ -64,8 +63,7 @@ export interface SidebarSnapshot extends AtelierState {
 		usable: boolean;
 		modelId: string;
 		allowed: number;
-		denied: number;
-		escalated: number;
+		asked: number;
 	};
 	sidebarPanels?: readonly SidebarPanelData[];
 }
@@ -627,9 +625,11 @@ function permissionBadge(permission: PermissionActivity, palette: AtelierPalette
 	const prior =
 		permission.prior === "auto-unsure"
 			? sourceOutcome("auto", "?", "warning", palette)
-			: permission.prior === "policy-ask"
-				? sourceOutcome("policy", "?", "warning", palette)
-				: "";
+			: permission.prior === "security-review"
+				? sourceOutcome("security", "?", "warning", palette)
+				: permission.prior === "policy-ask"
+					? sourceOutcome("policy", "?", "warning", palette)
+					: "";
 	return prior ? `${prior} ${palette.paint("dim", "→")} ${final}` : final;
 }
 
@@ -814,10 +814,7 @@ function activityRows(
 							autoModeState.enabled ? "ready" : "dim",
 							`${autoModeState.enabled ? "auto" : "manual"} · ${autoModeState.modelId}`,
 						),
-						palette.paint(
-							"muted",
-							`auto ${autoModeState.allowed} allow · ${autoModeState.denied} deny · ${autoModeState.escalated} asked`,
-						),
+						palette.paint("muted", `󰚩 ${autoModeState.allowed} allow · 󰀄 ${autoModeState.asked} asked`),
 					]
 				: []),
 			runSummaryRow(activity, palette, now),

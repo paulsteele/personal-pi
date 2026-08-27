@@ -294,7 +294,7 @@ describe("run activity tracker transitions", () => {
 		expect(snapshot).not.toHaveProperty("performance");
 	});
 
-	it("merges permission prompt, auto-unsure, and human outcome across tool lifecycle races", () => {
+	it("merges permission prompt, classifier request, and human outcome across tool lifecycle races", () => {
 		const tracker = createRunActivityTracker({ cwd: "/repo" });
 		tracker.recordPermission({
 			requestId: "r1",
@@ -329,6 +329,32 @@ describe("run activity tracker transitions", () => {
 			prior: "auto-unsure",
 			reason: "not yet",
 		});
+	});
+
+	it("merges a standalone classifier escalation into its human outcome", () => {
+		const tracker = createRunActivityTracker({ cwd: "/repo" });
+		tracker.recordPermission({
+			requestId: "skill-review",
+			toolCallId: null,
+			surface: "skill",
+			value: "release",
+			source: "auto",
+			state: "unsure",
+			prior: "auto-unsure",
+			at: 1,
+		});
+		tracker.recordPermission({
+			requestId: "skill-review",
+			toolCallId: null,
+			surface: "skill",
+			value: "release",
+			source: "human",
+			state: "allow",
+			at: 2,
+		});
+		expect(tracker.getSnapshot().standalonePermissions).toEqual([
+			expect.objectContaining({ source: "human", state: "allow", prior: "auto-unsure" }),
+		]);
 	});
 
 	it("merges a security guard escalation into its human outcome", () => {

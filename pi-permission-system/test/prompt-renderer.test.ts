@@ -29,6 +29,40 @@ describe("rich permission prompt", () => {
     expect(rendered).toContain("working directory : /repo");
   });
 
+  it("renders classifier reasoning with robot provenance", () => {
+    const payload = buildPermissionPromptPayload({
+      surface: "bash",
+      value: "curl https://unknown.example",
+      matchedPattern: "*",
+      review: {
+        source: "classifier",
+        reason: "The destination is not established by the user's request.",
+        cause: "classifier",
+      },
+    });
+    const rendered = renderPermissionPrompt(payload, 100, theme, false).lines.join("\n");
+    expect(rendered).toContain("󰚩 Classifier review");
+    expect(rendered).toContain("Human approval requested");
+    expect(rendered).toContain("The destination is not established by the user's request.");
+  });
+
+  it("renders deterministic safety reasoning with security provenance", () => {
+    const payload = buildPermissionPromptPayload({
+      surface: "path",
+      value: "~/.ssh/id_ed25519",
+      matchedPattern: "*",
+      review: {
+        source: "guard",
+        category: "sensitive_path",
+        reason: "Access to a protected credential requires fresh human approval.",
+      },
+    });
+    const rendered = renderPermissionPrompt(payload, 100, theme, false).lines.join("\n");
+    expect(rendered).toContain("󰒃 Security check");
+    expect(rendered).toContain("sensitive_path");
+    expect(rendered).toContain("protected credential");
+  });
+
   it("shows resolved path aliases and marks truncated prompts expandable", () => {
     const payload = buildPermissionPromptPayload({
       surface: "external_directory",

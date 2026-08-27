@@ -1099,6 +1099,25 @@ describe("sidebar snapshot and layout", () => {
 		expect(rows).toContain(expected);
 	});
 
+	it("uses robot and human glyphs for classifier allow and asked counts", () => {
+		const autoSnapshot = buildSidebarSnapshot({
+			state,
+			cwd: "/tmp/project",
+			branchEntryCount: 1,
+			extensionStatuses: [],
+			autoModeState: {
+				enabled: true,
+				usable: true,
+				modelId: "reviewer",
+				allowed: 3,
+				asked: 2,
+			},
+		});
+		const rows = contentRows(renderSidebarLines(autoSnapshot, theme, 44, 36, false));
+		expect(rows).toContain("󰚩 3 allow · 󰀄 2 asked");
+		expect(rows.join("\n")).not.toContain("deny");
+	});
+
 	it("renders spaced Nerd Font permission badges inline and keeps exception reasons below", () => {
 		const lines = renderSidebarLines(
 			withActivity({
@@ -1175,6 +1194,45 @@ describe("sidebar snapshot and layout", () => {
 		expect(rendered).toContain("\u001b[38;2;110;168;254m󰒃\u001b[39m");
 		expect(rendered).toContain("\u001b[38;2;177;140;255m󰚩\u001b[39m");
 		expect(rendered).toContain("\u001b[38;2;125;211;252m󰀄\u001b[39m");
+	});
+
+	it("renders security-to-human provenance with the established glyphs", () => {
+		const lines = renderSidebarLines(
+			withActivity({
+				phase: "running",
+				startedAt: 1_000,
+				activeTools: [
+					{
+						id: "read-guard",
+						name: "read",
+						summary: "~/.ssh/id_ed25519",
+						status: "running",
+						startedAt: 2_000,
+						permissions: [
+							{
+								requestId: "guard-1",
+								toolCallId: "read-guard",
+								surface: "path",
+								value: "~/.ssh/id_ed25519",
+								source: "human",
+								state: "allow",
+								prior: "security-review",
+								at: 3_000,
+							},
+						],
+					},
+				],
+				recentTools: [],
+				completedCount: 0,
+				failedCount: 0,
+			}),
+			theme,
+			50,
+			36,
+			false,
+			5_000,
+		);
+		expect(contentRows(lines)).toContainEqual(expect.stringMatching(/󰒃 \? → 󰀄 ✓/));
 	});
 
 	it("collapses routine allows by source and wraps only badges that do not fit inline", () => {

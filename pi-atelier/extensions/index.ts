@@ -86,8 +86,7 @@ interface ActiveSession {
 				usable: boolean;
 				modelId: string;
 				allowed: number;
-				denied: number;
-				escalated: number;
+				asked: number;
 		  }
 		| undefined;
 	footerGeneration: number;
@@ -231,7 +230,7 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 		)
 			return undefined;
 		const verdict = event.verdict;
-		if (verdict !== "allow" && verdict !== "deny" && verdict !== "defer") return undefined;
+		if (verdict !== "allow" && verdict !== "require_human") return undefined;
 		const mechanism = event.mechanism === "guard" ? "guard" : "model";
 		return {
 			requestId: event.requestId,
@@ -239,8 +238,8 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 			surface: event.surface,
 			value: event.value,
 			source: mechanism === "guard" ? "security" : "auto",
-			state: verdict === "defer" ? "unsure" : verdict,
-			...(verdict === "defer"
+			state: verdict === "require_human" ? "unsure" : "allow",
+			...(verdict === "require_human"
 				? { prior: mechanism === "guard" ? ("security-review" as const) : ("auto-unsure" as const) }
 				: {}),
 			...(typeof event.reason === "string" ? { reason: event.reason } : {}),
@@ -558,7 +557,7 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 					)
 						return;
 					if (
-						![state.allowed, state.denied, state.escalated].every(
+						![state.allowed, state.asked].every(
 							(value) => typeof value === "number" && Number.isFinite(value),
 						)
 					)
@@ -568,8 +567,7 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 						usable: state.usable,
 						modelId: state.modelId,
 						allowed: state.allowed as number,
-						denied: state.denied as number,
-						escalated: state.escalated as number,
+						asked: state.asked as number,
 					};
 					nextSession.sidebar.requestRender();
 				}),

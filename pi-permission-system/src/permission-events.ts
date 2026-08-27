@@ -3,7 +3,7 @@ export const PERMISSIONS_DECISION_CHANNEL = "permissions:decision";
 
 export type DecisionSource =
   | { kind: "policy"; pattern: string | null }
-  | { kind: "auto"; verdict: "allow" | "deny" }
+  | { kind: "auto"; verdict: "allow" }
   | { kind: "guard"; category: string }
   | { kind: "human" }
   | { kind: "unavailable" }
@@ -27,10 +27,8 @@ export interface PermissionDecisionEvent {
     | "policy_allow"
     | "policy_deny"
     | "auto_approved"
-    | "auto_denied"
     | "user_approved"
     | "user_denied"
-    | "guard_denied"
     | "confirmation_unavailable"
     | "gate_error";
   decidedBy: DecisionSource;

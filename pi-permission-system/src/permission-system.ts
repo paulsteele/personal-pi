@@ -7,7 +7,12 @@ import {
 import { warmBashParser } from "./access-intent/bash/parser.ts";
 import { BashProgram } from "./access-intent/bash/program.ts";
 import { classify, type ReviewFacts } from "./auto/classifier.ts";
-import { type AutoModeSnapshot, DEFER, footerLabel, type Verdict } from "./auto/core.ts";
+import {
+  type AutoModeSnapshot,
+  footerLabel,
+  type ModelReviewResult,
+  type Verdict,
+} from "./auto/core.ts";
 import { formatEditForClassifier } from "./auto/edit-preview.ts";
 import { createAutoPublisher } from "./auto/events.ts";
 import { evaluateSafety, type SafetyContext } from "./auto/safety-policy.ts";
@@ -23,7 +28,16 @@ import { type Config, loadConfig, saveAutoEnabled, saveAutoModel } from "./confi
 import { ReviewLogger } from "./logging.ts";
 import { PathNormalizer } from "./path-normalizer.ts";
 import { presentPermissionPrompt } from "./prompt/component.ts";
-import { buildPermissionPromptPayload, type PermissionPromptPayload } from "./prompt/payload.ts";
+import {
+  appendPermissionOutcome,
+  appendPermissionRequest,
+  registerPermissionEntryRenderers,
+} from "./prompt/entries.ts";
+import {
+  buildPermissionPromptPayload,
+  type PermissionPromptPayload,
+  type PermissionReview,
+} from "./prompt/payload.ts";
 import {
   type EventBus,
   emitDecision,
@@ -42,6 +56,7 @@ interface ActiveSkill {
 }
 
 interface Runtime {
+  pi: ExtensionAPI;
   ctx: ExtensionContext;
   config: Config;
   enabled: boolean;
@@ -49,7 +64,7 @@ interface Runtime {
   skills: readonly ActiveSkill[];
   gitRemotes: readonly string[];
   cache: Map<string, Verdict>;
-  counts: { allowed: number; denied: number; escalated: number };
+  counts: { allowed: number; asked: number };
   publisher: ReturnType<typeof createAutoPublisher>;
   logger: ReviewLogger;
   events: EventBus;
@@ -186,14 +201,6 @@ async function humanDecision(
 ): Promise<{ allowed: boolean; reason: string | null }> {
   const { ctx } = runtime;
   if (!ctx.hasUI) return { allowed: false, reason: "No interactive human authority is available." };
-  const noteEnabled = runtime.enabled;
-  emitUiPrompt(runtime.events, {
-    requestId: request.id,
-    toolCallId: request.toolCallId || null,
-    source: request.source ?? "tool_call",
-    surface: request.surface,
-    value: request.value,
-  });
   const payload =
     request.payload ??
     buildPermissionPromptPayload({
@@ -203,7 +210,24 @@ async function humanDecision(
       category: request.category,
       reason: request.reason,
     });
-  const choice = await presentPermissionPrompt(ctx, "Permission Required", payload, noteEnabled);
+  const classifierFeedback = payload.review.source === "classifier";
+  emitUiPrompt(runtime.events, {
+    requestId: request.id,
+    toolCallId: request.toolCallId || null,
+    source: request.source ?? "tool_call",
+    surface: request.surface,
+    value: request.value,
+  });
+  if (ctx.mode === "tui")
+    appendPermissionRequest(runtime.pi, request.id, request.toolCallId || null, payload);
+  const choice = await presentPermissionPrompt(
+    ctx,
+    "Permission Required",
+    payload,
+    classifierFeedback,
+  );
+  if (ctx.mode === "tui")
+    appendPermissionOutcome(runtime.pi, request.id, request.toolCallId || null, choice);
   if (!choice) return { allowed: false, reason: "Human cancelled permission confirmation." };
   const allow = choice === "approve" || choice === "approve_note";
   const noteChoice = choice === "approve_note" || choice === "deny_note";
@@ -361,14 +385,47 @@ async function modelDecision(
   facts: ReviewFacts,
   riskMarkers: readonly string[],
   toolCallId: string | null,
-): Promise<Verdict> {
+): Promise<ModelReviewResult> {
+  if (ctx.signal?.aborted) return { kind: "cancelled", modelCalled: false };
   const key = createHash("sha256")
     .update(JSON.stringify([facts, noteDigest(runtime.notes)]))
     .digest("hex");
   const cached = runtime.cache.get(key);
-  if (cached) return cached;
+  if (cached) return { kind: "allow", modelCalled: false };
   const model = ctx.modelRegistry.find(runtime.config.auto.provider, runtime.config.auto.model);
-  if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) return DEFER;
+  const unavailable: ModelReviewResult = !model
+    ? {
+        kind: "require_human",
+        reason:
+          "The configured classifier model is unavailable, so it could not approve this action.",
+        cause: "model-unavailable",
+        modelCalled: false,
+      }
+    : !ctx.modelRegistry.hasConfiguredAuth(model)
+      ? {
+          kind: "require_human",
+          reason: "Classifier authentication is unavailable, so it could not approve this action.",
+          cause: "auth-unavailable",
+          modelCalled: false,
+        }
+      : { kind: "allow", modelCalled: false };
+  if (unavailable.kind === "require_human") {
+    runtime.publisher.decision(
+      {
+        requestId: requestIdValue,
+        mechanism: "model",
+        category: null,
+        surface: facts.surface,
+        value: facts.value,
+        verdict: "require_human",
+        reason: unavailable.reason,
+        cause: unavailable.cause,
+        at: Date.now(),
+      },
+      toolCallId,
+    );
+    return unavailable;
+  }
   const response = await classify({
     caller: ctx.modelRegistry as never,
     model: model as never,
@@ -386,31 +443,34 @@ async function modelDecision(
     config: runtime.config.auto,
     signal: ctx.signal,
   });
-  if (response.verdict.kind !== "defer") runtime.cache.set(key, response.verdict);
-  runtime.publisher.decision(
-    {
-      requestId: requestIdValue,
-      mechanism: "model",
-      category: null,
-      surface: facts.surface,
-      value: facts.value,
-      verdict: response.verdict.kind,
-      reason: response.verdict.reason ?? null,
-      deferReason: response.deferReason,
-      at: Date.now(),
-    },
-    toolCallId,
-  );
-  return response.verdict;
+  if (response.kind === "allow") runtime.cache.set(key, { kind: "allow" });
+  if (response.kind !== "cancelled")
+    runtime.publisher.decision(
+      {
+        requestId: requestIdValue,
+        mechanism: "model",
+        category: null,
+        surface: facts.surface,
+        value: facts.value,
+        verdict: response.kind,
+        reason: response.kind === "require_human" ? response.reason : null,
+        cause: response.kind === "require_human" ? response.cause : null,
+        at: Date.now(),
+      },
+      toolCallId,
+    );
+  return response;
 }
 
 export default function permissionSystem(pi: ExtensionAPI): void {
+  registerPermissionEntryRenderers(pi);
   let runtime: Runtime | undefined;
 
   const reload = (ctx: ExtensionContext): Runtime => {
     runtime?.publisher.dispose();
     const loaded = loadConfig(getAgentDir());
     const next: Runtime = {
+      pi,
       ctx,
       config: loaded.config,
       enabled: loaded.config.auto.enabledByDefault,
@@ -418,7 +478,7 @@ export default function permissionSystem(pi: ExtensionAPI): void {
       skills: [],
       gitRemotes: [],
       cache: new Map(),
-      counts: { allowed: 0, denied: 0, escalated: 0 },
+      counts: { allowed: 0, asked: 0 },
       publisher: createAutoPublisher(pi.events),
       events: pi.events,
       logger: new ReviewLogger(
@@ -553,6 +613,7 @@ export default function permissionSystem(pi: ExtensionAPI): void {
       });
       return { action: "continue" as const };
     }
+    let review: PermissionReview = { source: "policy", reason: policy.reason };
     if (current.enabled) {
       const verdict = await modelDecision(
         current,
@@ -572,24 +633,24 @@ export default function permissionSystem(pi: ExtensionAPI): void {
         [],
         null,
       );
-      if (verdict.kind === "allow" || verdict.kind === "deny") {
-        if (verdict.kind === "allow") current.counts.allowed += 1;
-        else current.counts.denied += 1;
+      if (verdict.kind === "cancelled") return { action: "handled" as const };
+      if (verdict.kind === "allow") {
+        current.counts.allowed += 1;
         publish(current);
         decision(current, {
           requestId: req,
           toolCallId: null,
           surface: "skill",
           value: skillName,
-          result: verdict.kind,
-          resolution: verdict.kind === "allow" ? "auto_approved" : "auto_denied",
-          decidedBy: { kind: "auto", verdict: verdict.kind },
-          reason: verdict.reason ?? null,
+          result: "allow",
+          resolution: "auto_approved",
+          decidedBy: { kind: "auto", verdict: "allow" },
         });
-        return { action: verdict.kind === "allow" ? ("continue" as const) : ("handled" as const) };
+        return { action: "continue" as const };
       }
-      current.counts.escalated += 1;
+      current.counts.asked += 1;
       publish(current);
+      review = { source: "classifier", reason: verdict.reason, cause: verdict.cause };
     }
     const human = await humanDecision(current, {
       id: req,
@@ -598,6 +659,13 @@ export default function permissionSystem(pi: ExtensionAPI): void {
       value: skillName,
       pattern: policy.matchedPattern,
       source: "skill_input",
+      payload: buildPermissionPromptPayload({
+        surface: "skill",
+        value: skillName,
+        matchedPattern: policy.matchedPattern,
+        reason: policy.reason ?? undefined,
+        review,
+      }),
     });
     decision(current, {
       requestId: req,
@@ -704,13 +772,18 @@ export default function permissionSystem(pi: ExtensionAPI): void {
     const policyValue = selected.value;
     const policy = selected.decision;
     const promptSource = matchedSkill ? "skill_read" : "tool_call";
-    const promptPayload = (category?: string, reason?: string): PermissionPromptPayload =>
+    const promptPayload = (
+      category?: string,
+      reason?: string,
+      review?: PermissionReview,
+    ): PermissionPromptPayload =>
       buildPermissionPromptPayload({
         surface: selected.surface,
         value: policyValue,
         matchedPattern: policy.matchedPattern,
         category,
         reason,
+        review,
         toolName,
         command,
         cwd: ctx.cwd,
@@ -739,21 +812,21 @@ export default function permissionSystem(pi: ExtensionAPI): void {
       });
       return { block: true, reason: "Denied by permission policy." };
     }
-    if (safety.kind === "deny") {
-      decision(current, {
-        requestId: req,
-        toolCallId: toolCallId || null,
-        surface: toolName,
-        value: policyValue,
-        result: "deny",
-        resolution: "guard_denied",
-        decidedBy: { kind: "guard", category: safety.category },
-        category: safety.category,
-        reason: safety.reason,
-      });
-      return { block: true, reason: safety.reason };
-    }
     if (safety.kind === "require_human") {
+      current.publisher.decision(
+        {
+          requestId: req,
+          mechanism: "guard",
+          category: safety.category,
+          surface: toolName,
+          value: policyValue,
+          verdict: "require_human",
+          reason: safety.reason,
+          cause: null,
+          at: Date.now(),
+        },
+        toolCallId || null,
+      );
       const human = await humanDecision(current, {
         id: req,
         toolCallId,
@@ -763,7 +836,11 @@ export default function permissionSystem(pi: ExtensionAPI): void {
         category: safety.category,
         reason: safety.reason,
         source: promptSource,
-        payload: promptPayload(safety.category, safety.reason),
+        payload: promptPayload(safety.category, safety.reason, {
+          source: "guard",
+          reason: safety.reason,
+          category: safety.category,
+        }),
       });
       decision(current, {
         requestId: req,
@@ -791,6 +868,7 @@ export default function permissionSystem(pi: ExtensionAPI): void {
       });
       return {};
     }
+    let review: PermissionReview = { source: "policy", reason: policy.reason };
     if (current.enabled) {
       const facts = classifyFacts(toolName, input, command, selected);
       const verdict = await modelDecision(
@@ -801,26 +879,25 @@ export default function permissionSystem(pi: ExtensionAPI): void {
         safety.riskMarkers,
         toolCallId || null,
       );
-      if (verdict.kind === "allow" || verdict.kind === "deny") {
-        if (verdict.kind === "allow") current.counts.allowed += 1;
-        else current.counts.denied += 1;
+      if (verdict.kind === "cancelled")
+        return { block: true, reason: "Permission review cancelled." };
+      if (verdict.kind === "allow") {
+        current.counts.allowed += 1;
         publish(current);
         decision(current, {
           requestId: req,
           toolCallId: toolCallId || null,
           surface: facts.surface,
           value: facts.value,
-          result: verdict.kind,
-          resolution: verdict.kind === "allow" ? "auto_approved" : "auto_denied",
-          decidedBy: { kind: "auto", verdict: verdict.kind },
-          reason: verdict.reason ?? null,
+          result: "allow",
+          resolution: "auto_approved",
+          decidedBy: { kind: "auto", verdict: "allow" },
         });
-        return verdict.kind === "allow"
-          ? {}
-          : { block: true, reason: verdict.reason ?? "Denied by auto classifier." };
+        return {};
       }
-      current.counts.escalated += 1;
+      current.counts.asked += 1;
       publish(current);
+      review = { source: "classifier", reason: verdict.reason, cause: verdict.cause };
     }
     const human = await humanDecision(current, {
       id: req,
@@ -829,7 +906,7 @@ export default function permissionSystem(pi: ExtensionAPI): void {
       value: policyValue,
       pattern: policy.matchedPattern,
       source: promptSource,
-      payload: promptPayload(),
+      payload: promptPayload(undefined, policy.reason ?? undefined, review),
     });
     decision(current, {
       requestId: req,

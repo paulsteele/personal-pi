@@ -13,7 +13,7 @@ const base = {
   paths: [],
   riskMarkers: [],
 };
-it("denies a sensitive path while auto is armed", () => {
+it("requires human approval for a sensitive path while auto is armed", () => {
   expect(
     evaluateSafety(
       {
@@ -31,7 +31,7 @@ it("denies a sensitive path while auto is armed", () => {
       true,
       { home: "/home/me" },
     ).kind,
-  ).toBe("deny");
+  ).toBe("require_human");
 });
 it("requires one-shot human approval for generic structured destructive tools", () => {
   expect(

@@ -289,8 +289,10 @@ class DefaultRunActivityTracker implements RunActivityTracker {
 		const safe = freezePermission(permission);
 		if (!safe.requestId) return;
 		if (!safe.toolCallId) {
+			const previous = this.standalonePermissions.find((item) => item.requestId === safe.requestId);
+			const merged = previous ? (mergePermissions([previous], safe)[0] ?? safe) : safe;
 			this.standalonePermissions = [
-				safe,
+				merged,
 				...this.standalonePermissions.filter((item) => item.requestId !== safe.requestId),
 			].slice(0, MAX_STANDALONE_PERMISSIONS);
 			this.notify();

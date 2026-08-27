@@ -27,8 +27,8 @@ auto mode **141 tests**, Atelier **12 files / 222 tests**, and patch harness **4
 - One strict, operator-global allow/ask/deny policy, including global skill rules.
 - Bash, path, external-directory, built-in file tool, generic tool, skill invocation, and skill-file-read gates.
 - POSIX macOS/Linux path normalization, canonical aliases, symlink-boundary checks, native Bash parsing, and fixed Pi/agent read roots.
-- Deterministic sensitive-path and irreversible-action safety checks.
-- Integrated model classifier, `/auto`, `/auto-model`, and `Ctrl+Shift+A`. The approved retained
+- Deterministic sensitive-path and irreversible-action safety checks that can require a human but never deny by themselves.
+- Integrated allow-or-require-human model classifier, `/auto`, `/auto-model`, and `Ctrl+Shift+A`. The approved retained
   auto configuration is provider/model, persisted state, timeout, user-turn bound, and trusted
   environment hints; prompt/log presentation bounds are fixed.
 - One-shot human decisions that commit on the first selection.
@@ -47,14 +47,15 @@ auto mode **141 tests**, Atelier **12 files / 222 tests**, and patch harness **4
 
 ## Invariants
 
-1. A deterministic guard can tighten access but can never grant it.
+1. A deterministic guard can require a fresh human but can never grant or deny by itself.
 2. Policy deny wins before model or human escalation.
-3. Sensitive access is denied while auto is armed and one-shot-human while disarmed; known high-impact work is always one-shot-human.
-4. Classifier failure/defer reaches a human with UI or denies headlessly; classifier notes are
-   bounded (500 characters each, newest eight, 2,000 prompt characters) and affect later calls only.
+3. Sensitive access and known high-impact work always require one-shot human approval; headless operation blocks.
+4. The classifier can only allow or require a human. Timeout/unavailability/malformed replies/failure require a human with UI or block headlessly; external cancellation never creates a stale prompt.
 5. Every tool-call prompt and final decision carries `toolCallId`; every request transition retains `requestId`.
-6. Classifier notes are versioned non-context session entries. They influence later model review only, never guards/policy, and their text never enters Activity or JSONL.
-7. There is exactly one local permission/auto owner at runtime.
+6. Permission requests and human outcomes are versioned, durable, non-context transcript entries; the compact decision controls do not replace the thread.
+7. Classifier notes are separate versioned non-context session entries. They influence later model review only, never guards/policy, and their text never enters Activity, transcript requests, or JSONL.
+8. Activity and permission UI share provenance glyphs: `󰚩` classifier, `󰀄` human, and `󰒃` security/policy.
+9. There is exactly one local permission/auto owner at runtime.
 
 ## Selective upstream adoption
 

@@ -697,6 +697,66 @@ describe("extension registration", () => {
 		expect(plain).not.toContain("↳ 󰒃 ✓  read");
 	});
 
+	it("renders classifier and security requests as provenance chains to human outcomes", async () => {
+		const h = harness();
+		await start(h);
+		await command(h, "on");
+		await h.handlers.get("agent_start")?.({ type: "agent_start" }, h.ctx);
+		for (const item of [
+			{
+				requestId: "classifier-review",
+				toolCallId: "bash-review",
+				toolName: "bash",
+				args: { command: "curl https://unknown.example" },
+				mechanism: "model",
+				allowed: false,
+			},
+			{
+				requestId: "security-review",
+				toolCallId: "read-review",
+				toolName: "read",
+				args: { path: "/home/me/.ssh/id" },
+				mechanism: "guard",
+				allowed: true,
+			},
+		] as const) {
+			await h.handlers.get("tool_execution_start")?.(
+				{
+					type: "tool_execution_start",
+					toolCallId: item.toolCallId,
+					toolName: item.toolName,
+					args: item.args,
+				},
+				h.ctx,
+			);
+			h.pi.events.emit("auto-mode:decision", {
+				requestId: item.requestId,
+				toolCallId: item.toolCallId,
+				surface: item.toolName,
+				value: item.toolCallId,
+				mechanism: item.mechanism,
+				verdict: "require_human",
+				reason: "operator review required",
+				at: 1,
+			});
+			h.pi.events.emit("permissions:decision", {
+				requestId: item.requestId,
+				toolCallId: item.toolCallId,
+				surface: item.toolName,
+				value: item.toolCallId,
+				result: item.allowed ? "allow" : "deny",
+				resolution: item.allowed ? "user_approved" : "user_denied",
+				decidedBy: { kind: "human" },
+			});
+		}
+		const plain = (h.overlays[0]?.component.render(70).join("\n") ?? "").replace(
+			/\u001b\[[0-?]*[ -/]*[@-~]/g,
+			"",
+		);
+		expect(plain).toMatch(/bash.+󰚩 \? → 󰀄 ✕/);
+		expect(plain).toMatch(/read.+󰒃 \? → 󰀄 ✓/);
+	});
+
 	it("keeps all correlated decision sources on their tool rows across reload and timing", async () => {
 		const h = harness();
 		await start(h);
@@ -704,10 +764,10 @@ describe("extension registration", () => {
 		await h.handlers.get("agent_start")?.({ type: "agent_start" }, h.ctx);
 		const cases = [
 			["policy-deny", "write", { path: "/tmp/project/deny.ts" }, "policy_deny", "policy", "deny"],
-			["auto-deny", "bash", { command: "curl bad" }, "auto_denied", "auto", "deny"],
-			["auto-defer", "bash", { command: "unknown" }, "user_denied", "human", "deny"],
-			["guard-deny", "read", { path: "/home/me/.ssh/id" }, "guard_denied", "guard", "deny"],
-			["guard-human", "bash", { command: "git push" }, "user_approved", "human", "allow"],
+			["auto-allow", "bash", { command: "npm test" }, "auto_approved", "auto", "allow"],
+			["auto-human", "bash", { command: "unknown" }, "user_denied", "human", "deny"],
+			["guard-human", "read", { path: "/home/me/.ssh/id" }, "user_denied", "human", "deny"],
+			["guard-approved", "bash", { command: "git push" }, "user_approved", "human", "allow"],
 			["skill-check", "skill", { name: "release" }, "policy_deny", "policy", "deny"],
 			["gate-error", "bash", { command: "broken" }, "gate_error", "gate_error", "deny"],
 		] as const;
@@ -719,12 +779,7 @@ describe("extension registration", () => {
 				value: toolCallId,
 				result,
 				resolution,
-				decidedBy:
-					kind === "auto"
-						? { kind, verdict: result }
-						: kind === "guard"
-							? { kind, category: "test" }
-							: { kind },
+				decidedBy: kind === "auto" ? { kind, verdict: result } : { kind },
 			};
 			if (index % 2 === 0) h.pi.events.emit("permissions:decision", event);
 			await h.handlers.get("tool_execution_start")?.(
@@ -749,7 +804,7 @@ describe("extension registration", () => {
 		);
 		for (const [, toolName] of cases) expect(beforeReload).toContain(toolName);
 		expect(beforeReload).not.toMatch(
-			/↳.*(policy-deny|auto-deny|auto-defer|guard-deny|guard-human|skill-check|gate-error)/,
+			/↳.*(policy-deny|auto-allow|auto-human|guard-human|guard-approved|skill-check|gate-error)/,
 		);
 		expect(reloaded).toContain("Ready");
 	});
