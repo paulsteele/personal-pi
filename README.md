@@ -19,7 +19,7 @@ Permission System must load before Atelier so its replayable `auto-mode:*` state
 After the public repository and release tag exist:
 
 ```sh
-pi install https://github.com/paulsteele/pi-extensions@v1.0.0
+pi install https://github.com/paulsteele/personal-pi@v1.0.0
 ```
 
 The dotfiles repository normally records the same pinned source in `~/.pi/agent/settings.json`, so Pi installs a missing user package automatically at startup when online. The public HTTPS URL requires no SSH alias or repository credentials.
@@ -29,7 +29,7 @@ Run `/reload` after installation or restart Pi. Use `pi list` to confirm the con
 ## Development
 
 ```sh
-git clone https://github.com/paulsteele/pi-extensions ~/personal/pi-extensions
+git clone https://github.com/paulsteele/personal-pi ~/personal/pi-extensions
 cd ~/personal/pi-extensions
 bun install
 bun run check
@@ -77,7 +77,7 @@ Do not move or replace a published version tag.
 
 1. Install Pi and apply the dotfiles repository.
 2. Start Pi while online. The pinned package in `~/.pi/agent/settings.json` is cloned and its dependencies are installed automatically.
-3. Run `pi list` and verify `https://github.com/paulsteele/pi-extensions@<tag>` appears.
+3. Run `pi list` and verify `https://github.com/paulsteele/personal-pi@<tag>` appears.
 4. Restart Pi or run `/reload` after package reconciliation if a session was already open.
 
 ## Update and rollback

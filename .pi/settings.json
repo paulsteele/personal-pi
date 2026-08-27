@@ -1,7 +1,7 @@
 {
   "packages": [
     {
-      "source": "https://github.com/paulsteele/pi-extensions",
+      "source": "https://github.com/paulsteele/personal-pi",
       "autoload": false,
       "extensions": [
         "-claude-skills/index.ts",

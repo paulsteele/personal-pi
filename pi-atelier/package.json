@@ -27,13 +27,13 @@
 	},
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/paulsteele/pi-extensions.git",
+		"url": "https://github.com/paulsteele/personal-pi.git",
 		"directory": "pi-atelier"
 	},
 	"bugs": {
-		"url": "https://github.com/paulsteele/pi-extensions/issues"
+		"url": "https://github.com/paulsteele/personal-pi/issues"
 	},
-	"homepage": "https://github.com/paulsteele/pi-extensions/tree/main/pi-atelier",
+	"homepage": "https://github.com/paulsteele/personal-pi/tree/main/pi-atelier",
 	"scripts": {
 		"test": "vitest run",
 		"test:watch": "vitest",

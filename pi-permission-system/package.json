@@ -60,11 +60,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/paulsteele/pi-extensions.git",
+    "url": "https://github.com/paulsteele/personal-pi.git",
     "directory": "pi-permission-system"
   },
   "bugs": {
-    "url": "https://github.com/paulsteele/pi-extensions/issues"
+    "url": "https://github.com/paulsteele/personal-pi/issues"
   },
-  "homepage": "https://github.com/paulsteele/pi-extensions/tree/main/pi-permission-system"
+  "homepage": "https://github.com/paulsteele/personal-pi/tree/main/pi-permission-system"
 }
