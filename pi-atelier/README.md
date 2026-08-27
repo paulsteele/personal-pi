@@ -1,6 +1,6 @@
-# Local Pi Atelier fork
+# Pi Atelier personal fork
 
-A source-owned personal Pi extension for this installation. Read [`FORK.md`](FORK.md) before reconciling upstream.
+A source-owned personal Pi extension distributed in the `pi-extensions` monorepo. Read [`FORK.md`](FORK.md) before reconciling upstream.
 
 ## Features
 
@@ -16,7 +16,7 @@ A source-owned personal Pi extension for this installation. Read [`FORK.md`](FOR
 
 ## Loading
 
-`~/.pi/agent/extensions/local/index.ts` imports this fork directly. Do not also install or configure `npm:pi-atelier`; that would load duplicate UI owners and commands.
+The root `pi-extensions` manifest loads `pi-atelier/extensions/index.ts` after Permission System. Do not also install or configure `npm:pi-atelier`; that would load duplicate UI owners and commands.
 
 ## Use
 
@@ -31,15 +31,16 @@ Plannotator progress appears during planning and execution. Auto mode contribute
 
 ## Privacy
 
-The extension does not collect telemetry, store prompts or responses, or implement desktop notifications. It uses read-only Git inspection for workspace status and does not read untracked file contents. The separate local `desktop-notifications` extension owns notifications.
+The extension does not collect telemetry, store prompts or responses, or implement desktop notifications. It uses read-only Git inspection for workspace status and does not read untracked file contents. The separate `desktop-notifications` workspace owns notifications.
 
 ## Development
 
+From the repository root:
+
 ```bash
-cd ~/.pi/agent/extensions/local/pi-atelier
-npm ci
-npm run check
-bun test ../desktop-notifications/core.test.ts
+bun install --frozen-lockfile
+bun run --cwd pi-atelier check
+bun run --cwd desktop-notifications test
 ```
 
 ## License

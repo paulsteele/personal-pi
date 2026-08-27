@@ -7,8 +7,14 @@ Because loading project skills requires Pi project trust, the extension asks bef
 project when Claude skills are present. In non-interactive modes it leaves the decision to Pi's
 normal trust policy. Skills are contributed only after the project is trusted.
 
+## Package
+
+This workspace is loaded as an individual entry by the root `pi-extensions` package.
+
 ## Tests
 
+From the repository root:
+
 ```sh
-bun test ~/.pi/agent/extensions/local/claude-skills/index.test.ts
+bun run --cwd claude-skills test
 ```

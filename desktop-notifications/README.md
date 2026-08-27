@@ -112,8 +112,12 @@ The first version intentionally guarantees only:
 
 It does not fall back to app-level activation because that can navigate to the wrong terminal window.
 
-## Tests
+## Package and tests
+
+The root `pi-extensions` package loads this workspace as the sole desktop-notification entry. The Hammerspoon bridge remains in the dotfiles repository under `~/.hammerspoon/`.
+
+From the repository root:
 
 ```sh
-bun test ~/.pi/agent/extensions/local/desktop-notifications/core.test.ts
+bun run --cwd desktop-notifications test
 ```

@@ -1,8 +1,8 @@
 {
-  "name": "pi-permission-system-local",
-  "version": "26.3.1-local.1",
+  "name": "@paulsteele/pi-permission-system",
+  "version": "1.0.0",
   "private": true,
-  "description": "Personal source-owned Pi permission and auto-mode fork.",
+  "description": "Personal source-owned Pi permission and auto-mode fork",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -57,5 +57,14 @@
   },
   "engines": {
     "node": ">=22.19.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/paulsteele/pi-extensions.git",
+    "directory": "pi-permission-system"
+  },
+  "bugs": {
+    "url": "https://github.com/paulsteele/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/paulsteele/pi-extensions/tree/main/pi-permission-system"
 }

@@ -1,0 +1,60 @@
+{
+  "name": "pi-extensions",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Paul Steele's Pi extensions",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extensions"
+  ],
+  "workspaces": [
+    "claude-skills",
+    "code-blocks",
+    "desktop-notifications",
+    "pi-permission-system",
+    "pi-atelier"
+  ],
+  "pi": {
+    "extensions": [
+      "./claude-skills/index.ts",
+      "./code-blocks/index.ts",
+      "./desktop-notifications/index.ts",
+      "./pi-permission-system/src/index.ts",
+      "./pi-atelier/extensions/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "bun run test:custom && bun run test:integration && bun run test:packages",
+    "test:custom": "bun test claude-skills/index.test.ts code-blocks/core.test.ts desktop-notifications/core.test.ts",
+    "test:integration": "bun test tests/package-integration.test.ts",
+    "test:packages": "bun run --cwd pi-permission-system test && bun run --cwd pi-atelier test",
+    "typecheck": "bun run --cwd pi-permission-system typecheck && bun run --cwd pi-atelier typecheck",
+    "lint": "bun run --cwd pi-permission-system lint && bun run --cwd pi-atelier lint",
+    "format": "bun run --cwd pi-permission-system format && bun run --cwd pi-atelier format",
+    "format:check": "bun run --cwd pi-permission-system format:check && bun run --cwd pi-atelier format:check",
+    "check:pack": "bun run --cwd pi-permission-system check:pack && bun run --cwd pi-atelier check:pack",
+    "check": "bun run test:custom && bun run test:integration && bun run typecheck && bun run lint && bun run format:check && bun run test:packages && bun run check:pack"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "0.84.x",
+    "@earendil-works/pi-coding-agent": "0.84.x",
+    "@earendil-works/pi-tui": "0.84.x",
+    "typebox": "1.3.x"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.4",
+    "@earendil-works/pi-ai": "0.84.3",
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@earendil-works/pi-tui": "0.84.3",
+    "@types/node": "24.12.4",
+    "typebox": "1.3.7",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

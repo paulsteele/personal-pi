@@ -1,8 +1,6 @@
-# Local Pi Atelier fork
+# Pi Atelier personal fork
 
-This directory is a manually maintained, source-owned fork loaded from
-`~/.pi/agent/extensions/local/index.ts`. It is intentionally **not** a nested Git checkout and must
-not be replaced wholesale without reconciling the changes below.
+This directory is a manually maintained, source-owned workspace in the `pi-extensions` monorepo. The root package manifest loads its entry point after Permission System. It is intentionally **not** a nested Git checkout and must not be replaced wholesale without reconciling the changes below.
 
 ## Upstream baseline
 
@@ -92,8 +90,7 @@ Primary files:
 - `extensions/index.ts`
 - `tests/footer.test.ts`
 
-The source-owned local permission-system fork (`~/.pi/agent/extensions/local/pi-permission-system/`)
-owns integrated auto mode and publishes bounded `auto-mode:*` state/decision events plus correlated
+The source-owned `pi-permission-system/` workspace owns integrated auto mode and publishes bounded `auto-mode:*` state/decision events plus correlated
 permission prompt/final-decision events. Atelier joins these events into Activity. Permission decisions are packed into the owning tool row when space permits;
 routine allows with the same source/outcome collapse to one counted badge, and only overflow or
 exception details consume follow-up rows. The previous `auto-mode:status` contributed sidebar panel
@@ -169,12 +166,12 @@ Use a temporary workspace; do not turn this directory into a nested Git reposito
 
 ## Verification
 
-From this directory:
+From the repository root:
 
 ```sh
-npm install
-npm run check
-bun test ../desktop-notifications/core.test.ts
+bun install --frozen-lockfile
+bun run --cwd pi-atelier check
+bun run --cwd desktop-notifications test
 ```
 
 Interactive smoke test from a matching Pi installation:

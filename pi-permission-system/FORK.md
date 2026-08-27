@@ -1,7 +1,6 @@
-# Local Pi permission-system fork
+# Pi Permission System personal fork
 
-This is a personal, source-owned fork loaded through `~/.pi/agent/extensions/local/index.ts`.
-It is deliberately **not** a nested Git checkout and is not intended for npm publication or upstreaming.
+This is a personal, source-owned workspace in the `pi-extensions` monorepo. The root package manifest loads its entry point before Atelier. It is deliberately **not** a nested Git checkout and is not intended for npm publication or upstreaming.
 
 ## Baseline and rollback
 
@@ -63,9 +62,11 @@ Do not rebase. To inspect a newer upstream change, clone upstream into a tempora
 
 ## Local verification
 
+From the repository root:
+
 ```sh
-npm install
-npm run check
+bun install --frozen-lockfile
+bun run --cwd pi-permission-system check
 ```
 
 Also run the Atelier check and manually test startup, `/reload`, `/auto`, a policy allow, a model allow, a human deny, a deterministic guard, notes, and headless mode.

@@ -27,7 +27,7 @@ export class ReviewLogger {
       const bounded = cap(details) as Record<string, unknown>;
       const line = redactedJsonStringify({
         timestamp: new Date().toISOString(),
-        extension: "pi-permission-system-local",
+        extension: "@paulsteele/pi-permission-system",
         event,
         ...bounded,
       });

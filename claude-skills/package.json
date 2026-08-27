@@ -1,0 +1,17 @@
+{
+  "name": "@paulsteele/pi-claude-skills",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Expose trusted project Claude skills to Pi",
+  "type": "module",
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "scripts": {
+    "test": "bun test index.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.x"
+  }
+}

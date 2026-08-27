@@ -23,10 +23,10 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 
 describe("local package contract", () => {
 	it("publishes a Pi extension with compatible peers", () => {
-		expect(pkg.name).toBe("pi-atelier-local");
-		expect(pkg.version).toBe("0.8.2-local.2");
+		expect(pkg.name).toBe("@paulsteele/pi-atelier");
+		expect(pkg.version).toBe("1.0.0");
 		expect(pkg.private).toBe(true);
-		expect(pkg.description).toBe("Local, manually maintained Pi Atelier fork");
+		expect(pkg.description).toBe("Personal source-owned Pi Atelier fork");
 		expect(pkg.keywords).toContain("pi-package");
 		expect(pkg.pi.extensions).toEqual(["./extensions/index.ts"]);
 		expect(pkg.peerDependencies["@earendil-works/pi-coding-agent"]).toBe(">=0.80.7");

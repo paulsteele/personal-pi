@@ -1,8 +1,6 @@
-# Local Pi Permission System
+# Pi Permission System personal fork
 
-Personal source-owned permission and auto-mode extension for Pi. It is loaded by
-`~/.pi/agent/extensions/local/index.ts`, not published to npm, and intentionally diverges from
-`@gotgenes/pi-permission-system`.
+Personal source-owned permission and auto-mode extension for Pi. The root `pi-extensions` manifest loads this workspace before Atelier. It is not published to npm and intentionally diverges from `@gotgenes/pi-permission-system`.
 
 ## What it enforces
 
@@ -99,9 +97,11 @@ and note text are retained only as metadata and SHA-256 digests):
 
 ## Development
 
+From the repository root:
+
 ```sh
-npm install
-npm run check
+bun install --frozen-lockfile
+bun run --cwd pi-permission-system check
 ```
 
 See [FORK.md](FORK.md) for provenance, deleted features, invariants, rollback information, and the

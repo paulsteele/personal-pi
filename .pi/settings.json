@@ -1,0 +1,22 @@
+{
+  "packages": [
+    {
+      "source": "https://github.com/paulsteele/pi-extensions",
+      "autoload": false,
+      "extensions": [
+        "-claude-skills/index.ts",
+        "-code-blocks/index.ts",
+        "-desktop-notifications/index.ts",
+        "-pi-permission-system/src/index.ts",
+        "-pi-atelier/extensions/index.ts"
+      ]
+    }
+  ],
+  "extensions": [
+    "../claude-skills/index.ts",
+    "../code-blocks/index.ts",
+    "../desktop-notifications/index.ts",
+    "../pi-permission-system/src/index.ts",
+    "../pi-atelier/extensions/index.ts"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "@paulsteele/pi-desktop-notifications",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Actionable desktop notifications for Pi",
+  "type": "module",
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "scripts": {
+    "test": "bun test core.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.x"
+  }
+}

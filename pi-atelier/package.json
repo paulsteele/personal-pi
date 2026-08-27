@@ -1,8 +1,8 @@
 {
-	"name": "pi-atelier-local",
-	"version": "0.8.2-local.2",
+	"name": "@paulsteele/pi-atelier",
+	"version": "1.0.0",
 	"private": true,
-	"description": "Local, manually maintained Pi Atelier fork",
+	"description": "Personal source-owned Pi Atelier fork",
 	"type": "module",
 	"license": "MIT",
 	"keywords": [
@@ -27,12 +27,13 @@
 	},
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/michaelmjhhhh/pi-atelier.git"
+		"url": "https://github.com/paulsteele/pi-extensions.git",
+		"directory": "pi-atelier"
 	},
 	"bugs": {
-		"url": "https://github.com/michaelmjhhhh/pi-atelier/issues"
+		"url": "https://github.com/paulsteele/pi-extensions/issues"
 	},
-	"homepage": "https://github.com/michaelmjhhhh/pi-atelier#readme",
+	"homepage": "https://github.com/paulsteele/pi-extensions/tree/main/pi-atelier",
 	"scripts": {
 		"test": "vitest run",
 		"test:watch": "vitest",
