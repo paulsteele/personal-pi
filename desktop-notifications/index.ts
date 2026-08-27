@@ -3,6 +3,7 @@ import { createConnection, type Socket } from "node:net";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+	askUserNotification,
 	encodeArgument,
 	isHyprlandAddress,
 	isMacWindowId,
@@ -18,6 +19,7 @@ type NativeTarget =
 
 type PermissionPrompt = { requestId?: unknown; surface?: unknown; value?: unknown };
 type PermissionDecision = { requestId?: unknown };
+type AskUserPrompt = { questions?: unknown };
 type AskUserBlocked = { active?: unknown };
 type CommandResult = { stdout: string; stderr: string; code: number | null };
 
@@ -30,6 +32,7 @@ type Runtime = {
 	generation: number;
 	queue: Promise<void>;
 	permissionRequest?: string;
+	pendingQuestion?: { subtitle: string; body: string };
 	dunst?: ChildProcess;
 	dunstId?: string;
 	focusSocket?: Socket;
@@ -299,16 +302,40 @@ export default function desktopNotifications(pi: ExtensionAPI): void {
 			current.generation++;
 			enqueue(current, async () => clearNotification(current));
 		});
-		const questionUnsubscribe = pi.events.on("rpiv:ask-user:blocked", (raw) => {
+		const questionPromptUnsubscribe = pi.events.on("rpiv:ask-user:prompt", (raw) => {
+			if (runtime !== current) return;
+			current.pendingQuestion = askUserNotification(raw as AskUserPrompt);
+		});
+		const questionBlockedUnsubscribe = pi.events.on("rpiv:ask-user:blocked", (raw) => {
 			if (runtime !== current) return;
 			const event = raw as AskUserBlocked;
+			if (event.active === true) {
+				const notification = current.pendingQuestion;
+				if (!notification) return;
+				current.generation++;
+				enqueue(current, async (generation) => {
+					await sendNotification(
+						current,
+						notification.subtitle,
+						notificationPreview(notification.body, 180),
+						generation,
+					);
+				});
+				return;
+			}
 			// active=false is emitted after the user answers or cancels the
 			// questionnaire. Merely focusing the terminal emits nothing.
 			if (event.active !== false) return;
+			current.pendingQuestion = undefined;
 			current.generation++;
 			enqueue(current, async () => clearNotification(current));
 		});
-		current.unsubscribers.push(promptUnsubscribe, decisionUnsubscribe, questionUnsubscribe);
+		current.unsubscribers.push(
+			promptUnsubscribe,
+			decisionUnsubscribe,
+			questionPromptUnsubscribe,
+			questionBlockedUnsubscribe,
+		);
 		try {
 			await resolveTarget(current);
 		} catch (error) {

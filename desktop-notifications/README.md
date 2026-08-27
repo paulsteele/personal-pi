@@ -6,6 +6,7 @@ Actionable, bounded notifications for Pi running in Alacritty:
 - **Linux:** Hyprland window routing with dunst notifications.
 - Sends completion notifications only after `agent_settled` and only when the originating terminal is unfocused.
 - Sends notifications for actual interactive permission prompts and clears them on the matching decision.
+- Sends notifications when `ask_user_question` opens a questionnaire, showing the first question and the remaining-question count, and clears them after the user answers or cancels.
 - Keeps at most one notification per terminal window and clears only that window's notice when work resumes—including after submitting a normal response or answering/canceling an in-terminal question. Merely focusing the terminal does not clear it.
 - Never uses Hammerspoon's bulk notification clear; notices from other Pi windows and unrelated Hammerspoon automation remain intact.
 
@@ -68,6 +69,7 @@ Normal behavior:
 
 - Completion title: `Pi · <project>` / `Ready for input`
 - Permission title: `Pi · <project>` / `Permission needed: <surface>`
+- Questionnaire title: `Pi · <project>` / `Question needs your input` (or `<n> questions need your input`)
 - Body: a normalized, Unicode-safe, bounded excerpt
 - Hyprland notifications are silent. macOS sound behavior follows the Hammerspoon notification settings.
 

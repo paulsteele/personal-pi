@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	askUserNotification,
 	decodeArgument,
 	encodeArgument,
 	isHyprlandAddress,
@@ -35,6 +36,18 @@ describe("assistant extraction", () => {
 });
 
 describe("notification text", () => {
+	test("builds ask-user notification text", () => {
+		expect(askUserNotification({ questions: [{ question: "Which database?" }] })).toEqual({
+			subtitle: "Question needs your input",
+			body: "Which database?",
+		});
+		expect(
+			askUserNotification({ questions: [{ question: "First?" }, { question: "Second?" }, { question: "Third?" }] }),
+		).toEqual({ subtitle: "3 questions need your input", body: "First? (+2 more)" });
+		expect(askUserNotification({ questions: [] })).toBeUndefined();
+		expect(askUserNotification({ questions: [{ question: 42 }] })).toBeUndefined();
+	});
+
 	test("strips markdown, ANSI, controls, and folds whitespace", () => {
 		const input = "\u001b[31m## **Done**\u001b[0m\n- See [result](https://example.test) and `code`\u0000";
 		expect(normalizeNotificationText(input)).toBe("Done See result and code");

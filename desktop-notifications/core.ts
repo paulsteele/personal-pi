@@ -14,6 +14,33 @@ export type BranchEntryLike = {
 	message?: AssistantLike;
 };
 
+export type AskUserPromptLike = {
+	questions?: unknown;
+};
+
+export type AskUserNotification = {
+	subtitle: string;
+	body: string;
+};
+
+/** Build notification copy from the ask-user plugin's JSON-safe prompt event. */
+export function askUserNotification(event: AskUserPromptLike): AskUserNotification | undefined {
+	if (!Array.isArray(event.questions)) return undefined;
+	const questions = event.questions
+		.map((item) =>
+			typeof item === "object" && item !== null && typeof (item as { question?: unknown }).question === "string"
+				? (item as { question: string }).question.trim()
+				: "",
+		)
+		.filter(Boolean);
+	if (questions.length === 0) return undefined;
+	if (questions.length === 1) return { subtitle: "Question needs your input", body: questions[0] };
+	return {
+		subtitle: `${questions.length} questions need your input`,
+		body: `${questions[0]} (+${questions.length - 1} more)`,
+	};
+}
+
 export function textFromAssistant(message: AssistantLike | undefined): string {
 	if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return "";
 	return message.content
