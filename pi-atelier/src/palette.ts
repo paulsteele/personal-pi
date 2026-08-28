@@ -5,6 +5,7 @@ export type PaletteRole =
 	| "dim"
 	| "ready"
 	| "working"
+	| "added"
 	| "input"
 	| "output"
 	| "cache"
@@ -27,11 +28,12 @@ type Rgb = readonly [number, number, number];
 
 const FIXED_DARK: Record<PaletteRole, Rgb> = {
 	accent: [177, 140, 255],
-	primary: [212, 212, 212],
+	primary: [147, 197, 253],
 	muted: [128, 128, 128],
 	dim: [102, 102, 102],
 	ready: [110, 168, 254],
 	working: [255, 159, 67],
+	added: [134, 239, 172],
 	input: [110, 168, 254],
 	output: [177, 140, 255],
 	cache: [125, 211, 252],
@@ -48,11 +50,12 @@ const FIXED_DARK: Record<PaletteRole, Rgb> = {
 
 const UNNAMED_THEME: Record<PaletteRole, string> = {
 	accent: "accent",
-	primary: "text",
+	primary: "thinkingLow",
 	muted: "muted",
 	dim: "dim",
 	ready: "thinkingLow",
 	working: "mdHeading",
+	added: "success",
 	input: "thinkingLow",
 	output: "thinkingHigh",
 	cache: "syntaxType",
@@ -74,6 +77,7 @@ const NO_COLOR: Record<PaletteRole, string> = {
 	dim: "dim",
 	ready: "text",
 	working: "text",
+	added: "success",
 	input: "text",
 	output: "text",
 	cache: "text",

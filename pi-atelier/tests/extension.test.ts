@@ -245,8 +245,11 @@ describe("extension registration", () => {
 		});
 		await command(h, "on");
 		const rendered = h.overlays.at(-1)?.component.render(44).join("\\n") ?? "";
-		expect(rendered).toContain("QUEUE");
-		expect(rendered).toContain("queued 2");
+		expect(rendered).not.toContain("QUEUE");
+		expect(rendered).not.toContain("queued 2");
+		const footer = renderFooter(h.setFooter.mock.calls[0]?.[0], vi.fn());
+		expect(footer.render(240).join("\n")).toContain("Queue");
+		expect(footer.render(240).join("\n")).toContain("queued 2");
 	});
 
 	it("renders Plannotator planning as a native panel and clears only its duplicate widget", async () => {
@@ -256,8 +259,14 @@ describe("extension registration", () => {
 		]);
 		await start(h);
 		const rendered = renderOverlayText(h);
-		expect(rendered).toContain("PLANNOTATOR");
-		expect(rendered).toContain("Planning");
+		expect(rendered).not.toContain("PLAN");
+		expect(rendered).not.toContain("Planning");
+		const footer = renderFooter(
+			h.setFooter.mock.calls[0]?.[0],
+			vi.fn(),
+			() => new Map([["plannotator", "⏸ plan"]]),
+		);
+		expect(footer.render(160).join("\n")).toContain("⏸ plan");
 		await vi.waitFor(() => expect(h.setWidget).toHaveBeenCalledWith("plannotator-progress", undefined));
 	});
 
@@ -311,7 +320,7 @@ describe("extension registration", () => {
 		expect(replacementSetFooter).toHaveBeenLastCalledWith(expect.any(Function));
 		expect(replacementSetFooter).not.toHaveBeenCalledWith(undefined);
 		expect(h.overlays[0]?.done).toHaveBeenCalledOnce();
-		expect(renderOverlayText(h, 1)).toContain("Distinct UI replacement");
+		expect(renderOverlayText(h, 1)).toContain("Ready");
 	});
 
 	it("keeps cleanup exception-safe when independent disposers throw", async () => {
@@ -336,7 +345,7 @@ describe("extension registration", () => {
 		expect(h.ctx.ui.notify).toHaveBeenLastCalledWith("Pi Atelier is not active in this session", "warning");
 	});
 
-	it("keeps active Sidebar snapshot failures visible", async () => {
+	it("does not read session history while rendering the activity sidebar", async () => {
 		const h = harness();
 		await start(h);
 		h.ctx.sessionManager.getBranch.mockImplementation(() => {
@@ -344,8 +353,8 @@ describe("extension registration", () => {
 		});
 
 		const sidebar = renderOverlayText(h);
-		expect(sidebar).toContain("Sidebar unavailable");
-		expect(sidebar).toContain("snapshot read failed");
+		expect(sidebar).toContain("Ready");
+		expect(sidebar).not.toContain("snapshot read failed");
 	});
 
 	it("starts enabled and toggles the persistent sidebar on -> off -> on", async () => {
@@ -466,9 +475,9 @@ describe("extension registration", () => {
 		queueWorkspacePulseInspection(active);
 		await start(active);
 		await waitForWorkspacePulseInspection(active);
-		// Positive control: a published pulse does reach the sidebar.
-		expect(renderOverlayText(active)).toContain("stale-branch");
-		expect(renderOverlayText(active)).toContain("1 tracked");
+		// Positive control: a published pulse reaches the footer telemetry.
+		const footer = renderFooter(active.setFooter.mock.calls[0]?.[0], vi.fn());
+		expect(footer.render(160).join("\n")).toContain("stale-branch");
 		await active.handlers.get("session_shutdown")?.({ reason: "quit" }, active.ctx);
 		expect(active.overlays[0]?.done).toHaveBeenCalledOnce();
 
@@ -550,7 +559,7 @@ describe("extension registration", () => {
 			vi.fn(),
 			() => new Map([["one", "atelier index failed"]]),
 		);
-		expect(footer.render(120).join("\n")).toContain("atelier index failed");
+		expect(footer.render(240).join("\n")).toContain("atelier index failed");
 		// Pi disposes the mounted footer inside `setFooter`; if that throws, the old footer stays live.
 		h.setFooter.mockImplementation((value: unknown) => {
 			if (value === undefined) throw new Error("footer removal failed");
@@ -583,7 +592,7 @@ describe("extension registration", () => {
 		await command(h, args, staleContext);
 
 		expect(h.overlays[1]?.done).not.toHaveBeenCalled();
-		expect(renderOverlayText(h, 1)).toContain("Replacement session");
+		expect(renderOverlayText(h, 1)).toContain("Ready");
 		expect(h.setFooter).not.toHaveBeenCalled();
 		expect(staleContext.ui.notify).toHaveBeenLastCalledWith(
 			"Pi Atelier is not active in this session",
@@ -831,12 +840,11 @@ describe("extension registration", () => {
 		);
 
 		const sidebarText = h.overlays[0]?.component.render(44).join("\n") ?? "";
-		expect(sidebarText).toContain("ACTIVITY");
-		expect(sidebarText).toContain("Turn 3");
-		expect(sidebarText).toContain("running");
+		expect(sidebarText).not.toContain("ACTIVITY");
+		expect(sidebarText).toContain("T03");
 		expect(sidebarText).toContain("bash");
 		expect(sidebarText).toContain("npm test");
-		expect(sidebarText).toContain("WORKING");
+		expect(sidebarText).not.toContain("WORKING");
 		expect(h.overlays[0]?.requestRender.mock.calls.length).toBeGreaterThan(0);
 
 		const footer = h.setFooter.mock.calls[0]?.[0](
@@ -854,7 +862,7 @@ describe("extension registration", () => {
 		);
 		await command(h, "off");
 		const footerText = footer.render(160).join("\n");
-		expect(footerText).toContain("●");
+		expect(footerText).not.toContain("READY");
 		expect(footerText).not.toContain("bash");
 		expect(footerText).not.toContain("npm test");
 	});
@@ -1012,7 +1020,7 @@ describe("extension registration", () => {
 			expect(withResult).toContain("read");
 			expect(withResult).toContain("src/run-activity.ts");
 			expect(withResult).toContain("done 1s");
-			expect(withResult).toContain("tools 1 done · 0 failed");
+			expect(withResult).toContain("1 done · 0 fail");
 
 			const rendersBeforeTick = h.overlays[0]?.requestRender.mock.calls.length ?? 0;
 			vi.advanceTimersByTime(1_000);
@@ -1024,7 +1032,7 @@ describe("extension registration", () => {
 			const settledText = h.overlays[0]?.component.render(44).join("\n") ?? "";
 			expect(settledText).toContain("Last run · 3s");
 			expect(settledText).not.toContain("settled 3s");
-			expect(settledText).toContain("READY");
+			expect(settledText).not.toContain("WORKING");
 
 			vi.advanceTimersByTime(3_000);
 			expect(h.overlays[0]?.requestRender.mock.calls.length).toBe(settledRenderCount);
@@ -1054,7 +1062,7 @@ describe("extension registration", () => {
 		expect(h.overlays[0]?.done).toHaveBeenCalledOnce();
 		await command(h, "on");
 		const replacementText = h.overlays[1]?.component.render(44).join("\n") ?? "";
-		expect(replacementText).toContain("ACTIVITY");
+		expect(replacementText).toContain("Ready");
 		expect(replacementText).toContain("TTFT ~ · TPS ~");
 		expect(replacementText).not.toContain("old.ts");
 
@@ -1089,9 +1097,9 @@ describe("extension registration", () => {
 		await h.handlers.get("turn_start")?.({ type: "turn_start", turnIndex: 0, timestamp: 1_000 }, eventCtx);
 
 		const text = h.overlays[0]?.component.render(44).join("\n") ?? "";
-		expect(text).toContain("WORKING");
-		expect(text).toContain("ACTIVITY");
-		expect(text).toContain("Turn 1");
+		expect(text).not.toContain("WORKING");
+		expect(text).not.toContain("ACTIVITY");
+		expect(text).toContain("T01");
 	});
 
 	it("ignores stale activity events after a replacement session becomes active", async () => {
@@ -1125,13 +1133,12 @@ describe("extension registration", () => {
 
 			const activeRenderCount = h.overlays[1]?.requestRender.mock.calls.length ?? 0;
 			const activeText = h.overlays[1]?.component.render(44).join("\n") ?? "";
-			expect(activeText).toContain("Replacement session");
-			expect(activeText).toContain("ACTIVITY");
-			expect(activeText).toContain("Turn 7");
-			expect(activeText).toContain("running");
+			expect(activeText).not.toContain("Replacement session");
+			expect(activeText).not.toContain("ACTIVITY");
+			expect(activeText).toContain("T07");
 			expect(activeText).toContain("bash");
 			expect(activeText).toContain("npm run current");
-			expect(activeText).toContain("WORKING");
+			expect(activeText).not.toContain("WORKING");
 
 			await h.handlers.get("agent_start")?.({ type: "agent_start" }, oldCtx);
 			await h.handlers.get("tool_execution_start")?.(
@@ -1167,7 +1174,7 @@ describe("extension registration", () => {
 			expect(settledText).not.toContain("Turn 7");
 			expect(settledText).not.toContain("settled");
 			expect(settledText).toContain("done");
-			expect(settledText).toContain("READY");
+			expect(settledText).not.toContain("WORKING");
 			expect(settledText).not.toContain("stale.ts");
 		} finally {
 			vi.useRealTimers();

@@ -1,10 +1,8 @@
-import { homedir } from "node:os";
 import { basename } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type Component, type OverlayHandle, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ThemeLike } from "./footer.js";
-import { aggregateMetrics, formatTokens } from "./metrics.js";
-import { activityLabel } from "./activity.js";
+import { aggregateMetrics } from "./metrics.js";
 import { type AtelierPalette, createPalette, type PaletteRole } from "./palette.js";
 import {
 	EMPTY_RUN_ACTIVITY,
@@ -14,22 +12,9 @@ import {
 	type RunActivitySnapshot,
 	type ToolActivity,
 } from "./run-activity.js";
-import {
-	SIDEBAR_PANEL_MAX_ROW_CHARS,
-	SIDEBAR_PANEL_MAX_ROWS,
-	SIDEBAR_PANEL_MAX_TITLE_CHARS,
-	type SidebarPanelData,
-	type SidebarPanelRole,
-	sanitizeSidebarPanelText,
-} from "./sidebar-panels.js";
+import type { SidebarPanelData } from "./sidebar-panels.js";
 import { createSplitPaneController, type SplitPaneController } from "./split-pane.js";
-import {
-	CONTEXT_DANGER_PERCENT,
-	CONTEXT_WARNING_PERCENT,
-	CURRENCY_DECIMALS,
-	type AtelierState,
-	type WorkspacePulseState,
-} from "./types.js";
+import { type AtelierState, type WorkspacePulseState } from "./types.js";
 import type { WorkspacePulseData } from "./workspace-pulse.js";
 
 export interface SidebarSnapshotInput {
@@ -104,14 +89,6 @@ const display = (value: string | undefined): string => {
 
 const finiteCount = (value: number): number => (Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0);
 
-function shortPath(path: string): string {
-	const safe = sanitize(path);
-	const home = homedir();
-	if (safe === home) return "~";
-	if (home && safe.startsWith(`${home}/`)) return `~${safe.slice(home.length)}`;
-	return safe || "—";
-}
-
 function padToWidth(text: string, width: number): string {
 	const safeWidth = Math.max(0, Math.trunc(width));
 	const content = truncateToWidth(text, safeWidth, "");
@@ -131,32 +108,6 @@ function renderDock(rows: string[], width: number, height: number, palette: Atel
 	});
 }
 
-function panelRows(
-	title: string,
-	rows: readonly string[],
-	width: number,
-	palette: AtelierPalette,
-	theme: ThemeLike,
-	role: PaletteRole,
-	jewel: "✦" | "✧",
-): string[] {
-	const safeWidth = Math.max(4, Math.trunc(width));
-	const innerWidth = Math.max(0, safeWidth - 4);
-	const safeTitle = sanitizeSidebarPanelText(title, SIDEBAR_PANEL_MAX_TITLE_CHARS).toUpperCase();
-	const crownPrefix = `╭─ ${jewel} `;
-	const crownFill = "─".repeat(
-		Math.max(0, safeWidth - visibleWidth(crownPrefix) - visibleWidth(safeTitle) - 2),
-	);
-	const top = `${palette.paint(role, crownPrefix)}${theme.bold(
-		palette.paint(role, safeTitle),
-	)} ${palette.paint(role, `${crownFill}╮`)}`;
-	const body = rows.map((row) => {
-		const content = padToWidth(row, innerWidth);
-		return `${palette.paint(role, "│")} ${content} ${palette.paint(role, "│")}`;
-	});
-	return [top, ...body, palette.paint(role, `╰${"─".repeat(safeWidth - 2)}╯`), ""];
-}
-
 function valueRow(value: string | undefined, palette: AtelierPalette, role: PaletteRole): string {
 	const text = display(value);
 	return palette.paint(text === "—" ? "dim" : role, text);
@@ -173,168 +124,6 @@ function sidebarLayout(width: number): SidebarLayout {
 	return { compact: width <= COMPACT_SIDEBAR_MAX_WIDTH, showToolNames: false };
 }
 
-function activityRole(activity: SidebarSnapshot["activity"]): PaletteRole {
-	return activity === "working" ? "working" : "ready";
-}
-
-function activitySymbol(activity: SidebarSnapshot["activity"]): string {
-	return activity === "working" ? "◆" : "●";
-}
-
-function agentRows(
-	snapshot: SidebarSnapshot,
-	layout: SidebarLayout,
-	contentWidth: number,
-	palette: AtelierPalette,
-	theme: ThemeLike,
-): string[] {
-	const activity = activityLabel(snapshot.activity);
-	const status = theme.bold(
-		palette.paint(activityRole(snapshot.activity), `${activitySymbol(snapshot.activity)} ${activity}`),
-	);
-	const model = valueRow(snapshot.modelId, palette, "primary");
-	const provider = snapshot.provider ? palette.paint("muted", display(snapshot.provider).toUpperCase()) : "";
-	const thinking = snapshot.thinkingLevel
-		? palette.paint("primary", display(snapshot.thinkingLevel).toUpperCase())
-		: "";
-	const access =
-		snapshot.modelId || snapshot.provider
-			? palette.paint(
-					snapshot.metrics.subscription ? "ready" : "muted",
-					snapshot.metrics.subscription ? "SUBSCRIPTION" : "METERED",
-				)
-			: "";
-	const separator = ` ${palette.paint("dim", "·")} `;
-
-	if (layout.compact) {
-		const rows = [status, model];
-		if (provider) rows.push(provider);
-		const secondary = [thinking, access].filter(Boolean);
-		if (secondary.length > 0) rows.push(secondary.join(separator));
-		return rows;
-	}
-
-	const metadata = [provider, thinking, access].filter(Boolean);
-	return [
-		spacedRow(status, model, contentWidth),
-		metadata.length > 0 ? metadata.join(separator) : palette.paint("dim", "—"),
-	];
-}
-
-function pulseIndicator(pulse: WorkspacePulseState): { symbol: string; role: PaletteRole } {
-	if (pulse.status === "conflict") return { symbol: "✕", role: "error" };
-	if (pulse.status === "changed") return { symbol: "▲", role: "warning" };
-	if (pulse.status === "stale") return { symbol: "~", role: "warning" };
-	if (pulse.status === "clean") return { symbol: "", role: "ready" };
-	return { symbol: "", role: "dim" };
-}
-
-function formatPulseCount(value: number): string {
-	const count = finiteCount(value);
-	if (count < 1_000) return count.toString();
-	if (count < 1_000_000) return `${(count / 1_000).toFixed(count < 10_000 ? 1 : 0)}k`;
-	return `${(count / 1_000_000).toFixed(count < 10_000_000 ? 1 : 0)}M`;
-}
-
-interface WorkspacePulseRows {
-	core: string[];
-	details: string[];
-}
-
-function workspacePulseRows(
-	pulse: WorkspacePulseState,
-	layout: SidebarLayout,
-	palette: AtelierPalette,
-): WorkspacePulseRows {
-	if (pulse.status === "inspecting") return { core: [palette.paint("muted", "inspecting…")], details: [] };
-	if (pulse.status === "not-repo")
-		return { core: [palette.paint("dim", "not a Git repository")], details: [] };
-	if (pulse.status === "unavailable")
-		return { core: [palette.paint("warning", "Git unavailable")], details: [] };
-	if (!("data" in pulse)) return { core: [], details: [] };
-
-	const { snapshot } = pulse.data;
-	if (pulse.status === "clean") return { core: [palette.paint("ready", "✓ clean")], details: [] };
-	const tracked = `${formatPulseCount(snapshot.trackedFiles)} tracked`;
-	const lines = `+${formatPulseCount(snapshot.linesAdded)}  −${formatPulseCount(snapshot.linesRemoved)}`;
-	const role = pulse.status === "stale" ? "warning" : "primary";
-	const prefix = pulse.status === "stale" ? "~ stale · " : "";
-	const core = layout.compact
-		? [palette.paint(role, `${prefix}${tracked}`), palette.paint(role, lines)]
-		: [palette.paint(role, `${prefix}${tracked}  ${lines}`)];
-	if (snapshot.conflicts > 0)
-		core.push(palette.paint("error", `${finiteCount(snapshot.conflicts)} conflicts`));
-	const details = [
-		snapshot.untrackedFiles > 0
-			? layout.compact
-				? `?${formatPulseCount(snapshot.untrackedFiles)}`
-				: `${formatPulseCount(snapshot.untrackedFiles)} untracked`
-			: "",
-		snapshot.binaryFiles > 0
-			? layout.compact
-				? `bin${formatPulseCount(snapshot.binaryFiles)}`
-				: `${formatPulseCount(snapshot.binaryFiles)} binary`
-			: "",
-		snapshot.submodules > 0
-			? layout.compact
-				? `sub${formatPulseCount(snapshot.submodules)}`
-				: `${formatPulseCount(snapshot.submodules)} submodule`
-			: "",
-	].filter(Boolean);
-	return { core, details: details.length > 0 ? [palette.paint("muted", details.join(" · "))] : [] };
-}
-
-interface WorkspaceRows {
-	identity: string[];
-	location: string[];
-	pulseCore: string[];
-	pulseDetails: string[];
-	session: string[];
-}
-
-function workspaceRows(
-	snapshot: SidebarSnapshot,
-	layout: SidebarLayout,
-	palette: AtelierPalette,
-): WorkspaceRows {
-	const project = valueRow(snapshot.projectName, palette, "primary");
-	const branch = snapshot.branch ? palette.paint("accent", display(snapshot.branch)) : "";
-	const indicator = pulseIndicator(snapshot.workspacePulse);
-	const gitState = branch && indicator.symbol ? palette.paint(indicator.role, indicator.symbol) : "";
-	const identity = branch ? `${project} ${palette.paint("dim", "·")} ${branch} ${gitState}` : project;
-	const identityRows = layout.compact ? [project, ...(branch ? [`${branch} ${gitState}`] : [])] : [identity];
-	const pulseData = workspacePulseData(snapshot.workspacePulse);
-	const location = pulseData?.relativeCwd
-		? [palette.paint("muted", `./${sanitize(pulseData.relativeCwd)}`)]
-		: pulseData
-			? []
-			: [palette.paint("muted", shortPath(snapshot.cwd))];
-	const pulse = workspacePulseRows(snapshot.workspacePulse, layout, palette);
-	const sessionName = snapshot.sessionName ? sanitize(snapshot.sessionName) : "";
-	const session = [
-		...(sessionName ? [palette.paint("primary", sessionName)] : []),
-		`${palette.paint("primary", `${finiteCount(snapshot.branchEntryCount)} entries`)} ${palette.paint(
-			"dim",
-			"·",
-		)} ${palette.paint(snapshot.persisted ? "ready" : "muted", snapshot.persisted ? "persisted" : "ephemeral")}`,
-	];
-	return {
-		identity: identityRows,
-		location,
-		pulseCore: pulse.core,
-		pulseDetails: pulse.details,
-		session,
-	};
-}
-
-function contextRole(snapshot: SidebarSnapshot): PaletteRole {
-	const percent = snapshot.metrics.contextPercent;
-	if (percent === null || !Number.isFinite(percent)) return "dim";
-	if (percent >= CONTEXT_DANGER_PERCENT) return "error";
-	if (percent >= CONTEXT_WARNING_PERCENT) return "warning";
-	return "context";
-}
-
 function spacedRow(left: string, right: string, width: number): string {
 	const safeWidth = Math.max(0, Math.trunc(width));
 	const rightWidth = visibleWidth(right);
@@ -342,218 +131,6 @@ function spacedRow(left: string, right: string, width: number): string {
 	const safeLeft = truncateToWidth(left, leftMax, "");
 	const gap = " ".repeat(Math.max(1, safeWidth - visibleWidth(safeLeft) - rightWidth));
 	return truncateToWidth(`${safeLeft}${gap}${right}`, safeWidth, "");
-}
-
-function contextRows(
-	snapshot: SidebarSnapshot,
-	contentWidth: number,
-	layout: SidebarLayout,
-	palette: AtelierPalette,
-): string[] {
-	const { metrics } = snapshot;
-	const available =
-		metrics.contextTokens !== null &&
-		Number.isFinite(metrics.contextTokens) &&
-		metrics.contextPercent !== null &&
-		Number.isFinite(metrics.contextPercent);
-	if (!available) {
-		return [palette.paint("dim", "Context unavailable")];
-	}
-
-	const role = contextRole(snapshot);
-	const usage = `${formatTokens(metrics.contextTokens ?? 0)} / ${
-		metrics.contextWindow > 0 ? formatTokens(metrics.contextWindow) : "—"
-	}`;
-	const percent = `${metrics.contextPercent?.toFixed(1)}%`;
-	const meterWidth = layout.compact
-		? Math.max(1, Math.min(10, contentWidth - 2))
-		: Math.max(1, Math.min(10, contentWidth - visibleWidth(usage) - visibleWidth(percent) - 4));
-	const filled = Math.min(
-		meterWidth,
-		Math.max(0, Math.round(((metrics.contextPercent ?? 0) / 100) * meterWidth)),
-	);
-	const meter = `${palette.paint("dim", "[")}${palette.paint(role, "■".repeat(filled))}${palette.paint(
-		"dim",
-		"·".repeat(Math.max(0, meterWidth - filled)),
-	)}${palette.paint("dim", "]")}`;
-	return [spacedRow(palette.paint(role, usage), palette.paint(role, percent), contentWidth), meter];
-}
-
-const currencyDecimals = (value: number): number =>
-	Number.isFinite(value) ? Math.min(6, Math.max(0, Math.trunc(value))) : 0;
-
-function formatUsageTokens(count: number): string {
-	const safe = Number.isFinite(count) ? Math.max(0, count) : 0;
-	if (safe < 1_000) return Math.trunc(safe).toString();
-	if (safe < 1_000_000) return `${(safe / 1_000).toFixed(1)}k`;
-	if (safe < 1_000_000_000) return `${(safe / 1_000_000).toFixed(1)}M`;
-	return `${(safe / 1_000_000_000).toFixed(1)}B`;
-}
-
-function metricValue(label: string, value: string, palette: AtelierPalette, role: PaletteRole): string {
-	return `${palette.paint("muted", label)} ${palette.paint(role, value)}`;
-}
-
-function metricPairRows(
-	left: string,
-	right: string,
-	contentWidth: number,
-	layout: SidebarLayout,
-	palette: AtelierPalette,
-): string[] {
-	const separator = layout.compact ? ` ${palette.paint("dim", "·")} ` : "  ";
-	const inline = `${left}${separator}${right}`;
-	return visibleWidth(inline) <= contentWidth ? [inline] : [left, right];
-}
-
-function usageRows(
-	snapshot: SidebarSnapshot,
-	contentWidth: number,
-	layout: SidebarLayout,
-	palette: AtelierPalette,
-): string[] {
-	const { metrics } = snapshot;
-	if (!metrics.usageAvailable && !metrics.costAvailable) return [];
-
-	const rows: string[] = [];
-	if (metrics.usageAvailable) {
-		rows.push(
-			...metricPairRows(
-				metricValue("In", formatUsageTokens(metrics.input), palette, "input"),
-				metricValue("Out", formatUsageTokens(metrics.output), palette, "output"),
-				contentWidth,
-				layout,
-				palette,
-			),
-		);
-		const hit =
-			metrics.cacheHitPercent !== undefined && Number.isFinite(metrics.cacheHitPercent)
-				? `${metrics.cacheHitPercent.toFixed(1)}%`
-				: "—";
-		rows.push(
-			...metricPairRows(
-				metricValue("Cache", formatUsageTokens(metrics.cacheRead), palette, "cache"),
-				layout.compact
-					? palette.paint(hit === "—" ? "dim" : "cache", hit)
-					: metricValue("Hit", hit, palette, hit === "—" ? "dim" : "cache"),
-				contentWidth,
-				layout,
-				palette,
-			),
-		);
-	}
-	if (metrics.costAvailable) {
-		const cost = `$${Math.max(0, Number.isFinite(metrics.cost) ? metrics.cost : 0).toFixed(
-			currencyDecimals(CURRENCY_DECIMALS),
-		)}`;
-		rows.push(metricValue("Cost", cost, palette, "cost"));
-	}
-	return rows;
-}
-
-const exceptionStatusPattern =
-	/\b(error|failed?|failure|warn(?:ing)?|offline|unavailable|blocked|degraded)\b/i;
-
-function statusDetailPanelRole(snapshot: SidebarSnapshot): PaletteRole {
-	return snapshot.extensionStatuses.some((status) =>
-		/\b(error|failed?|failure|offline|unavailable)\b/i.test(sanitize(status)),
-	)
-		? "error"
-		: "warning";
-}
-
-function statusDetailRows(snapshot: SidebarSnapshot, palette: AtelierPalette): string[] {
-	const statuses = snapshot.extensionStatuses
-		.map(sanitize)
-		.filter((status) => status && exceptionStatusPattern.test(status));
-	if (statuses.length === 0) return [];
-	return [
-		...statuses.map((status) => {
-			const role: PaletteRole = /\b(error|failed?|failure|offline|unavailable)\b/i.test(status)
-				? "error"
-				: "warning";
-			return palette.paint(role, `${role === "error" ? "✕" : "▲"} ${status}`);
-		}),
-	];
-}
-
-interface ActivityGroups {
-	core: string[];
-	active: Array<{ id: string; rows: string[] }>;
-	recent: Array<{ id: string; rows: string[] }>;
-	aggregate: string[];
-}
-
-interface SidebarGroup {
-	name: string;
-	panel?: string;
-	panelId?: string;
-	panelRole?: PaletteRole;
-	panelJewel?: "✦" | "✧";
-	rows: string[];
-}
-
-function renderGroups(
-	groups: readonly SidebarGroup[],
-	width: number,
-	palette: AtelierPalette,
-	theme: ThemeLike,
-): string[] {
-	const rendered: string[] = [];
-	for (let index = 0; index < groups.length; ) {
-		const group = groups[index];
-		if (!group) break;
-		if (!group.panel) {
-			rendered.push(...group.rows);
-			index += 1;
-			continue;
-		}
-
-		const rows: string[] = [];
-		let next = index;
-		while (groups[next]?.panel === group.panel && groups[next]?.panelId === group.panelId) {
-			rows.push(...(groups[next]?.rows ?? []));
-			next += 1;
-		}
-		if (rows.length > 0) {
-			rendered.push(
-				...panelRows(
-					group.panel,
-					rows,
-					width,
-					palette,
-					theme,
-					group.panelRole ?? "accent",
-					group.panelJewel ?? "✦",
-				),
-			);
-		}
-		index = next;
-	}
-	return rendered;
-}
-
-function panelIdForTitle(title: string): string | undefined {
-	return {
-		AGENT: "agent",
-		ACTIVITY: "activity",
-		ALERTS: "alerts",
-		CONTEXT: "context",
-		WORKSPACE: "workspace",
-		USAGE: "usage",
-	}[title];
-}
-
-function contributedRows(panel: SidebarPanelData, palette: AtelierPalette): string[] {
-	const rows = panel.rows.slice(0, SIDEBAR_PANEL_MAX_ROWS).map((row) => {
-		const text = sanitizeSidebarPanelText(
-			typeof row === "string" ? row : row.text,
-			SIDEBAR_PANEL_MAX_ROW_CHARS,
-		);
-		const role = typeof row === "string" ? panel.role : (row.role ?? panel.role);
-		return palette.paint((role ?? "primary") as SidebarPanelRole, text);
-	});
-	return rows.filter((row) => visibleWidth(row) > 0);
 }
 
 function durationForTool(tool: ToolActivity, now: number): string {
@@ -756,7 +333,13 @@ function standalonePermissionRows(
 	const badge = permissionBadge(permission, palette);
 	const surface = sanitize(permission.surface) || "permission";
 	const subject = `${surface} ${sanitize(permission.value)}`.trim();
-	const rows = [truncateToWidth(`↳ ${badge}  ${subject}`, contentWidth, "…")];
+	const rows = [
+		truncateToWidth(
+			`${palette.paint("dim", "↳")} ${badge}  ${palette.paint("primary", subject)}`,
+			contentWidth,
+			"…",
+		),
+	];
 	if (
 		permission.reason &&
 		(permission.state === "deny" || permission.state === "unsure" || permission.source === "system")
@@ -775,111 +358,64 @@ function runSummaryRow(activity: RunActivitySnapshot, palette: AtelierPalette, n
 	const role: PaletteRole =
 		activity.phase === "running" ? "working" : activity.failedCount > 0 ? "error" : "ready";
 	if (activity.phase === "settled") return palette.paint(role, `Last run · ${duration}`);
-
-	const label = activity.turnNumber === undefined ? "Run" : `Turn ${finiteCount(activity.turnNumber)}`;
-	return palette.paint(role, `${label} · ${activity.phase} ${duration}`);
+	const label =
+		activity.turnNumber === undefined
+			? "RUN"
+			: `T${finiteCount(activity.turnNumber).toString().padStart(2, "0")}`;
+	return palette.paint(role, `${label} · ${duration}`);
 }
 
 function responsePerformanceRow(activity: RunActivitySnapshot, palette: AtelierPalette): string {
 	return palette.paint("output", formatResponsePerformance(activity.performance));
 }
 
-function activityRows(
-	activity: RunActivitySnapshot,
-	autoModeState: SidebarSnapshot["autoModeState"],
-	contentWidth: number,
-	palette: AtelierPalette,
-	now: number,
-): ActivityGroups {
-	const activeIds = new Set(activity.activeTools.map((tool) => tool.id));
-	const active = activity.activeTools
-		.map((tool, index) => ({ index, tool }))
-		.sort((left, right) => left.tool.startedAt - right.tool.startedAt || left.index - right.index)
-		.map(({ tool }) => ({
-			id: tool.id,
-			rows: toolActivityRows(tool, contentWidth, palette, now),
-		}));
-	const recent = activity.recentTools
-		.filter((tool) => !activeIds.has(tool.id))
-		.map((tool) => ({
-			id: tool.id,
-			rows: toolActivityRows(tool, contentWidth, palette, now),
-		}));
-	const aggregateText = aggregateActivityText(activity);
-	return {
-		core: [
-			...(autoModeState
-				? [
-						palette.paint(
-							autoModeState.enabled ? "ready" : "dim",
-							`${autoModeState.enabled ? "auto" : "manual"} · ${autoModeState.modelId}`,
-						),
-						palette.paint("muted", `󰚩 ${autoModeState.allowed} allow · 󰀄 ${autoModeState.asked} asked`),
-					]
-				: []),
-			runSummaryRow(activity, palette, now),
-			responsePerformanceRow(activity, palette),
-		],
-		active,
-		recent,
-		aggregate: aggregateText
-			? [palette.paint(activity.failedCount > 0 ? "error" : "ready", aggregateText)]
-			: [],
-	};
-}
-
-function aggregateActivityText(activity: RunActivitySnapshot): string {
+function aggregateActivityText(activity: RunActivitySnapshot, compact: boolean): string {
 	const completed = finiteCount(activity.completedCount);
 	const failed = finiteCount(activity.failedCount);
 	if (completed === 0 && failed === 0) return "";
-	return `tools ${completed} done · ${failed} failed`;
+	return compact ? `${completed}✓ ${failed}✕` : `${completed} done · ${failed} fail`;
 }
 
-function activitySidebarGroups(
+function activityBandRows(
 	snapshot: SidebarSnapshot,
-	contentWidth: number,
+	leadWidth: number,
+	continuationWidth: number,
+	layout: SidebarLayout,
 	palette: AtelierPalette,
 	now: number,
-): SidebarGroup[] {
-	const groups = activityRows(snapshot.runActivity, snapshot.autoModeState, contentWidth, palette, now);
-	const panelRole: PaletteRole =
-		snapshot.runActivity.phase === "running"
-			? "working"
-			: snapshot.runActivity.failedCount > 0
-				? "error"
-				: "ready";
-	return [
-		{
-			name: "activityCore",
-			panel: "ACTIVITY",
-			panelRole,
-			rows: groups.core,
-		},
-		...groups.active.map((active) => ({
-			name: `activityActive:${active.id}`,
-			panel: "ACTIVITY",
-			panelRole,
-			rows: active.rows,
-		})),
-		...groups.recent.map((recent) => ({
-			name: `activityRecent:${recent.id}`,
-			panel: "ACTIVITY",
-			panelRole,
-			rows: recent.rows,
-		})),
-		...(snapshot.runActivity.standalonePermissions ?? []).map((permission) => ({
-			name: `activityPermission:${permission.requestId}`,
-			panel: "ACTIVITY",
-			panelRole,
-			rows: standalonePermissionRows(permission, contentWidth, palette),
-		})),
-		{
-			name: "activityAggregate",
-			panel: "ACTIVITY",
-			panelRole,
-			rows: groups.aggregate,
-		},
-	].filter((group) => group.rows.length > 0);
+): string[] {
+	const activity = snapshot.runActivity;
+	const activeIds = new Set(activity.activeTools.map((tool) => tool.id));
+	const tools = [
+		...activity.activeTools
+			.map((tool, index) => ({ index, tool }))
+			.sort((left, right) => left.tool.startedAt - right.tool.startedAt || left.index - right.index)
+			.map(({ tool }) => tool),
+		...activity.recentTools.filter((tool) => !activeIds.has(tool.id)),
+	];
+	const aggregate = aggregateActivityText(activity, layout.compact);
+	const summary = runSummaryRow(activity, palette, now);
+	const rows = [
+		aggregate
+			? spacedRow(summary, palette.paint(activity.failedCount > 0 ? "error" : "ready", aggregate), leadWidth)
+			: summary,
+	];
+	if (snapshot.autoModeState) {
+		const auto = snapshot.autoModeState;
+		rows.push(
+			palette.paint(auto.enabled ? "ready" : "dim", `${auto.enabled ? "auto" : "manual"} · ${auto.modelId}`),
+			`${palette.paint("permissionAuto", `󰚩 ${auto.allowed} allow`)} ${palette.paint("dim", "·")} ${palette.paint(
+				"permissionHuman",
+				`󰀄 ${auto.asked} asked`,
+			)}`,
+		);
+	}
+	rows.push(responsePerformanceRow(activity, palette));
+	for (const tool of tools) rows.push(...toolActivityRows(tool, continuationWidth, palette, now));
+	for (const permission of activity.standalonePermissions ?? []) {
+		rows.push(...standalonePermissionRows(permission, continuationWidth, palette));
+	}
+	return rows;
 }
 
 export function renderSidebarLines(
@@ -895,119 +431,9 @@ export function renderSidebarLines(
 	const safeHeight = Math.max(0, Math.trunc(height));
 	if (safeWidth <= 0 || safeHeight <= 0) return [];
 	const contentWidth = Math.max(0, safeWidth - 2);
-	const panelContentWidth = Math.max(0, contentWidth - 4);
 	const layout = sidebarLayout(safeWidth);
-	const workspace = workspaceRows(snapshot, layout, palette);
-	const groups: SidebarGroup[] = [
-		{
-			name: "agent",
-			panel: "AGENT",
-			panelRole: activityRole(snapshot.activity),
-			panelJewel:
-				snapshot.activity === "working" && Math.floor(now / 400) % 2 === 1 ? ("✧" as const) : ("✦" as const),
-			rows: agentRows(snapshot, layout, panelContentWidth, palette, theme),
-		},
-		...activitySidebarGroups(snapshot, panelContentWidth, palette, now).map((group) => ({
-			...group,
-		})),
-		{
-			name: "statusDetails",
-			panel: "ALERTS",
-			panelRole: statusDetailPanelRole(snapshot),
-			rows: statusDetailRows(snapshot, palette),
-		},
-		{
-			name: "context",
-			panel: "CONTEXT",
-			panelRole: contextRole(snapshot),
-			rows: contextRows(snapshot, panelContentWidth, layout, palette),
-		},
-		{
-			name: "workspaceCore",
-			panel: "WORKSPACE",
-			panelRole: "accent",
-			rows: workspace.identity,
-		},
-		{
-			name: "workspaceLocation",
-			panel: "WORKSPACE",
-			panelRole: "accent",
-			rows: workspace.location,
-		},
-		{
-			name: "workspaceCore",
-			panel: "WORKSPACE",
-			panelRole: "accent",
-			rows: workspace.pulseCore,
-		},
-		{
-			name: "workspaceDetails",
-			panel: "WORKSPACE",
-			panelRole: "accent",
-			rows: workspace.pulseDetails,
-		},
-		{
-			name: "workspaceSession",
-			panel: "WORKSPACE",
-			panelRole: "accent",
-			rows: workspace.session,
-		},
-		{
-			name: "usage",
-			panel: "USAGE",
-			panelRole: "output",
-			rows: usageRows(snapshot, panelContentWidth, layout, palette),
-		},
-	];
-
-	// Compose the fixed local layout. External contributed panels remain
-	// supported after the built-in sequence; there is no interactive layout editor.
-	const contributed = new Map((snapshot.sidebarPanels ?? []).map((panel) => [panel.id, panel]));
-	const grouped = new Map<string, SidebarGroup[]>();
-	for (const group of groups) {
-		const id = group.panel ? panelIdForTitle(group.panel) : undefined;
-		if (!id) continue;
-		group.panelId = id;
-		const list = grouped.get(id) ?? [];
-		list.push(group);
-		grouped.set(id, list);
-	}
-	const ordered: SidebarGroup[] = groups.filter((group) => !group.panel);
-	for (const id of [
-		"plannotator:progress",
-		"agent",
-		"activity",
-		"alerts",
-		"context",
-		"workspace",
-		"usage",
-	] as const) {
-		const panel = id === "plannotator:progress" ? contributed.get(id) : undefined;
-		if (panel) {
-			const rows = contributedRows(panel, palette);
-			ordered.push({
-				name: `contributed:${panel.id}`,
-				panel: sanitize(panel.title).toUpperCase() || panel.id,
-				panelId: panel.id,
-				panelRole: panel.role ?? "accent",
-				rows: rows.length > 0 ? rows : [palette.paint("dim", "No data")],
-			});
-		} else {
-			ordered.push(...(grouped.get(id) ?? []));
-		}
-	}
-	for (const panel of contributed.values()) {
-		if (panel.id === "plannotator:progress") continue;
-		const rows = contributedRows(panel, palette);
-		ordered.push({
-			name: `contributed:${panel.id}`,
-			panel: sanitize(panel.title).toUpperCase() || panel.id,
-			panelId: panel.id,
-			panelRole: panel.role ?? "accent",
-			rows: rows.length > 0 ? rows : [palette.paint("dim", "No data")],
-		});
-	}
-	return renderDock(renderGroups(ordered, contentWidth, palette, theme), safeWidth, safeHeight, palette);
+	const rows = activityBandRows(snapshot, contentWidth, contentWidth, layout, palette, now);
+	return renderDock(rows, safeWidth, safeHeight, palette);
 }
 
 export interface SidebarComponentOptions {

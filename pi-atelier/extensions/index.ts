@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import {
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -27,7 +28,7 @@ import {
 } from "../src/sidebar.js";
 import { createSidebarPanelRegistry, type SidebarPanelRegistry } from "../src/sidebar-panels.js";
 import { AtelierRuntime, createInertAtelierState } from "../src/state.js";
-import { type AtelierState, type FooterState } from "../src/types.js";
+import { type AtelierState, type FooterPanelSummary, type FooterState } from "../src/types.js";
 
 export type {
 	SidebarPanelContribution,
@@ -80,6 +81,10 @@ interface ActiveSession {
 	readonly retiredCwd: string;
 	footerDisposer: (() => void) | undefined;
 	permissionDisposers: Array<() => void>;
+	sessionName: string | undefined;
+	persisted: boolean;
+	branchEntryCount: number;
+	panelSummaries: readonly FooterPanelSummary[];
 	autoModeState:
 		| {
 				enabled: boolean;
@@ -119,6 +124,25 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 		targetSession.requestFooterRender();
 		targetSession.sidebar.requestRender();
 	};
+
+	function refreshSessionSummary(targetSession: ActiveSession): void {
+		if (activeSession !== targetSession || targetSession.retired) return;
+		targetSession.sessionName = targetSession.ctx.sessionManager.getSessionName();
+		targetSession.persisted = Boolean(targetSession.ctx.sessionManager.getSessionFile());
+		targetSession.branchEntryCount = targetSession.ctx.sessionManager.getBranch().length;
+	}
+
+	function refreshPanelSummaries(targetSession: ActiveSession): void {
+		if (activeSession !== targetSession || targetSession.retired) return;
+		targetSession.panelSummaries = targetSession.panelRegistry
+			.getAvailable()
+			.filter((panel) => panel.id !== PLANNOTATOR_PANEL_ID)
+			.map((panel) => ({
+				id: panel.id,
+				title: panel.title,
+				...(panel.rows[0]?.text ? { summary: panel.rows[0].text } : {}),
+			}));
+	}
 
 	function updateExtensionStatuses(targetSession: ActiveSession, next: readonly string[]): void {
 		if (activeSession !== targetSession) return;
@@ -257,23 +281,17 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 				sidebarPanels: [],
 			});
 		}
-		const { ctx, panelRegistry, runActivity, runtime } = targetSession;
-		// Plannotator's own setStatus call requests a render on phase transitions;
-		// deriving the panel here makes that render immediately reflect the latest
-		// durable branch even though Pi has no generic extension-command-end event.
-		syncPlannotatorPanel(targetSession);
-		const sessionName = ctx.sessionManager.getSessionName();
-		const sessionFile = ctx.sessionManager.getSessionFile();
+		const { ctx, runActivity, runtime } = targetSession;
 		return buildSidebarSnapshot({
 			state: runtime.getState(),
 			cwd: ctx.cwd,
-			...(sessionName ? { sessionName } : {}),
-			...(sessionFile ? { sessionFile } : {}),
-			branchEntryCount: ctx.sessionManager.getBranch().length,
+			...(targetSession.sessionName ? { sessionName: targetSession.sessionName } : {}),
+			...(targetSession.persisted ? { sessionFile: "persisted" } : {}),
+			branchEntryCount: targetSession.branchEntryCount,
 			extensionStatuses: targetSession.extensionStatuses,
 			runActivity: runActivity.getSnapshot(),
 			...(targetSession.autoModeState ? { autoModeState: targetSession.autoModeState } : {}),
-			sidebarPanels: panelRegistry.getAvailable(),
+			sidebarPanels: [],
 		});
 	}
 
@@ -388,6 +406,11 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 						...currentSession.runtime.getState(),
 						...(branch ? { branch } : {}),
 						...(performance ? { performance } : {}),
+						projectName: basename(currentSession.ctx.cwd) || currentSession.ctx.cwd,
+						...(currentSession.sessionName ? { sessionName: currentSession.sessionName } : {}),
+						persisted: currentSession.persisted,
+						branchEntryCount: currentSession.branchEntryCount,
+						panelSummaries: currentSession.panelSummaries,
 						...(plannotatorStatus ? { plannotatorStatus } : {}),
 						...(autoModeStatus ? { autoModeStatus } : {}),
 						extensionStatuses: currentSession.extensionStatuses,
@@ -450,7 +473,9 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 		const isFresh = (): boolean => initializationToken === lifecycleToken;
 		const requestCandidateRenders = (): void => {
 			const current = activeSession;
-			if (current?.token === initializationToken) requestAllRenders(current);
+			if (current?.token !== initializationToken) return;
+			refreshPanelSummaries(current);
+			requestAllRenders(current);
 		};
 		const localPlannotator = createPlannotatorIntegration();
 		const localRunActivity = createRunActivityTracker({
@@ -521,6 +546,10 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 				retiredCwd: initializationContext.cwd,
 				footerDisposer: undefined,
 				permissionDisposers: [],
+				sessionName: initializationContext.sessionManager.getSessionName(),
+				persisted: Boolean(initializationContext.sessionManager.getSessionFile()),
+				branchEntryCount: initializationContext.sessionManager.getBranch().length,
+				panelSummaries: [],
 				autoModeState: undefined,
 				footerGeneration: 0,
 				retired: false,
@@ -623,6 +652,7 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 	pi.on("session_tree", (_event, ctx) => {
 		const current = getActiveSession(ctx);
 		if (!current) return;
+		refreshSessionSummary(current);
 		schedulePlannotatorRefresh(current);
 		requestAllRenders(current);
 	});
@@ -680,6 +710,7 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 	pi.on("turn_end", async (_event, ctx) => {
 		const current = getActiveSession(ctx);
 		if (!current) return;
+		refreshSessionSummary(current);
 		schedulePlannotatorRefresh(current);
 		current.runtime.refreshUsage();
 		await current.runtime.flushWorkspacePulseRefresh();
@@ -694,7 +725,9 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 	});
 	pi.on("session_info_changed", (_event, ctx) => {
 		const current = getActiveSession(ctx);
-		if (current) requestAllRenders(current);
+		if (!current) return;
+		refreshSessionSummary(current);
+		requestAllRenders(current);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
 		const current = getActiveSession(ctx);

@@ -7,11 +7,12 @@ A source-owned personal Pi extension distributed in the `pi-extensions` monorepo
 - Fullscreen-only sidebar implemented as a real layout pane
 - Pane-local transcript and sidebar text selection
 - Fixed responsive sizing: 44-column preferred width, shrinking to 28 columns before auto-hide below 92 terminal columns
-- Plannotator, Agent, unified Activity/tool-and-permission history, Alerts, Context, Workspace/Git/session, and Usage panels
+- Activity-only sidebar for run state, response performance, auto-mode decisions, tool history, and permission provenance
+- Single-line Nerd Font footer for Agent, model, Git, session, context, usage, Plan, alerts, and external contribution summaries
 - Policy, auto-mode, and human permission outcomes packed into tool rows with spaced Nerd Font badges, counted routine allows, and exception-only detail rows
 - Namespaced external panel contributions through Atelier's bounded event protocol
-- Zero-height footer while the sidebar is presented
-- Dense responsive status rail while the sidebar is hidden, including response performance
+- Native persistent footer alongside the fullscreen activity sidebar
+- Responsive telemetry priorities that preserve activity, context, active Plan, and armed auto mode under width pressure
 - No settings UI, Atelier notifications, telemetry, configuration file, resize mode, or external requests
 
 ## Loading
@@ -25,9 +26,9 @@ The root `pi-extensions` manifest loads `pi-atelier/extensions/index.ts` after P
 /atelier on|off|toggle      # explicit visibility action
 ```
 
-The sidebar starts visible in Pi's fullscreen TUI and hides when the terminal is too narrow. Scroll over the sidebar to browse every panel independently of the transcript. Layout and behavior are intentionally fixed in source rather than user configuration.
+The sidebar starts visible in Pi's fullscreen TUI and hides when the terminal is too narrow. It is intentionally dedicated to Activity: run status and performance appear first, followed by auto-mode state, tool history, and permission provenance. Scroll over it independently of the transcript when history exceeds the viewport.
 
-Plannotator progress appears during planning and execution. Auto mode contributes state and per-request classifier observations to Activity; the permission system contributes final policy/human outcomes. Pi supports one custom footer at a time; this extension owns it, renders zero rows while its fullscreen sidebar is presented, and restores the fallback status rail when hidden. Regular and unknown renderers fail closed without layout mutation or overlay presentation.
+The persistent footer is the overview surface. A single responsive Nerd Font strip summarizes Agent/model state, Git churn, session identity, context, usage, Plannotator, alerts, and external contributions. The footer remains in Pi’s native dock; the Sidebar continues to fail closed on unknown layouts. Layout and behavior are intentionally fixed in source rather than user configuration.
 
 ## Privacy
 

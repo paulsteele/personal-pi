@@ -130,13 +130,12 @@ function activeActivity(): RunActivitySnapshot {
 }
 
 function contentRows(lines: string[]) {
-	return lines.map((line) => {
+	return lines.flatMap((line) => {
 		const row = stripAnsi(line).slice(2).trimEnd();
-		const title = row.match(/^╭─ [✦✧] ([A-Z]+) ─*╮$/)?.[1];
-		if (title) return title;
-		if (/^╰─+╯$/.test(row)) return "";
-		if (row.startsWith("│ ") && row.endsWith(" │")) return row.slice(2, -2).trimEnd();
-		return row;
+		const starter = /^▌([A-Z]+)\s+(.*)$/.exec(row);
+		if (starter) return [starter[1] ?? "", starter[2] ?? ""];
+		if (row.startsWith("  ")) return [row.slice(2).trimEnd()];
+		return [row];
 	});
 }
 
@@ -873,249 +872,79 @@ describe("sidebar snapshot and layout", () => {
 		});
 	});
 
-	it("renders a full-height dock with elegant terminal-native panels", () => {
+	it("renders only the Activity monitor in a full-height dock", () => {
 		const lines = renderSidebarLines(snapshot(), theme, 44, 36, false, 0);
-		const text = lines.join("\n");
+		const rows = contentRows(lines);
 		expect(lines).toHaveLength(36);
 		expect(lines.every((line) => visibleWidth(line) <= 44)).toBe(true);
 		expect(lines.every((line) => stripAnsi(line).startsWith("│ "))).toBe(true);
-		expect(text).toContain("╭─ ✦ AGENT ");
-		expect(text).toContain("╭─ ✦ CONTEXT ");
-		expect(text).toContain("╰────────────────");
-		expect(text).not.toContain("ATELIER");
-		expect(text).not.toMatch(/PI ATELIER|ATELIER|▛▀▜/);
-		expect(contentRows(lines)[0]).toBe("AGENT");
-		expect(contentRows(lines)).toContain("pi-atelier · feature/sidebar ▲");
-		expect(contentRows(lines)).toContainEqual(expect.stringMatching(/^◆ WORKING\s+gpt-5\.6-sol$/));
-	});
-
-	it("renders a scan-first Workspace Pulse without repeating the repository root path", () => {
-		const rows = contentRows(renderSidebarLines(snapshot(), theme, 44, 36, false, 0));
-
-		expect(rows).toContain("5 tracked  +182  −47");
-		expect(rows).toContain("2 untracked");
-		expect(rows).not.toContain("/Users/example/projects/pi-atelier");
-		expect(rows).toContain("Sidebar implementation");
-		expect(rows).toContain("38 entries · persisted");
-	});
-
-	it.each([
-		[{ status: "inspecting" as const }, "inspecting…"],
-		[{ status: "not-repo" as const }, "not a Git repository"],
-		[{ status: "unavailable" as const }, "Git unavailable"],
-	])("renders the %s Pulse state explicitly", (workspacePulse, expected) => {
-		const { branch: _branch, ...withoutBranch } = snapshot();
-		const rows = contentRows(
-			renderSidebarLines({ ...withoutBranch, workspacePulse, dirty: false }, theme, 44, 36, false, 0),
-		);
-		expect(rows).toContain(expected);
-	});
-
-	it("keeps conflict and stale signals visible without expanding every Git category", () => {
-		if (!("data" in state.workspacePulse)) throw new Error("expected fixture Pulse data");
-		const data = {
-			...state.workspacePulse.data,
-			relativeCwd: "packages/api",
-			snapshot: {
-				...state.workspacePulse.data.snapshot,
-				binaryFiles: 1,
-				submodules: 1,
-				conflicts: 2,
-			},
-		};
-		const conflictRows = contentRows(
-			renderSidebarLines(
-				{ ...snapshot(), workspacePulse: { status: "conflict", data } },
-				theme,
-				44,
-				36,
-				false,
-				0,
-			),
-		);
-		expect(conflictRows).toContain("./packages/api");
-		expect(conflictRows).toContain("2 conflicts");
-		expect(conflictRows).toContain("2 untracked · 1 binary · 1 submodule");
-
-		const staleRows = contentRows(
-			renderSidebarLines(
-				{ ...snapshot(), workspacePulse: { status: "stale", data } },
-				theme,
-				44,
-				36,
-				false,
-				0,
-			),
-		);
-		expect(staleRows).toContain("~ stale · 5 tracked  +182  −47");
-
-		const compactRows = contentRows(
-			renderSidebarLines(
-				{ ...snapshot(), workspacePulse: { status: "stale", data } },
-				theme,
-				28,
-				36,
-				false,
-				0,
-			),
-		);
-		expect(compactRows).toContain("~ stale · 5 tracked");
-		expect(compactRows).toContain("+182  −47");
-		expect(compactRows).toContain("?2 · bin1 · sub1");
-	});
-
-	it("pulses only the working Agent jewel while keeping other crowns stable", () => {
-		const bright = renderSidebarLines(snapshot(), theme, 44, 36, false, 0).join("\n");
-		const soft = renderSidebarLines(snapshot(), theme, 44, 36, false, 400).join("\n");
-		expect(bright).toContain("╭─ ✦ AGENT ");
-		expect(soft).toContain("╭─ ✧ AGENT ");
-		expect(bright).toContain("╭─ ✦ CONTEXT ");
-		expect(soft).toContain("╭─ ✦ CONTEXT ");
-	});
-
-	it("renders a compact segmented context meter that adapts to width", () => {
-		const narrow = contentRows(renderSidebarLines(snapshot(), theme, 28, 36, false));
-		const narrowContext = narrow.indexOf("CONTEXT");
-		expect(narrow[narrowContext + 1]).toMatch(/^32k \/ 400k\s+8\.1%$/);
-		expect(narrow[narrowContext + 2]).toMatch(/^\[■·+\]$/);
-
-		for (const width of [40, 44, 72]) {
-			const rows = contentRows(renderSidebarLines(snapshot(), theme, width, 36, false));
-			const contextIndex = rows.indexOf("CONTEXT");
-			expect(rows[contextIndex + 1]).toMatch(/^32k \/ 400k\s+8\.1%$/);
-			expect(rows[contextIndex + 2]).toMatch(/^\[■·+\]$/);
-			expect(visibleWidth(rows[contextIndex + 1] ?? "")).toBeLessThanOrEqual(width - 6);
+		expect(rows[0]).toBe("Ready");
+		expect(rows).toContain("TTFT ~ · TPS ~");
+		for (const absent of ["ACTIVITY", "RUN", "AGENT", "CTX", "GIT", "SESSION", "USE", "PLAN", "ALERTS"]) {
+			expect(rows).not.toContain(absent);
 		}
 	});
 
-	it("omits a standalone unavailable marker when session name is missing", () => {
-		const missingSession = buildSidebarSnapshot({
-			state,
-			cwd: "/tmp/project",
-			branchEntryCount: 6,
-			extensionStatuses: [],
-		});
-		const rows = contentRows(renderSidebarLines(missingSession, theme, 44, 36, false));
-		const sessionIndex = rows.findIndex((row) => row.startsWith("SESSION "));
-		const usageIndex = rows.findIndex((row) => row.startsWith("USAGE "));
-		expect(rows.slice(sessionIndex + 1, usageIndex)).not.toContain("—");
-		expect(rows.slice(sessionIndex + 1, usageIndex)).toContain("6 entries · ephemeral");
-	});
-
-	it("does not render the session file path", () => {
-		const text = renderSidebarLines(snapshot(), theme, 44, 36, false).join("\n");
-		expect(text).not.toContain("/tmp/session.jsonl");
-		expect(text).not.toContain("session.jsonl");
-	});
-
-	it("renders session entry count and persistence on one row", () => {
-		const persisted = buildSidebarSnapshot({
-			state,
-			cwd: "/tmp/project",
-			sessionName: "Task session",
-			sessionFile: "/tmp/session.jsonl",
-			branchEntryCount: 6,
-			extensionStatuses: [],
-		});
-		expect(contentRows(renderSidebarLines(persisted, theme, 44, 36, false))).toContain(
-			"6 entries · persisted",
-		);
-	});
-
-	it("renders populated usage as compact inline metric rows", () => {
-		const fg = vi.fn((_color: string, text: string) => text);
-		const unnamedTheme = { fg, bold: theme.bold, italic: theme.italic };
-		const rows = contentRows(renderSidebarLines(snapshot(), unnamedTheme, 44, 36, true));
-		const usageIndex = rows.indexOf("USAGE");
-		expect(rows[usageIndex + 1]).toBe("In 50.0k  Out 1.9k");
-		expect(rows[usageIndex + 2]).toBe("Cache 100.0k  Hit 96.0%");
-		expect(rows[usageIndex + 3]).toBe("Cost $0.479");
-		for (const label of ["In", "Out", "Cache", "Hit", "Cost"]) {
-			expect(fg).toHaveBeenCalledWith("muted", label);
-		}
-		for (const width of [44, 56, 72]) {
-			const wideRows = contentRows(renderSidebarLines(snapshot(), theme, width, 36, false));
-			const wideUsage = wideRows.indexOf("USAGE");
-			expect(wideRows[wideUsage + 1]).toBe("In 50.0k  Out 1.9k");
-			expect(wideRows[wideUsage + 2]).toBe("Cache 100.0k  Hit 96.0%");
+	it("keeps the activity monitor bounded across responsive widths", () => {
+		for (const width of [28, 39, 40, 44, 72]) {
+			const lines = renderSidebarLines(withActivity(activeActivity()), theme, width, 1, false, 20_000);
+			expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+			expect(lines.map(stripAnsi).join("\n")).toContain("T03 · 19s");
+			expect(lines.map(stripAnsi).join("\n")).not.toContain("▌");
 		}
 	});
 
-	it("hides unavailable usage while keeping access under Agent", () => {
-		const unavailable = {
+	it("does not render overview or contributed panels in the activity monitor", () => {
+		const contributed = {
 			...snapshot(),
-			metrics: {
-				...state.metrics,
-				usageAvailable: false,
-				costAvailable: false,
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cost: 0,
-			},
+			sidebarPanels: [
+				{
+					id: "vendor:queue" as const,
+					title: "Queue",
+					rows: [{ text: "queued 2", role: "primary" as const }],
+					role: "accent" as const,
+					available: true as const,
+					source: "vendor",
+				},
+			],
 		};
-		const rows = contentRows(renderSidebarLines(unavailable, theme, 44, 36, false));
-		expect(rows).not.toContain("USAGE");
-		expect(rows).toContain("OPENAI-CODEX · MEDIUM · SUBSCRIPTION");
+		const text = renderSidebarLines(contributed, theme, 44, 1, false).join("\n");
+		expect(text).not.toContain("QUEUE");
+		expect(text).not.toContain("queued 2");
+		expect(text).not.toContain("feature/sidebar");
 	});
 
 	it("renders deterministic live run activity", () => {
 		const rows = contentRows(
 			renderSidebarLines(withActivity(activeActivity()), theme, 44, 36, false, 20_000),
 		);
-		expect(rows).toContain("ACTIVITY");
-		expect(rows).toContain("Turn 3 · running 19s");
+		expect(rows).toContainEqual(expect.stringMatching(/^T03 · 19s\s+2 done · 1 fail$/));
 		expect(rows).toEqual(
 			expect.arrayContaining([
 				expect.stringMatching(/^read\s+src\/state\.ts\s+18s$/),
 				expect.stringMatching(/^bash\s+npm test\s+done 4s$/),
 			]),
 		);
-		expect(rows).toContain("tools 2 done · 1 failed");
 	});
 
-	it.each([
-		{ completedCount: 2, failedCount: 0, expected: "tools 2 done · 0 failed" },
-		{ completedCount: 0, failedCount: 1, expected: "tools 0 done · 1 failed" },
-	])("renders both aggregate sides for %#", ({ completedCount, failedCount, expected }) => {
-		const rows = contentRows(
-			renderSidebarLines(
-				withActivity({
-					phase: "settled",
-					startedAt: 10_000,
-					durationMs: 5_000,
-					activeTools: [],
-					recentTools: [],
-					completedCount,
-					failedCount,
-				}),
-				theme,
-				44,
-				36,
-				false,
-				20_000,
-			),
-		);
-		expect(rows).toContain(expected);
-	});
-
-	it("uses robot and human glyphs for classifier allow and asked counts", () => {
+	it("keeps performance and auto-mode telemetry above the activity log", () => {
 		const autoSnapshot = buildSidebarSnapshot({
 			state,
 			cwd: "/tmp/project",
 			branchEntryCount: 1,
 			extensionStatuses: [],
-			autoModeState: {
-				enabled: true,
-				usable: true,
-				modelId: "reviewer",
-				allowed: 3,
-				asked: 2,
-			},
+			runActivity: activeActivity(),
+			autoModeState: { enabled: true, usable: true, modelId: "reviewer", allowed: 3, asked: 2 },
 		});
-		const rows = contentRows(renderSidebarLines(autoSnapshot, theme, 44, 36, false));
-		expect(rows).toContain("󰚩 3 allow · 󰀄 2 asked");
-		expect(rows.join("\n")).not.toContain("deny");
+		const rows = contentRows(renderSidebarLines(autoSnapshot, theme, 44, 36, false, 20_000));
+		const performance = rows.indexOf("TTFT ~ · TPS ~");
+		const auto = rows.indexOf("auto · reviewer");
+		const counts = rows.indexOf("󰚩 3 allow · 󰀄 2 asked");
+		const firstTool = rows.findIndex((row) => /^read\s+src\/state\.ts/.test(row));
+		expect(performance).toBeGreaterThan(-1);
+		expect(auto).toBeLessThan(counts);
+		expect(counts).toBeLessThan(performance);
+		expect(counts).toBeLessThan(firstTool);
 	});
 
 	it("renders spaced Nerd Font permission badges inline and keeps exception reasons below", () => {
@@ -1268,8 +1097,7 @@ describe("sidebar snapshot and layout", () => {
 		expect(wideRows).not.toContainEqual(expect.stringMatching(/^\s+󰒃/));
 
 		const narrowRows = contentRows(renderSidebarLines(withActivity(activity), theme, 28, 36, false, 5_000));
-		expect(narrowRows).toContainEqual(expect.stringMatching(/^read\s+.+󰒃 ✓² 3s$/));
-		expect(narrowRows).toContain("  󰚩 ✓");
+		expect(narrowRows).toContainEqual(expect.stringMatching(/^read\s+.+󰒃 ✓²\s+󰚩 ✓ 3s$/));
 	});
 
 	it("renders response performance as a compact optional Activity row", () => {
@@ -1338,7 +1166,7 @@ describe("sidebar snapshot and layout", () => {
 
 	it("always renders idle placeholders and preserves settled activity", () => {
 		const idleRows = contentRows(renderSidebarLines(snapshot(), theme, 44, 36, false, 20_000));
-		expect(idleRows).toContain("ACTIVITY");
+		expect(idleRows).not.toContain("ACTIVITY");
 		expect(idleRows).toContain("Ready");
 		expect(idleRows).toContain("TTFT ~ · TPS ~");
 
@@ -1370,7 +1198,7 @@ describe("sidebar snapshot and layout", () => {
 				20_000,
 			),
 		);
-		expect(settledRows).toContain("Last run · 6s");
+		expect(settledRows).toContainEqual(expect.stringContaining("Last run · 6s"));
 		expect(settledRows).not.toContain("Turn 4 · settled 6s");
 		expect(settledRows).toEqual(
 			expect.arrayContaining([expect.stringMatching(/^edit\s+src\/sidebar\.ts\s+failed 2s$/)]),
@@ -1401,11 +1229,11 @@ describe("sidebar snapshot and layout", () => {
 				20_000,
 			),
 		);
-		expect(idleWithRecent).toContain("ACTIVITY");
+		expect(idleWithRecent).not.toContain("ACTIVITY");
 		expect(idleWithRecent).toEqual(
 			expect.arrayContaining([expect.stringMatching(/^bash\s+npm test\s+done 1s$/)]),
 		);
-		expect(idleWithRecent).toContain("tools 1 done · 0 failed");
+		expect(idleWithRecent).toContainEqual(expect.stringContaining("1 done · 0 fail"));
 
 		const idleWithActive = contentRows(
 			renderSidebarLines(
@@ -1426,7 +1254,7 @@ describe("sidebar snapshot and layout", () => {
 				20_000,
 			),
 		);
-		expect(idleWithActive).toContain("ACTIVITY");
+		expect(idleWithActive).not.toContain("ACTIVITY");
 		expect(idleWithActive).toEqual(
 			expect.arrayContaining([expect.stringMatching(/^read\s+src\/a\.ts\s+5s$/)]),
 		);
@@ -1447,8 +1275,8 @@ describe("sidebar snapshot and layout", () => {
 				20_000,
 			),
 		);
-		expect(idleWithCounts).toContain("ACTIVITY");
-		expect(idleWithCounts).toContain("tools 0 done · 2 failed");
+		expect(idleWithCounts).not.toContain("ACTIVITY");
+		expect(idleWithCounts).toContainEqual(expect.stringContaining("0 done · 2 fail"));
 	});
 
 	it("keeps active tools before recent tools and preserves parallel start order", () => {
@@ -1589,45 +1417,6 @@ describe("sidebar snapshot and layout", () => {
 		expect(fg).toHaveBeenCalledWith("error", "failed 1s");
 	});
 
-	it("shows only sanitized warning and error extension statuses", () => {
-		const statusSnapshot = buildSidebarSnapshot({
-			state: { ...state, extensionStatuses: [] },
-			cwd: "/tmp/project",
-			branchEntryCount: 6,
-			extensionStatuses: ["tests \u001b[31mpassing", "api\nready", "sync warning", "index failed", "   "],
-		});
-		const rows = contentRows(renderSidebarLines(statusSnapshot, theme, 44, 36, false));
-		expect(rows).toContain("ALERTS");
-		expect(rows).toContain("▲ sync warning");
-		expect(rows).toContain("✕ index failed");
-		expect(rows).not.toContain("tests passing");
-		expect(rows).not.toContain("api ready");
-		expect(rows.join("\n")).not.toContain("[31m");
-	});
-
-	it("renders missing metadata as unavailable and the session as ephemeral", () => {
-		const {
-			modelId: _model,
-			provider: _provider,
-			thinkingLevel: _thinking,
-			branch: _branch,
-			...base
-		} = state;
-		const missing = buildSidebarSnapshot({
-			state: {
-				...base,
-				metrics: { ...state.metrics, contextTokens: null, contextPercent: null },
-			},
-			cwd: "/tmp/project",
-			branchEntryCount: 0,
-			extensionStatuses: [],
-		});
-		const lines = renderSidebarLines(missing, theme, 32, 36, false);
-		expect(lines.join("\n")).toContain("—");
-		expect(lines.join("\n")).toContain("ephemeral");
-		expect(lines.every((line) => visibleWidth(line) <= 32)).toBe(true);
-	});
-
 	it("sanitizes and truncates long values without breaking the frame", () => {
 		const long = {
 			...snapshot(),
@@ -1639,22 +1428,6 @@ describe("sidebar snapshot and layout", () => {
 		const lines = renderSidebarLines(long, theme, 34, 36, false);
 		expect(lines.join("")).not.toContain("[31m");
 		expect(lines.every((line) => visibleWidth(line) <= 34)).toBe(true);
-	});
-
-	it.each([
-		[50, "text"],
-		[75, "warning"],
-		[95, "error"],
-	] as const)("uses the configured context role at %s%%", (percent, expectedRole) => {
-		const fg = vi.fn((_color: string, text: string) => text);
-		renderSidebarLines(
-			{ ...snapshot(), metrics: { ...state.metrics, contextPercent: percent } },
-			{ ...theme, fg },
-			44,
-			36,
-			false,
-		);
-		expect(fg).toHaveBeenCalledWith(expectedRole, expect.stringContaining(`${percent.toFixed(1)}%`));
 	});
 });
 
@@ -1677,7 +1450,7 @@ describe("sidebar component and overlay", () => {
 			theme,
 		});
 		const shortRender = component.render(44);
-		expect(shortRender.length).toBeGreaterThan(24);
+		expect(shortRender).toHaveLength(24);
 		height = 31;
 		expect(component.render(44)).toHaveLength(31);
 	});
@@ -1692,10 +1465,11 @@ describe("sidebar component and overlay", () => {
 			theme:
 				source === "render"
 					? {
-							...theme,
-							bold: () => {
+							fg: () => {
 								throw new Error("render failed");
 							},
+							bold: theme.bold,
+							italic: theme.italic,
 						}
 					: theme,
 		});

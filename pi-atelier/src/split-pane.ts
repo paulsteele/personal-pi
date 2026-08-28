@@ -2,25 +2,12 @@ import type { Component, OverlayOptions, TUI } from "@earendil-works/pi-tui";
 import { HStack, ScrollView } from "@earendil-works/pi-tui";
 
 const PI_084_FULLSCREEN_LAYOUT_ADAPTER = Symbol("pi-atelier.fullscreen-layout-adapter");
-const LAYOUT_NODE = Symbol.for("@earendil-works/pi-tui/layout-node");
-
-interface FooterSlotState {
-	entry: { minSize?: number };
-	originalMinSize: number | undefined;
-	collapsed: boolean;
-}
 
 interface FullscreenLayoutAdapterState {
 	owner: object;
 	originalRoot: Component;
 	splitRoot: Component;
 	sidebarComponent: Component;
-	footerSlot?: FooterSlotState;
-}
-
-interface PrivateLayoutNode {
-	type?: unknown;
-	entries?: Array<{ component?: Component; minSize?: number }>;
 }
 
 type AdaptedTui = TUI & {
@@ -73,31 +60,6 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 		}
 	};
 
-	const layoutNode = (component: Component): PrivateLayoutNode | undefined => {
-		const candidate = component as Component & { [LAYOUT_NODE]?: () => PrivateLayoutNode };
-		try {
-			return typeof candidate[LAYOUT_NODE] === "function" ? candidate[LAYOUT_NODE]() : undefined;
-		} catch {
-			return undefined;
-		}
-	};
-
-	const findFooterSlot = (root: Component): FooterSlotState | undefined => {
-		const rootNode = layoutNode(root);
-		if (rootNode?.type !== "vstack" || !Array.isArray(rootNode.entries)) return undefined;
-		// Pi 0.84's root is [transcript ScrollView, dock VStack]. The dock's final
-		// entry is the footer container with minSize 1. Require this exact shape.
-		const dock = rootNode.entries[1]?.component;
-		if (!dock) return undefined;
-		const dockNode = layoutNode(dock);
-		if (dockNode?.type !== "vstack" || !Array.isArray(dockNode.entries) || dockNode.entries.length < 1) {
-			return undefined;
-		}
-		const entry = dockNode.entries.at(-1);
-		if (!entry || entry.minSize !== 1) return undefined;
-		return { entry, originalMinSize: entry.minSize, collapsed: false };
-	};
-
 	const isPiFullscreenRenderer = (): boolean => {
 		if (!tui || tui.mode !== "fullscreen") return false;
 		const prototype = Object.getPrototypeOf(tui) as { constructor?: { name?: string } } | null;
@@ -128,25 +90,6 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 		}
 	};
 
-	const syncFooterSlot = (state: FullscreenLayoutAdapterState): void => {
-		const slot = state.footerSlot;
-		if (!slot) return;
-		const shouldCollapse = visibleAt(tui?.terminal.columns ?? Number.NaN);
-		if (slot.collapsed === shouldCollapse) return;
-		if (shouldCollapse) slot.entry.minSize = 0;
-		else if (slot.originalMinSize === undefined) delete slot.entry.minSize;
-		else slot.entry.minSize = slot.originalMinSize;
-		slot.collapsed = shouldCollapse;
-	};
-
-	const restoreFooterSlot = (state: FullscreenLayoutAdapterState): void => {
-		const slot = state.footerSlot;
-		if (!slot) return;
-		if (slot.originalMinSize === undefined) delete slot.entry.minSize;
-		else slot.entry.minSize = slot.originalMinSize;
-		slot.collapsed = false;
-	};
-
 	const createFullscreenSplitRoot = (originalRoot: Component, pane: Component): Component =>
 		new HStack([
 			{ component: originalRoot, basis: 0, grow: 1, shrink: 1, minSize: MIN_MAIN_WIDTH },
@@ -158,8 +101,6 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 				minSize: MIN_SIDEBAR_WIDTH,
 				maxSize: SIDEBAR_WIDTH,
 				visible: ({ width }) => {
-					const state = ownedState();
-					if (state) syncFooterSlot(state);
 					notifyPresentation();
 					return visibleAt(width);
 				},
@@ -175,7 +116,6 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 		if (currentState) {
 			// Never stack over another owner or recapture a root replaced after ours.
 			if (currentState.owner !== adapterOwner || currentRoot !== currentState.splitRoot) return;
-			syncFooterSlot(currentState);
 			if (currentState.sidebarComponent === sidebarComponent) return;
 			const pane = new ScrollView(sidebarComponent, {
 				primary: false,
@@ -196,17 +136,14 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 			scrollbar: "auto",
 		});
 		const splitRoot = createFullscreenSplitRoot(currentRoot, pane);
-		const footerSlot = findFooterSlot(currentRoot);
 		const nextState: FullscreenLayoutAdapterState = {
 			owner: adapterOwner,
 			originalRoot: currentRoot,
 			splitRoot,
 			sidebarComponent,
-			...(footerSlot ? { footerSlot } : {}),
 		};
 		adaptedTui.setLayoutRoot(splitRoot);
 		adaptedTui[PI_084_FULLSCREEN_LAYOUT_ADAPTER] = nextState;
-		syncFooterSlot(nextState);
 	};
 
 	const restoreFullscreenLayoutAdapter = (): void => {
@@ -214,14 +151,11 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 		const adaptedTui = tui as AdaptedTui;
 		const state = adaptedTui[PI_084_FULLSCREEN_LAYOUT_ADAPTER];
 		if (state?.owner !== adapterOwner) return;
-		restoreFooterSlot(state);
 		if (adaptedTui.layoutRoot === state.splitRoot) adaptedTui.setLayoutRoot(state.originalRoot);
 		adaptedTui[PI_084_FULLSCREEN_LAYOUT_ADAPTER] = undefined;
 	};
 
 	const requestRender = (): void => {
-		const state = ownedState();
-		if (state) syncFooterSlot(state);
 		notifyPresentation();
 		tui?.requestRender();
 	};

@@ -11,7 +11,7 @@ const themed = (name?: string) => ({
 
 const fixedDarkRoles = [
 	["accent", rgb(177, 140, 255)],
-	["primary", rgb(212, 212, 212)],
+	["primary", rgb(147, 197, 253)],
 	["muted", rgb(128, 128, 128)],
 	["dim", rgb(102, 102, 102)],
 	["ready", rgb(110, 168, 254)],
@@ -24,6 +24,7 @@ const fixedDarkRoles = [
 	["menu", rgb(177, 140, 255)],
 	["cache", rgb(125, 211, 252)],
 	["working", rgb(255, 159, 67)],
+	["added", rgb(134, 239, 172)],
 	["cost", rgb(255, 159, 67)],
 	["warning", rgb(255, 159, 67)],
 	["error", rgb(255, 93, 115)],
@@ -45,7 +46,7 @@ describe("Fixed Dark Midnight Spectrum", () => {
 	it("uses safe theme-token fallbacks only when the host theme is unnamed", () => {
 		const theme = themed();
 		const palette = createPalette(theme, true);
-		expect(palette.paint("primary", "X")).toBe("<text>X</text>");
+		expect(palette.paint("primary", "X")).toBe("<thinkingLow>X</thinkingLow>");
 		expect(palette.paint("muted", "X")).toBe("<muted>X</muted>");
 		expect(palette.paint("dim", "X")).toBe("<dim>X</dim>");
 		expect(palette.paint("input", "X")).toBe("<thinkingLow>X</thinkingLow>");
@@ -68,6 +69,7 @@ describe("Fixed Dark Midnight Spectrum", () => {
 		] as const) {
 			expect(palette.paint(role, "X")).toBe("<text>X</text>");
 		}
+		expect(palette.paint("added", "X")).toBe("<success>X</success>");
 		expect(palette.paint("accent", "X")).toBe("<accent>X</accent>");
 		expect(palette.paint("primary", "X")).toBe("<text>X</text>");
 		expect(palette.paint("muted", "X")).toBe("<muted>X</muted>");

@@ -53,9 +53,20 @@ export interface AtelierState {
 	extensionStatuses: readonly string[];
 }
 
-/** Footer render input: runtime state plus the live response metrics the runtime does not own. */
+export interface FooterPanelSummary {
+	id: ContributedSidebarPanelId;
+	title: string;
+	summary?: string;
+}
+
+/** Footer render input: runtime state plus session and integration metadata. */
 export interface FooterState extends AtelierState {
 	performance?: ResponsePerformance;
+	projectName?: string;
+	sessionName?: string;
+	persisted?: boolean;
+	branchEntryCount?: number;
+	panelSummaries?: readonly FooterPanelSummary[];
 	plannotatorStatus?: string;
 	/**
 	 * Compact auto-mode label (e.g. `⏵⏵ auto 12/1`), published by the local

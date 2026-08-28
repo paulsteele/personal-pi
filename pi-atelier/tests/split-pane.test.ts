@@ -166,36 +166,6 @@ describe("fixed fullscreen split", () => {
 		expect(changes).toEqual([true, false, true, false, true, false]);
 	});
 
-	it("collapses and restores Pi's fullscreen footer slot", () => {
-		const renderer = fullscreenRenderer(120, 8);
-		const layout = piFullscreenRoot(
-			{ render: () => ["main"], invalidate() {} },
-			{ render: () => ["footer"], invalidate() {} },
-		);
-		const dockEntries = (layout.dock as unknown as { entries: Array<{ minSize?: number }> }).entries;
-		renderer.setLayoutRoot(layout.root);
-		const split = createSplitPaneController();
-		split.attach(
-			stableTuiReference(() => renderer),
-			sidebarComponent,
-		);
-		split.show();
-		expect(dockEntries.at(-1)?.minSize).toBe(0);
-
-		(renderer.terminal as { columns: number }).columns = 91;
-		renderer.render(91);
-		expect(dockEntries.at(-1)?.minSize).toBe(1);
-		(renderer.terminal as { columns: number }).columns = 120;
-		renderer.render(120);
-		expect(dockEntries.at(-1)?.minSize).toBe(0);
-
-		split.hide();
-		expect(dockEntries.at(-1)?.minSize).toBe(1);
-		split.show();
-		split.dispose();
-		expect(dockEntries.at(-1)?.minSize).toBe(1);
-	});
-
 	it("keeps clipboard selection inside the pane where dragging began", async () => {
 		let deliverInput: ((data: string) => void) | undefined;
 		const copied: string[] = [];

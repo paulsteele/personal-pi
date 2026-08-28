@@ -24,7 +24,7 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 describe("local package contract", () => {
 	it("publishes a Pi extension with compatible peers", () => {
 		expect(pkg.name).toBe("@paulsteele/pi-atelier");
-		expect(pkg.version).toBe("1.0.0");
+		expect(pkg.version).toBe("1.0.1");
 		expect(pkg.private).toBe(true);
 		expect(pkg.description).toBe("Personal source-owned Pi Atelier fork");
 		expect(pkg.keywords).toContain("pi-package");

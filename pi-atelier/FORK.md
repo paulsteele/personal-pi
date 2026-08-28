@@ -32,27 +32,27 @@ presentation. Width is fixed at 44 preferred/28 minimum columns, with a 64-colum
 and auto-hide below 92 terminal columns.
 
 **Invariant:** fullscreen mouse selection begins in either the transcript or sidebar `ScrollView` and
-cannot include text from the other pane. The Sidebar renders its complete panel stack; its contained
-`ScrollView` owns clipping and wheel scrolling rather than dropping panels to fit the viewport.
+cannot include text from the other pane. The Sidebar renders the complete Activity history; its
+contained `ScrollView` owns clipping and wheel scrolling rather than dropping rows to fit the viewport.
 
-### 2. Responsive zero-height footer
+### 2. Responsive native telemetry footer
 
 Primary files:
 
-- `src/split-pane.ts`
 - `src/footer.ts`
 - `extensions/index.ts`
 - footer/split/extension tests
 
-While the sidebar is actually presented, Atelier's registered footer renders no lines. In fullscreen,
-a guarded Pi 0.84 layout-node adapter also changes the known footer stack entry's `minSize` from one
-to zero and restores it when the sidebar hides, the renderer is unsupported, or Atelier disposes.
-When the sidebar is manually or responsively hidden, the complete Atelier rail returns.
+Atelier's registered footer is a single-line Nerd Font overview for Agent/model state, Git churn,
+session identity, context, usage, Plan, alerts, and external contribution summaries. It remains in
+Pi's native dock while the Activity Sidebar is presented. The existing guarded Pi 0.84 adapter only
+owns the transcript/sidebar split and leaves unknown layouts untouched.
 
-**Invariant:** never guess at an unfamiliar Pi layout. The footer-slot adapter requires the exact
-Pi 0.84 root/dock `VStack` shape and otherwise leaves layout untouched.
+**Invariant:** keep the overview in Pi's supported native footer and do not relocate editor/footer
+components during high-frequency renders. The private fullscreen adapter owns only the horizontal
+transcript/sidebar split.
 
-### 3. Native Plannotator phase/progress panel
+### 3. Native Plannotator phase/progress summary
 
 Primary files:
 
@@ -61,10 +61,10 @@ Primary files:
 - Plannotator and extension tests
 
 The fork owns `plannotator:progress`, reconstructing the active branch's durable Plannotator state.
-Planning displays its mode and a validated known plan path; execution displays checklist progress and
-replays `[DONE:n]` markers after the latest execution boundary. It clears only the duplicate
-`plannotator-progress` widget. When the sidebar is absent, Plannotator's status is a required Atelier
-footer item and cannot be dropped by responsive pressure.
+Planning and execution progress are summarized in the footer, which remains visible beside the
+Activity-only sidebar. The integration replays `[DONE:n]` markers after the latest execution boundary
+and clears only the duplicate `plannotator-progress` widget. Plannotator's status is required in the
+responsive footer and is preserved until the final width clamp at extremely narrow widths.
 
 **Invariant:** paths must resolve through existing ancestors, remain inside `ctx.cwd`, and use Markdown
 extensions. Never trust session/tool-call paths directly.
@@ -130,8 +130,8 @@ Maxis-style working phrases are removed from runtime state and both UI surfaces.
 Upstream `src/menu.ts` and `src/settings-workspace.ts`, their tests, all shortcuts, display editor,
 tool-list editor, model/tool/session actions, and enable/disable flows are removed. The sole command is
 `/atelier [on|off|toggle]`. There is no `pi-atelier.json`; Sidebar and footer behavior is fixed in
-source. The fallback footer always includes activity, model/thinking, Git, extension statuses,
-usage/cost/cache, response performance, and context, subject only to responsive dropping.
+source. The persistent footer uses a single responsive Nerd Font strip for activity, model/thinking,
+Git, session, extension summaries, usage/cost/cache, response performance, and context.
 
 ## Reconcile a future upstream release
 
@@ -184,7 +184,7 @@ Check:
 
 1. transcript and sidebar selection remain pane-local;
 2. sidebar show/hide, fixed-width narrow auto-hide, scrolling, `/reload`, and shutdown;
-3. zero footer rows while the sidebar is presented and full fallback footer otherwise;
+3. one native footer row while the sidebar is shown, hidden, or responsively unavailable;
 4. Plannotator idle, planning, denied/resubmitted, executing, completed, `/tree`, and `/resume` states;
 5. no Atelier notification control or native notification process; and
 6. exactly one `/atelier` command/runtime is loaded.

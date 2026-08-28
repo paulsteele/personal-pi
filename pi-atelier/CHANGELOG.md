@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.0.1 — 2026-08-28
+
+- Replace the boxed dashboard with an Activity-only Sidebar: run status, response performance, auto-mode decisions, tool history, and permission provenance use the full pane without unrelated overview sections.
+- Replace the fallback status rail with a persistent single-line Nerd Font overview for Agent/model state, Git churn, session identity, context, usage, Plan, alerts, and external contribution summaries.
+- Keep the telemetry footer visible in Pi's native dock while the Activity Sidebar is presented.
+- Apply semantic colors to primary values and Git additions/removals.
+
+## 1.0.0 — 2026-08-27
+
 - Remove randomized Maxis-style activity phrases; the Sidebar and fallback footer now report only `READY` or `WORKING`.
 - Merge auto-mode and permission-system observations into the Activity timeline: spaced Nerd Font policy/robot/human badges pack into the relevant tool row, repeated routine allows collapse to counted badges, exception details and overflow use follow-up rows, distinct source colors remain, and standalone checks stay visible for uncorrelated skill/forwarded requests.
 - Retain the latest 12 completed tools across agent runs in one session, and render bounded denial/unsure reasons without a separate Auto Mode sidebar panel.
