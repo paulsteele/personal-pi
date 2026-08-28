@@ -142,10 +142,10 @@ describe("run activity tracker transitions", () => {
 		expect(onChange).toHaveBeenCalledTimes(5);
 	});
 
-	it("keeps newest-first recent history capped at twelve entries", () => {
+	it("keeps newest-first recent history capped at thirty-six entries", () => {
 		const tracker = createRunActivityTracker({ cwd: "/repo" });
 		tracker.startRun(0);
-		for (let index = 1; index <= 4; index += 1) {
+		for (let index = 1; index <= 40; index += 1) {
 			tracker.startTool(
 				{
 					type: "tool_execution_start",
@@ -167,12 +167,10 @@ describe("run activity tracker transitions", () => {
 			);
 		}
 
-		expect(tracker.getSnapshot().recentTools.map((tool) => tool.id)).toEqual([
-			"tool-4",
-			"tool-3",
-			"tool-2",
-			"tool-1",
-		]);
+		const recentIds = tracker.getSnapshot().recentTools.map((tool) => tool.id);
+		expect(recentIds).toHaveLength(36);
+		expect(recentIds.slice(0, 4)).toEqual(["tool-40", "tool-39", "tool-38", "tool-37"]);
+		expect(recentIds.at(-1)).toBe("tool-5");
 	});
 
 	it("ignores unknown completion IDs without notifying", () => {

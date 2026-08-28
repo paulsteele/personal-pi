@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Triple the Activity Sidebar's retained tool history from 12 to 36 entries; its contained ScrollView provides access beyond the visible pane.
+
 ## 1.0.1 — 2026-08-28
 
 - Replace the boxed dashboard with an Activity-only Sidebar: run status, response performance, auto-mode decisions, tool history, and permission provenance use the full pane without unrelated overview sections.

@@ -79,7 +79,7 @@ export interface RunActivityTrackerOptions {
 }
 
 const MAX_SUMMARY_COLUMNS = 26;
-const MAX_RECENT_TOOLS = 12;
+const MAX_RECENT_TOOLS = 36;
 const MAX_STANDALONE_PERMISSIONS = 12;
 const MAX_PENDING_PERMISSIONS = 96;
 
