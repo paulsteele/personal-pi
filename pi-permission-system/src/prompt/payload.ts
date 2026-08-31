@@ -31,8 +31,10 @@ export interface PermissionPromptEvidence {
   readonly label: string;
   readonly text: string;
   readonly detail: string | null;
-  /** Paint this decision-relevant command/path section with the warning color. */
+  /** Legacy warning marker retained for already-persisted request entries. */
   readonly highlighted?: boolean;
+  /** Semantic display treatment; policy allows use the same color as Activity policy decisions. */
+  readonly color?: "policy_allow" | "warning";
 }
 
 export interface RichPromptFacts {
@@ -49,6 +51,8 @@ export interface RichPromptFacts {
     readonly text: string;
     readonly context?: BashCommandContext;
     readonly executedUnit?: string;
+    /** Per-unit policy result, used for display only; it never affects review. */
+    readonly policyState?: "allow" | "ask" | "deny";
   }[];
   readonly paths?: readonly {
     readonly value: string;
@@ -66,12 +70,13 @@ export function buildPermissionPromptPayload(facts: RichPromptFacts): Permission
     text: string | null | undefined,
     detail: string | null = null,
     highlighted = false,
+    color?: PermissionPromptEvidence["color"],
   ): void => {
     if (!text?.trim()) return;
     const key = `${label}\0${text}\0${detail ?? ""}`;
     if (seen.has(key)) return;
     seen.add(key);
-    evidence.push({ label, text, detail, highlighted });
+    evidence.push({ label, text, detail, highlighted, color });
   };
 
   if (facts.command && facts.command !== facts.value)
@@ -82,7 +87,8 @@ export function buildPermissionPromptPayload(facts: RichPromptFacts): Permission
         unit.context ? `${contextLabel(unit.context)} command` : "command unit",
         unit.text,
         unit.executedUnit ?? null,
-        true,
+        unit.policyState !== "allow",
+        unit.policyState === "allow" ? "policy_allow" : "warning",
       );
   }
   for (const path of facts.paths ?? [])
@@ -149,6 +155,7 @@ export function boundPermissionPromptPayload(
       text: bounded(item.text, 2_000) ?? "",
       detail: bounded(item.detail, 2_000),
       highlighted: item.highlighted,
+      color: item.color,
     })),
   };
 }

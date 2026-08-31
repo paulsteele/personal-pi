@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.2 — 2026-08-31
+
 - Triple the Activity Sidebar's retained tool history from 12 to 36 entries; its contained ScrollView provides access beyond the visible pane.
 
 ## 1.0.1 — 2026-08-28

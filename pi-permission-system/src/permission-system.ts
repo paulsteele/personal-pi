@@ -787,7 +787,13 @@ export default function permissionSystem(pi: ExtensionAPI): void {
         toolName,
         command,
         cwd: ctx.cwd,
-        commandUnits: program?.guardCommands(),
+        commandUnits: program?.guardCommands().map((unit) => ({
+          ...unit,
+          // Presentation only: show units covered by deterministic Bash policy
+          // in the policy color, without changing aggregate policy selection or
+          // any classifier facts/verdict behavior.
+          policyState: checkPolicy(current.config.permission, "bash", unit.text).state,
+        })),
         paths: paths.map((path) => ({
           value: path.value(),
           resolved: path.resolvedAlias(),

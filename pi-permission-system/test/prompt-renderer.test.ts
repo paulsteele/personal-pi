@@ -17,7 +17,10 @@ describe("rich permission prompt", () => {
       toolName: "bash",
       command: "cd app && git push origin main",
       cwd: "/repo",
-      commandUnits: [{ text: "cd app" }, { text: "git push origin main", context: "subshell" }],
+      commandUnits: [
+        { text: "cd app", policyState: "allow" },
+        { text: "git push origin main", context: "subshell", policyState: "ask" },
+      ],
     });
     const rendered = renderPermissionPrompt(payload, 100, theme, false).lines.join("\n");
     expect(rendered).toContain("tool              : bash");
@@ -26,6 +29,8 @@ describe("rich permission prompt", () => {
     expect(rendered).toContain(
       "full command      : <warning>cd app && git push origin main</warning>",
     );
+    expect(rendered).toContain("command unit      : <thinkingLow>cd app</thinkingLow>");
+    expect(rendered).toContain("context           : subshell");
     expect(rendered).toContain("working directory : /repo");
   });
 

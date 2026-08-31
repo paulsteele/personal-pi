@@ -120,6 +120,34 @@ describe("integrated permission system", () => {
     rmSync(h.agentDir, { recursive: true, force: true });
   });
 
+  it("colors deterministic Bash policy allows separately from unresolved units in review prompts", async () => {
+    const h = setup({
+      mode: "tui",
+      permission: { "*": "ask", bash: { "git status": "allow" } },
+    });
+    h.ctx.ui.custom.mockResolvedValueOnce("approve");
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    const result = await h.handlers.get("tool_call")?.(
+      {
+        toolName: "bash",
+        toolCallId: "bash-mixed-review",
+        input: { command: "git status && echo needs-review" },
+      },
+      h.ctx,
+    );
+    expect(result).toEqual({});
+    const request = h.entries[0]?.data as {
+      payload: { evidence: Array<{ text: string; color?: string }> };
+    };
+    expect(request.payload.evidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: "git status", color: "policy_allow" }),
+        expect.objectContaining({ text: "echo needs-review", color: "warning" }),
+      ]),
+    );
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
   it("keeps an already-confirmed note decision authoritative when note input is blank", async () => {
     const h = setup();
     h.ctx.ui.select.mockResolvedValueOnce("a approve + classifier note");

@@ -1,6 +1,10 @@
 # Changelog
 
-## 26.3.1-local.1 — unreleased
+## 1.0.2 — 2026-08-31
+
+- In human review prompts, color Tree-sitter Bash command units covered by deterministic `allow` policy with the policy color, while leaving unresolved units and the reviewed action warning-colored. This is presentation-only and does not change classifier inputs or decisions.
+
+## 1.0.1 — 2026-08-28
 
 - Established a source-owned personal fork from `pi-permission-system-v26.3.1`.
 - Imported the hardened deterministic tool-call guard work as the migration baseline.

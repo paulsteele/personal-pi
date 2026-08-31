@@ -14,6 +14,8 @@ export interface RenderedPermissionPrompt {
 interface Fact {
   label: string;
   text: string;
+  color?: "policy_allow" | "warning";
+  /** Backward compatibility for request entries persisted before semantic colors. */
   highlighted?: boolean;
 }
 
@@ -37,7 +39,11 @@ export function renderPermissionPrompt(
   const blocks = bounded.map((fact) => {
     const indent = " ".repeat(labelWidth + 3);
     return fact.text.split("\n").flatMap((line, index) => {
-      const value = fact.highlighted && theme ? theme.fg("warning", line) : line;
+      const color = fact.color ?? (fact.highlighted ? "warning" : undefined);
+      const value =
+        color && theme
+          ? theme.fg(color === "policy_allow" ? "thinkingLow" : "warning", line)
+          : line;
       const rendered = index === 0 ? `${fact.label.padEnd(labelWidth)} : ${value}` : indent + value;
       return fitLine(rendered, width);
     });
@@ -76,15 +82,16 @@ function promptFacts(payload: PermissionPromptPayload): Fact[] {
   if (payload.reason && !payload.review.reason)
     facts.push({ label: "reason", text: payload.reason });
   if (payload.value && payload.value !== payload.toolName)
-    facts.push({ label: valueLabel, text: payload.value, highlighted: true });
+    facts.push({ label: valueLabel, text: payload.value, color: "warning" });
   if (payload.executedUnit && payload.executedUnit !== payload.value)
-    facts.push({ label: "runs", text: payload.executedUnit, highlighted: true });
+    facts.push({ label: "runs", text: payload.executedUnit, color: "warning" });
   if (payload.commandContext)
     facts.push({ label: "context", text: contextText(payload.commandContext) });
   for (const evidence of payload.evidence)
     facts.push({
       label: evidence.label,
       text: evidence.detail ? `${evidence.text} → ${evidence.detail}` : evidence.text,
+      color: evidence.color,
       highlighted: evidence.highlighted,
     });
   return facts;
