@@ -27,6 +27,13 @@ import {
 import { type Config, loadConfig, saveAutoEnabled, saveAutoModel } from "./config.ts";
 import { ReviewLogger } from "./logging.ts";
 import { PathNormalizer } from "./path-normalizer.ts";
+import {
+  type EventBus,
+  emitDecision,
+  emitUiPrompt,
+  type PermissionDecisionEvent,
+} from "./permission-events.ts";
+import { checkPolicy, type PolicyDecision } from "./policy.ts";
 import { presentPermissionPrompt } from "./prompt/component.ts";
 import {
   appendPermissionOutcome,
@@ -38,13 +45,6 @@ import {
   type PermissionPromptPayload,
   type PermissionReview,
 } from "./prompt/payload.ts";
-import {
-  type EventBus,
-  emitDecision,
-  emitUiPrompt,
-  type PermissionDecisionEvent,
-} from "./permission-events.ts";
-import { checkPolicy, type PolicyDecision } from "./policy.ts";
 
 const STATUS_KEY = "auto-mode";
 const REVIEW_LOG = "pi-permission-system-permission-review.jsonl";
@@ -343,7 +343,15 @@ function policyForCall(
     add("path", candidate.path.value(), candidate.path.matchValues());
   for (const external of program?.externalPaths() ?? [])
     add("external_directory", external.value(), external.matchValues());
-  add(command ? "bash" : toolName, command ?? toolName);
+  if (command) {
+    // Gate every executable projection as well as the full source. Compound
+    // units are retained by BashProgram, so explicit inner deny/ask rules
+    // cannot be hidden by control flow or a permissive whole-command match.
+    for (const unit of program?.commands() ?? []) add("bash", unit.text);
+    add("bash", command);
+  } else {
+    add(toolName, toolName);
+  }
   const rank = (state: PolicyDecision["state"]): number =>
     state === "deny" ? 2 : state === "ask" ? 1 : 0;
   return checks.reduce((worst, candidate) =>
@@ -738,6 +746,7 @@ export default function permissionSystem(pi: ExtensionAPI): void {
             command,
             workdir: null,
             parseComplete: program?.isParseComplete() ?? false,
+            unresolvedPathExpression: program?.hasUnresolvedPathExpression() ?? false,
             commands: (program?.guardCommands() ?? []).map((unit) => ({
               text: unit.text,
               argv: unit.argv ?? null,

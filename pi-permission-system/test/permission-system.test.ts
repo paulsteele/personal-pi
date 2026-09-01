@@ -316,6 +316,97 @@ describe("integrated permission system", () => {
     rmSync(h.agentDir, { recursive: true, force: true });
   });
 
+  it("routes the exact Bash loop through the sensitive-path guard without classification", async () => {
+    const h = setup({
+      enabledByDefault: true,
+      modelReply: {
+        content: [{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "allow" } }],
+      },
+      branch: [{ type: "message", message: { role: "user", content: "yes read my public keys" } }],
+    });
+    h.ctx.ui.select.mockResolvedValueOnce("y approve once");
+    const autoEvents: any[] = [];
+    h.events.on("auto-mode:decision", (event) => autoEvents.push(event));
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    const result = await h.handlers.get("tool_call")?.(
+      {
+        toolName: "bash",
+        toolCallId: "loop-sensitive",
+        input: { command: 'for key in "$HOME"/.ssh/*.pub; do cat "$key"; done' },
+      },
+      h.ctx,
+    );
+    expect(result).toEqual({});
+    expect(h.ctx.ui.select.mock.calls[0]?.[0]).toContain("Security check");
+    expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
+    expect(autoEvents.at(-1)).toMatchObject({
+      mechanism: "guard",
+      category: "sensitive_path",
+      verdict: "require_human",
+    });
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("blocks the exact Bash loop headlessly before classification", async () => {
+    const h = setup({
+      enabledByDefault: true,
+      modelReply: {
+        content: [{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "allow" } }],
+      },
+    });
+    h.ctx.hasUI = false;
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    const result = await h.handlers.get("tool_call")?.(
+      {
+        toolName: "bash",
+        toolCallId: "headless-loop-sensitive",
+        input: { command: 'for key in "$HOME"/.ssh/*.pub; do cat "$key"; done' },
+      },
+      h.ctx,
+    );
+    expect(result).toMatchObject({ block: true });
+    expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("enforces deterministic command guards hidden in compound syntax", async () => {
+    const h = setup({ enabledByDefault: true });
+    h.ctx.ui.select.mockResolvedValueOnce("n deny");
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    const result = await h.handlers.get("tool_call")?.(
+      {
+        toolName: "bash",
+        toolCallId: "compound-push",
+        input: { command: "if true; then git push; fi" },
+      },
+      h.ctx,
+    );
+    expect(result).toMatchObject({ block: true });
+    expect(h.ctx.ui.select.mock.calls[0]?.[0]).toContain("Security check");
+    expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("keeps an inner Bash policy deny terminal inside a compound command", async () => {
+    const h = setup({
+      enabledByDefault: true,
+      permission: { "*": "allow", bash: { "*": "allow", "git push": "deny" } },
+    });
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    const result = await h.handlers.get("tool_call")?.(
+      {
+        toolName: "bash",
+        toolCallId: "compound-policy-deny",
+        input: { command: "if true; then git push; fi" },
+      },
+      h.ctx,
+    );
+    expect(result).toMatchObject({ block: true, reason: "Denied by permission policy." });
+    expect(h.ctx.ui.select).not.toHaveBeenCalled();
+    expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
   it("fails closed for a headless sensitive-path escalation", async () => {
     const home = process.env.HOME ?? "/Users/test";
     const h = setup({ enabledByDefault: true });

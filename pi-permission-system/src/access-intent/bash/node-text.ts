@@ -1,5 +1,5 @@
 import type { TSNode } from "./parser.ts";
-import { resolvePlainVariableExpansion } from "./shell-variable-expansion.ts";
+import { plainExpansionName, resolvePlainVariableExpansion } from "./shell-variable-expansion.ts";
 
 /**
  * Node types whose text content is never a command argument, so no path
@@ -30,7 +30,10 @@ export const ARG_NODE_TYPES = new Set(["word", "concatenation", "string", "raw_s
  *   else `.text` (see `shell-variable-expansion.ts`)
  * - other           → `.text` as fallback
  */
-export function resolveNodeText(node: TSNode): string {
+export function resolveNodeText(
+  node: TSNode,
+  resolveLocal?: (name: string) => readonly string[] | null | undefined,
+): string {
   switch (node.type) {
     case "word":
       return node.text;
@@ -51,7 +54,7 @@ export function resolveNodeText(node: TSNode): string {
         if (!child) continue;
         // Skip the literal `"` delimiters
         if (child.type === '"') continue;
-        result += resolveNodeText(child);
+        result += resolveNodeText(child, resolveLocal);
       }
       return result;
     }
@@ -59,17 +62,62 @@ export function resolveNodeText(node: TSNode): string {
       return node.text;
     case "simple_expansion":
     case "expansion":
-      return resolvePlainVariableExpansion(node) ?? node.text;
+      return resolvePlainVariableExpansion(node, resolveLocal) ?? node.text;
     case "concatenation": {
       let result = "";
       for (let i = 0; i < node.childCount; i++) {
         const child = node.child(i);
         if (!child) continue;
-        result += resolveNodeText(child);
+        result += resolveNodeText(child, resolveLocal);
       }
       return result;
     }
     default:
       return node.text;
   }
+}
+
+/**
+ * Resolve all bounded values of an argument node under local shell bindings.
+ * Returns `null` when an expansion is not statically known or the cartesian
+ * product would exceed `limit`.
+ */
+export function resolveNodeTextAlternatives(
+  node: TSNode,
+  resolveLocal: (name: string) => readonly string[] | null | undefined,
+  limit = 16,
+): string[] | null {
+  if (node.type === "simple_expansion" || node.type === "expansion") {
+    const name = plainExpansionName(node);
+    if (name === null) return null;
+    const local = resolveLocal(name);
+    if (local !== undefined) return bounded(local, limit);
+    const ambient = resolvePlainVariableExpansion(node);
+    return ambient === null ? null : [ambient];
+  }
+  if (node.type === "raw_string") {
+    const text = node.text;
+    return [
+      text.length >= 2 && text.startsWith("'") && text.endsWith("'") ? text.slice(1, -1) : text,
+    ];
+  }
+  if (node.type === "word" || node.type === "string_content") return [node.text];
+  if (node.type !== "string" && node.type !== "concatenation") {
+    return [resolveNodeText(node)];
+  }
+
+  let values = [""];
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i);
+    if (!child || child.type === '"') continue;
+    const parts = resolveNodeTextAlternatives(child, resolveLocal, limit);
+    if (parts === null || values.length * parts.length > limit) return null;
+    values = values.flatMap((prefix) => parts.map((part) => prefix + part));
+  }
+  return values;
+}
+
+function bounded(values: readonly string[] | null | undefined, limit: number): string[] | null {
+  if (values == null || values.length === 0 || values.length > limit) return null;
+  return [...new Set(values)].slice(0, limit);
 }

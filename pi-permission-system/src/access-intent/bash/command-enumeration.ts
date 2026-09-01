@@ -51,6 +51,22 @@ export interface BashCommand {
  */
 const COMMAND_ENUM_DESCEND = new Set(["program", "list", "pipeline", "redirected_statement"]);
 
+/** Compound syntax whose outer unit and executable descendants are both kept. */
+const COMMAND_ENUM_COMPOUND = new Set([
+  "compound_statement",
+  "if_statement",
+  "elif_clause",
+  "else_clause",
+  "while_statement",
+  "for_statement",
+  "c_style_for_statement",
+  "case_statement",
+  "case_item",
+  "do_group",
+  "function_definition",
+  "negated_command",
+]);
+
 /**
  * Named node types abandoned during command enumeration: they are neither
  * commands nor able to host one, so nothing in their subtree ever runs.
@@ -134,8 +150,15 @@ function collectCommandsInto(
     return;
   }
 
-  // Any other named statement (compound_statement `{ … }`, if/while/for/case,
-  // function_definition): emit whole, do not descend — deferred (#306).
+  if (COMMAND_ENUM_COMPOUND.has(node.type)) {
+    // Preserve the whole unit for never-weaker policy matching, then expose
+    // every executable inner command to argv-based deterministic guards.
+    out.push(makeUnit(node.text, context));
+    descendCompoundCommands(node, context, out);
+    return;
+  }
+
+  // Unknown named syntax remains conservatively represented as one unit.
   out.push(makeUnit(node.text, context));
 }
 
@@ -223,6 +246,31 @@ function descendCommandChildren(
   for (let i = 0; i < node.childCount; i++) {
     const child = node.child(i);
     if (child) collectCommandsInto(child, context, out);
+  }
+}
+
+function descendCompoundCommands(
+  node: TSNode,
+  context: BashCommandContext | undefined,
+  out: BashCommand[],
+): void {
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i);
+    if (!child?.isNamed) continue;
+    // Values, loop variables, case patterns, and arithmetic clauses do not
+    // execute as commands. Statement/container nodes are recursively handled.
+    if (
+      child.type === "variable_name" ||
+      child.type === "word" ||
+      child.type === "string" ||
+      child.type === "raw_string" ||
+      child.type === "concatenation" ||
+      child.type.endsWith("expression")
+    ) {
+      collectHostedCommands(child, out);
+      continue;
+    }
+    collectCommandsInto(child, context, out);
   }
 }
 

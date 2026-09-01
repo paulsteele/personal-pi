@@ -24,7 +24,7 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 describe("local package contract", () => {
 	it("publishes a Pi extension with compatible peers", () => {
 		expect(pkg.name).toBe("@paulsteele/pi-atelier");
-		expect(pkg.version).toBe("1.0.2");
+		expect(pkg.version).toBe("1.0.3");
 		expect(pkg.private).toBe(true);
 		expect(pkg.description).toBe("Personal source-owned Pi Atelier fork");
 		expect(pkg.keywords).toContain("pi-package");
@@ -42,6 +42,8 @@ describe("local package contract", () => {
 		expect(readme).toContain("/atelier on|off|toggle");
 		expect(readme).toContain("hides when the terminal is too narrow");
 		expect(readme).toContain("44-column");
+		expect(readme).toContain("upper half");
+		expect(readme).toContain("lower half");
 		expect(readme).not.toContain("Ctrl+Shift+R");
 	});
 

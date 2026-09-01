@@ -16,6 +16,7 @@ const expectedExtensions = [
   "./code-blocks/index.ts",
   "./desktop-notifications/index.ts",
   "./pi-permission-system/src/index.ts",
+  "./progress-observer/index.ts",
   "./pi-atelier/extensions/index.ts",
 ];
 
@@ -54,9 +55,13 @@ describe("Pi package integration", () => {
       "code-blocks",
       "desktop-notifications",
       "pi-permission-system",
+      "progress-observer",
       "pi-atelier",
     ]);
     expect(manifest.pi.extensions.indexOf("./pi-permission-system/src/index.ts")).toBeLessThan(
+      manifest.pi.extensions.indexOf("./pi-atelier/extensions/index.ts"),
+    );
+    expect(manifest.pi.extensions.indexOf("./progress-observer/index.ts")).toBeLessThan(
       manifest.pi.extensions.indexOf("./pi-atelier/extensions/index.ts"),
     );
   });
@@ -95,6 +100,15 @@ describe("Pi package integration", () => {
     unsubscribe();
     publisher.dispose();
     expect(events.count("auto-mode:discover")).toBe(0);
+  });
+
+  test("loads the independent progress observer before its Atelier consumer", () => {
+    const observerSource = readFileSync(resolve(root, "progress-observer/index.ts"), "utf8");
+    const atelierSource = readFileSync(resolve(root, "pi-atelier/extensions/index.ts"), "utf8");
+    expect(observerSource).toContain('pi.on("turn_end"');
+    expect(observerSource).toContain('pi.registerCommand("observer"');
+    expect(atelierSource).toContain('pi.events.on("progress-observer:state"');
+    expect(atelierSource).not.toContain("modelRegistry.complete");
   });
 
   test("keeps desktop notifications separate from Atelier", () => {

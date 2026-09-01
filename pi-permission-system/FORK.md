@@ -55,6 +55,7 @@ auto mode **141 tests**, Atelier **12 files / 222 tests**, and patch harness **4
 7. Classifier notes are separate versioned non-context session entries. They influence later model review only, never guards/policy, and their text never enters Activity, transcript requests, or JSONL.
 8. Activity and permission UI share provenance glyphs: `󰚩` classifier, `󰀄` human, and `󰒃` security/policy.
 9. There is exactly one local permission/auto owner at runtime.
+10. Bash compound syntax cannot hide deterministic path/command guards or an explicit inner Bash policy deny. The local projection performs bounded same-program scalar assignment dataflow; unresolved path-bearing expansions require fresh human approval instead of reaching the classifier.
 
 ## Selective upstream adoption
 

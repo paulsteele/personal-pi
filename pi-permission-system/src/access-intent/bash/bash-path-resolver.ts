@@ -2,7 +2,7 @@ import type { PathNormalizer } from "../../path-normalizer.ts";
 import { isSafeSystemPath } from "../../safe-system-paths.ts";
 import type { AccessPath } from "../access-path.ts";
 import { normalizePathPolicyLiteral } from "../path-normalization.ts";
-import { ARG_NODE_TYPES, SKIP_SUBTREE_TYPES } from "./node-text.ts";
+import { ARG_NODE_TYPES, resolveNodeTextAlternatives, SKIP_SUBTREE_TYPES } from "./node-text.ts";
 import type { TSNode } from "./parser.ts";
 import {
   classifyBareTokenCandidate,
@@ -41,6 +41,12 @@ interface PathCandidate {
   readonly base: EffectiveBase;
 }
 
+type ShellBindings = Map<string, readonly string[] | null>;
+interface ProjectionState {
+  readonly base: EffectiveBase;
+  readonly bindings: ShellBindings;
+}
+
 // ── Public output types ──────────────────────────────────────────────────────
 
 export interface BashPathRuleCandidate {
@@ -59,6 +65,8 @@ export interface ResolvedBashPaths {
   readonly externalPaths: readonly AccessPath[];
   /** Every path-rule token paired with its cd-aware policy values (#393). */
   readonly ruleCandidates: readonly BashPathRuleCandidate[];
+  /** A path-shaped access operand still contains unresolved shell expansion. */
+  readonly unresolvedPathExpression: boolean;
 }
 
 // ── Walk-time constants ──────────────────────────────────────────────────────
@@ -90,6 +98,8 @@ const UNKNOWN_BASE: EffectiveBase = { kind: "unknown" };
  * session normalizer).
  */
 export class BashPathResolver {
+  private unresolvedPathExpression = false;
+
   constructor(
     private readonly normalizer: PathNormalizer,
     private readonly workdir?: string,
@@ -107,12 +117,22 @@ export class BashPathResolver {
    * normalizer, so a `workdir` outside the cwd does not widen the sandbox.
    */
   resolve(rootNode: TSNode): ResolvedBashPaths {
+    this.unresolvedPathExpression = false;
     const initialBase =
       this.workdir === undefined ? CWD_BASE : this.deriveBaseFromCdTarget(CWD_BASE, this.workdir);
-    const candidates = this.collectPathCandidates(rootNode, initialBase);
+    // Keep the mature cd/pipeline-aware stateless projection and augment it
+    // with local-binding/control-flow candidates. Final projection deduplicates
+    // overlap between the two passes.
+    const candidates = [
+      ...this.collectPathCandidates(rootNode, initialBase),
+      ...this.collectStatefulCandidates(rootNode, initialBase),
+    ];
     return {
       externalPaths: this.withWorkdirExternal(this.projectExternalPaths(candidates)),
       ruleCandidates: this.projectRuleCandidates(candidates),
+      unresolvedPathExpression:
+        this.unresolvedPathExpression ||
+        candidates.some(({ token }) => /[$`]/.test(token) && /(?:\/|\\)/.test(token)),
     };
   }
 
@@ -153,6 +173,162 @@ export class BashPathResolver {
     const out: PathCandidate[] = [];
     this.walkForCandidates(rootNode, initialBase, out);
     return out;
+  }
+
+  /**
+   * A second, execution-aware pass for shell constructs whose operands depend
+   * on local scalar state. The original pass remains the broad stateless
+   * collector; projection deduplication makes overlap harmless.
+   */
+  private collectStatefulCandidates(rootNode: TSNode, initialBase: EffectiveBase): PathCandidate[] {
+    const out: PathCandidate[] = [];
+    this.walkStateful(rootNode, { base: initialBase, bindings: new Map() }, out);
+    return out;
+  }
+
+  private walkStateful(
+    node: TSNode,
+    state: ProjectionState,
+    out: PathCandidate[],
+  ): ProjectionState {
+    const resolver = (name: string): readonly string[] | null | undefined =>
+      state.bindings.get(name);
+    switch (node.type) {
+      case "program":
+      case "list":
+      case "do_group":
+      case "compound_statement":
+        return this.walkStatefulSequence(node, state, out);
+      case "variable_assignment":
+        return { ...state, bindings: updateAssignment(node, state.bindings) };
+      case "variable_assignments":
+      case "declaration_command": {
+        let bindings = new Map(state.bindings);
+        forEachNamedChild(node, (child) => {
+          if (child.type === "variable_assignment") bindings = updateAssignment(child, bindings);
+        });
+        return { ...state, bindings };
+      }
+      case "unset_command": {
+        const bindings = new Map(state.bindings);
+        forEachNamedChild(node, (child) => {
+          if (child.type === "variable_name") bindings.set(child.text, null);
+        });
+        return { ...state, bindings };
+      }
+      case "command": {
+        const tokens = collectCommandTokens(node, resolver);
+        if (hasUnresolvedPathToken(tokens)) this.unresolvedPathExpression = true;
+        tagTokens(tokens, state.base, out);
+        return { ...state, base: this.foldCd(node, state.base) };
+      }
+      case "file_redirect":
+        tagTokens(collectRedirectTokens(node, resolver), state.base, out);
+        return state;
+      case "heredoc_redirect":
+      case "herestring_redirect":
+      case "heredoc_body":
+        tagTokens(collectPathCandidateTokens(node, resolver), state.base, out);
+        return state;
+      case "redirected_statement":
+        return this.walkStatefulSequence(node, state, out);
+      case "for_statement":
+        return this.walkForStatement(node, state, out);
+      case "if_statement":
+      case "while_statement":
+      case "case_statement":
+        return this.walkBranchingStatement(node, state, out);
+      case "c_style_for_statement":
+        return this.walkBranchingStatement(node, state, out);
+      case "test_command":
+        tagTokens(collectFilesystemTestTokens(node, resolver), state.base, out);
+        return state;
+      case "subshell":
+      case "pipeline":
+      case "function_definition":
+        this.walkStatefulChildren(node, cloneState(state), out);
+        return state;
+      default:
+        this.walkStatefulChildren(node, state, out);
+        return state;
+    }
+  }
+
+  private walkStatefulSequence(
+    node: TSNode,
+    state: ProjectionState,
+    out: PathCandidate[],
+  ): ProjectionState {
+    let current = state;
+    for (let i = 0; i < node.childCount; i++) {
+      const child = node.child(i);
+      if (!child?.isNamed || SKIP_SUBTREE_TYPES.has(child.type)) continue;
+      const after = this.walkStateful(child, current, out);
+      current = isBackgrounded(node, i) ? current : after;
+    }
+    return current;
+  }
+
+  private walkStatefulChildren(
+    node: TSNode,
+    state: ProjectionState,
+    out: PathCandidate[],
+  ): ProjectionState {
+    let current = state;
+    forEachNamedChild(node, (child) => {
+      if (!SKIP_SUBTREE_TYPES.has(child.type)) current = this.walkStateful(child, current, out);
+    });
+    return current;
+  }
+
+  private walkForStatement(
+    node: TSNode,
+    state: ProjectionState,
+    out: PathCandidate[],
+  ): ProjectionState {
+    const resolver = (name: string): readonly string[] | null | undefined =>
+      state.bindings.get(name);
+    let variable: string | null = null;
+    const values: string[] = [];
+    let body: TSNode | null = null;
+    forEachNamedChild(node, (child) => {
+      if (child.type === "variable_name" && variable === null) variable = child.text;
+      else if (child.type === "do_group") body = child;
+      else if (ARG_NODE_TYPES.has(child.type)) {
+        const resolved = resolveNodeTextAlternatives(child, resolver);
+        const alternatives = resolved ?? [child.text];
+        values.push(...alternatives);
+        // Expanding a glob to form the iteration list reads that directory;
+        // a non-glob literal is only data until the loop body uses it.
+        if (/[*?[]/.test(child.text)) tagTokens(alternatives, state.base, out);
+      }
+    });
+    if (!body || !variable) return state;
+    const loopBindings = new Map(state.bindings);
+    loopBindings.set(
+      variable,
+      values.length > 0 && values.length <= 16 ? [...new Set(values)] : null,
+    );
+    const after = this.walkStateful(body, { ...state, bindings: loopBindings }, out);
+    return { ...state, bindings: mergeBindings([state.bindings, after.bindings]) };
+  }
+
+  private walkBranchingStatement(
+    node: TSNode,
+    state: ProjectionState,
+    out: PathCandidate[],
+  ): ProjectionState {
+    // Thread one conservative execution through all executable children so an
+    // assignment followed by an access in the same arm/body is visible. Merge
+    // that outcome with the entry state because a branch/loop may not execute.
+    let current = cloneState(state);
+    forEachNamedChild(node, (child) => {
+      // Case subjects/pattern values and arithmetic expressions are data, not
+      // filesystem access. Executable statement containers are still walked.
+      if (ARG_NODE_TYPES.has(child.type) || child.type === "variable_name") return;
+      current = this.walkStateful(child, current, out);
+    });
+    return { ...state, bindings: mergeBindings([state.bindings, current.bindings]) };
   }
 
   /**
@@ -557,6 +733,119 @@ export class BashPathResolver {
  * operator (`&`) — distinct from the `&&` / `||` / `;` current-shell
  * separators.
  */
+function cloneState(state: ProjectionState): ProjectionState {
+  return { base: state.base, bindings: new Map(state.bindings) };
+}
+
+function forEachNamedChild(node: TSNode, visit: (child: TSNode) => void): void {
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i);
+    if (child?.isNamed) visit(child);
+  }
+}
+
+function updateAssignment(node: TSNode, source: ShellBindings): ShellBindings {
+  const bindings = new Map(source);
+  let name: string | null = null;
+  let value: TSNode | null = null;
+  forEachNamedChild(node, (child) => {
+    if (child.type === "variable_name" && name === null) name = child.text;
+    else if (value === null) value = child;
+  });
+  if (!name) return bindings;
+  const values = value
+    ? resolveNodeTextAlternatives(value, (variable) => bindings.get(variable))
+    : null;
+  bindings.set(name, values && values.length <= 16 ? [...new Set(values)] : null);
+  return bindings;
+}
+
+function mergeBindings(branches: readonly ShellBindings[]): ShellBindings {
+  const names = new Set(branches.flatMap((branch) => [...branch.keys()]));
+  const merged: ShellBindings = new Map();
+  for (const name of names) {
+    const values: string[] = [];
+    let unknown = false;
+    for (const branch of branches) {
+      const branchValues = branch.get(name);
+      if (!branchValues) {
+        unknown = true;
+        break;
+      }
+      values.push(...branchValues);
+    }
+    const unique = [...new Set(values)];
+    merged.set(name, unknown || unique.length > 16 ? null : unique);
+  }
+  return merged;
+}
+
+function hasUnresolvedPathToken(tokens: readonly string[]): boolean {
+  // Command-aware collection has already removed command names, pattern/script
+  // positionals, and consumed non-file option values. A surviving expansion is
+  // therefore an access-bearing operand whose value remains opaque.
+  return tokens.some((token) => /[$`]/.test(token));
+}
+
+const FILE_UNARY_TESTS = new Set([
+  "-a",
+  "-b",
+  "-c",
+  "-d",
+  "-e",
+  "-f",
+  "-g",
+  "-h",
+  "-k",
+  "-L",
+  "-N",
+  "-O",
+  "-p",
+  "-r",
+  "-s",
+  "-S",
+  "-u",
+  "-w",
+  "-x",
+]);
+const FILE_BINARY_TESTS = new Set(["-ef", "-nt", "-ot"]);
+
+function collectFilesystemTestTokens(
+  node: TSNode,
+  resolveLocal: (name: string) => readonly string[] | null | undefined,
+): string[] {
+  const tokens: string[] = [];
+  const walk = (current: TSNode): void => {
+    if (current.type === "unary_expression") {
+      const children = namedChildren(current);
+      const operator = children.find((child) => child.type === "test_operator")?.text;
+      if (operator && FILE_UNARY_TESTS.has(operator)) {
+        const operand = children.find((child) => ARG_NODE_TYPES.has(child.type));
+        const values = operand && resolveNodeTextAlternatives(operand, resolveLocal);
+        if (values) tokens.push(...values);
+      }
+    } else if (current.type === "binary_expression") {
+      const children = namedChildren(current);
+      const operator = children.find((child) => child.type === "test_operator")?.text;
+      if (operator && FILE_BINARY_TESTS.has(operator)) {
+        for (const operand of children.filter((child) => ARG_NODE_TYPES.has(child.type))) {
+          const values = resolveNodeTextAlternatives(operand, resolveLocal);
+          if (values) tokens.push(...values);
+        }
+      }
+    }
+    forEachNamedChild(current, walk);
+  };
+  walk(node);
+  return tokens;
+}
+
+function namedChildren(node: TSNode): TSNode[] {
+  const result: TSNode[] = [];
+  forEachNamedChild(node, (child) => result.push(child));
+  return result;
+}
+
 function isBackgrounded(seqNode: TSNode, index: number): boolean {
   const next = seqNode.child(index + 1);
   if (!next || next.isNamed) return false;

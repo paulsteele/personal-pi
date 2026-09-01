@@ -35,7 +35,19 @@ and auto-hide below 92 terminal columns.
 cannot include text from the other pane. The Sidebar renders the complete Activity history; its
 contained `ScrollView` owns clipping and wheel scrolling rather than dropping rows to fit the viewport.
 
-### 2. Responsive native telemetry footer
+### 2. Independent Progress and Activity regions
+
+Primary files:
+
+- `src/sidebar.ts`
+- `src/split-pane.ts`
+- `extensions/index.ts`
+
+The right pane consumes replayable, structurally validated `progress-observer:*` events without importing or owning the observer. The layout assigns explicit equal heights to inferred summary and activity content around a one-row separator, each in its own contained `ScrollView`. A fixed left rail spans the full pane and a fixed horizontal divider separates the independently scrolling regions. State is memory-only and invalid/stale producer events cannot cross session lifecycle boundaries.
+
+**Invariant:** keep Progress explicitly labeled as inferred state and Activity as direct runtime evidence. The observer must remain a separate extension loaded before Atelier. Preserve equal region allocation, fixed non-scrolling dividers, independent scrolling, pane-local selection, and the 44/28-column width behavior.
+
+### 3. Responsive native telemetry footer
 
 Primary files:
 
@@ -52,7 +64,7 @@ owns the transcript/sidebar split and leaves unknown layouts untouched.
 components during high-frequency renders. The private fullscreen adapter owns only the horizontal
 transcript/sidebar split.
 
-### 3. Native Plannotator phase/progress summary
+### 4. Native Plannotator phase/progress summary
 
 Primary files:
 
@@ -62,14 +74,14 @@ Primary files:
 
 The fork owns `plannotator:progress`, reconstructing the active branch's durable Plannotator state.
 Planning and execution progress are summarized in the footer, which remains visible beside the
-Activity-only sidebar. The integration replays `[DONE:n]` markers after the latest execution boundary
+Activity region. The integration replays `[DONE:n]` markers after the latest execution boundary
 and clears only the duplicate `plannotator-progress` widget. Plannotator's status is required in the
 responsive footer and is preserved until the final width clamp at extremely narrow widths.
 
 **Invariant:** paths must resolve through existing ancestors, remain inside `ctx.cwd`, and use Markdown
 extensions. Never trust session/tool-call paths directly.
 
-### 4. No Atelier native completion notifications
+### 5. No Atelier native completion notifications
 
 Primary files:
 
@@ -81,7 +93,7 @@ Primary files:
 The feature, config key, event subscription, process spawning, and tests are removed. The separate
 local `desktop-notifications` extension remains the only desktop notification owner.
 
-### 5. Unified permission activity and auto-mode footer status
+### 6. Unified permission activity and auto-mode footer status
 
 Primary files:
 
@@ -112,7 +124,7 @@ summary counts use the same glyph vocabulary (`󰚩 allow · 󰀄 asked`) and ne
 While the sidebar is hidden, width pressure must never drop the auto-mode footer item: while a
 classifier is approving actions on the operator's behalf, that fact has to stay visible.
 
-### 6. Plain activity labels
+### 7. Plain activity labels
 
 Primary files:
 
@@ -125,7 +137,7 @@ Maxis-style working phrases are removed from runtime state and both UI surfaces.
 
 **Invariant:** do not reintroduce decorative activity phrase lists or randomized status copy.
 
-### 7. Fixed personal feature set; no configuration or resize UI
+### 8. Fixed personal feature set; no configuration or resize UI
 
 Upstream `src/menu.ts` and `src/settings-workspace.ts`, their tests, all shortcuts, display editor,
 tool-list editor, model/tool/session actions, and enable/disable flows are removed. The sole command is
@@ -155,7 +167,7 @@ Use a temporary workspace; do not turn this directory into a nested Git reposito
    - footer ownership and layout structure;
    - panel registry protocol changes;
    - completion-notification code being reintroduced by upstream copies.
-4. Create a clean copy of the new upstream snapshot outside this directory. Reapply the four local
+4. Create a clean copy of the new upstream snapshot outside this directory. Reapply the local
    patches one at a time, preserving their invariants and updating focused tests after each patch.
 5. Diff the candidate against both the new upstream snapshot and this local tree. Do not merely copy
    new upstream files over locally modified files.

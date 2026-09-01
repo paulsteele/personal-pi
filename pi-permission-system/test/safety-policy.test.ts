@@ -42,6 +42,24 @@ it("requires one-shot human approval for generic structured destructive tools", 
     ).kind,
   ).toBe("require_human");
 });
+it("requires human approval for an unresolved path-bearing shell expansion", () => {
+  expect(
+    evaluateSafety(
+      {
+        ...base,
+        shell: {
+          command: 'cat "$UNKNOWN/path"',
+          workdir: null,
+          parseComplete: true,
+          unresolvedPathExpression: true,
+          commands: [],
+        },
+      },
+      true,
+      { home: "/home/me" },
+    ),
+  ).toMatchObject({ kind: "require_human", category: "unresolved_path_expression" });
+});
 it("requires one-shot human approval for a push", () => {
   expect(
     evaluateSafety(

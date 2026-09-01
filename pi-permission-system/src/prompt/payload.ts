@@ -82,7 +82,7 @@ export function buildPermissionPromptPayload(facts: RichPromptFacts): Permission
   if (facts.command && facts.command !== facts.value)
     add("full command", facts.command, null, true);
   for (const unit of facts.commandUnits ?? []) {
-    if (unit.text !== facts.command && unit.text !== facts.value)
+    if (unit.text !== facts.command)
       add(
         unit.context ? `${contextLabel(unit.context)} command` : "command unit",
         unit.text,

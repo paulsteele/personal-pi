@@ -1,5 +1,5 @@
 import type { Component, OverlayOptions, TUI } from "@earendil-works/pi-tui";
-import { HStack, ScrollView } from "@earendil-works/pi-tui";
+import { HStack } from "@earendil-works/pi-tui";
 
 const PI_084_FULLSCREEN_LAYOUT_ADAPTER = Symbol("pi-atelier.fullscreen-layout-adapter");
 
@@ -117,12 +117,7 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 			// Never stack over another owner or recapture a root replaced after ours.
 			if (currentState.owner !== adapterOwner || currentRoot !== currentState.splitRoot) return;
 			if (currentState.sidebarComponent === sidebarComponent) return;
-			const pane = new ScrollView(sidebarComponent, {
-				primary: false,
-				overscroll: "contain",
-				scrollbar: "auto",
-			});
-			const splitRoot = createFullscreenSplitRoot(currentState.originalRoot, pane);
+			const splitRoot = createFullscreenSplitRoot(currentState.originalRoot, sidebarComponent);
 			adaptedTui.setLayoutRoot(splitRoot);
 			currentState.splitRoot = splitRoot;
 			currentState.sidebarComponent = sidebarComponent;
@@ -130,12 +125,7 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 		}
 
 		if (!currentRoot) return;
-		const pane = new ScrollView(sidebarComponent, {
-			primary: false,
-			overscroll: "contain",
-			scrollbar: "auto",
-		});
-		const splitRoot = createFullscreenSplitRoot(currentRoot, pane);
+		const splitRoot = createFullscreenSplitRoot(currentRoot, sidebarComponent);
 		const nextState: FullscreenLayoutAdapterState = {
 			owner: adapterOwner,
 			originalRoot: currentRoot,

@@ -4,7 +4,12 @@ import {
   forEachNestedExecution,
   NESTED_EXECUTION_CONTEXTS,
 } from "./nested-execution.ts";
-import { ARG_NODE_TYPES, resolveNodeText, SKIP_SUBTREE_TYPES } from "./node-text.ts";
+import {
+  ARG_NODE_TYPES,
+  resolveNodeText,
+  resolveNodeTextAlternatives,
+  SKIP_SUBTREE_TYPES,
+} from "./node-text.ts";
 import type { TSNode } from "./parser.ts";
 
 // ── Public surface ─────────────────────────────────────────────────────────
@@ -25,18 +30,21 @@ import type { TSNode } from "./parser.ts";
  * as path candidates. For all other commands, collects all
  * arguments generically.
  */
-export function collectPathCandidateTokens(node: TSNode): string[] {
-  if (node.type === "command") return collectCommandTokens(node);
-  if (node.type === "file_redirect") return collectRedirectTokens(node);
+export function collectPathCandidateTokens(
+  node: TSNode,
+  resolveLocal?: (name: string) => readonly string[] | null | undefined,
+): string[] {
+  if (node.type === "command") return collectCommandTokens(node, resolveLocal);
+  if (node.type === "file_redirect") return collectRedirectTokens(node, resolveLocal);
   if (EXECUTION_HOST_TYPES.has(node.type)) {
-    return collectHostedExecutionTokens(node);
+    return collectHostedExecutionTokens(node, resolveLocal);
   }
   if (SKIP_SUBTREE_TYPES.has(node.type)) return [];
 
   const tokens: string[] = [];
   for (let i = 0; i < node.childCount; i++) {
     const child = node.child(i);
-    if (child) tokens.push(...collectPathCandidateTokens(child));
+    if (child) tokens.push(...collectPathCandidateTokens(child, resolveLocal));
   }
   return tokens;
 }
@@ -46,13 +54,16 @@ export function collectPathCandidateTokens(node: TSNode): string[] {
  * commands use `collectPatternCommandTokens`; all others use
  * `collectGenericCommandTokens`.
  */
-export function collectCommandTokens(node: TSNode): string[] {
+export function collectCommandTokens(
+  node: TSNode,
+  resolveLocal?: (name: string) => readonly string[] | null | undefined,
+): string[] {
   const commandName = extractCommandName(node);
   const config = commandName ? PATTERN_FIRST_COMMANDS.get(commandName) : undefined;
   const tokens = config
-    ? collectPatternCommandTokens(node, config)
-    : collectGenericCommandTokens(node);
-  return [...tokens, ...collectEmbeddedOptionValues(node)];
+    ? collectPatternCommandTokens(node, config, resolveLocal)
+    : collectGenericCommandTokens(node, resolveLocal);
+  return [...tokens, ...collectEmbeddedOptionValues(node, resolveLocal)];
 }
 
 /**
@@ -67,15 +78,18 @@ export function collectCommandTokens(node: TSNode): string[] {
  * concatenated into it (`> ${DIR}/$(cmd)`), and a `concatenation` is itself an
  * argument node.
  */
-export function collectRedirectTokens(node: TSNode): string[] {
+export function collectRedirectTokens(
+  node: TSNode,
+  resolveLocal?: (name: string) => readonly string[] | null | undefined,
+): string[] {
   const tokens: string[] = [];
   for (let i = 0; i < node.childCount; i++) {
     const child = node.child(i);
     if (!child) continue;
     if (ARG_NODE_TYPES.has(child.type)) {
-      tokens.push(resolveNodeText(child));
+      tokens.push(...resolvedTexts(child, resolveLocal));
     }
-    tokens.push(...collectHostedExecutionTokens(child));
+    tokens.push(...collectHostedExecutionTokens(child, resolveLocal));
   }
   return tokens;
 }
@@ -91,13 +105,16 @@ export function collectRedirectTokens(node: TSNode): string[] {
  * (`> ${DIR}/$(cmd)`); `forEachNestedExecution` searches strictly within a
  * subtree, so the first case is checked here.
  */
-function collectHostedExecutionTokens(node: TSNode): string[] {
+function collectHostedExecutionTokens(
+  node: TSNode,
+  resolveLocal?: (name: string) => readonly string[] | null | undefined,
+): string[] {
   if (NESTED_EXECUTION_CONTEXTS.has(node.type)) {
-    return collectPathCandidateTokens(node);
+    return collectPathCandidateTokens(node, resolveLocal);
   }
   const tokens: string[] = [];
   forEachNestedExecution(node, (contextNode) => {
-    tokens.push(...collectPathCandidateTokens(contextNode));
+    tokens.push(...collectPathCandidateTokens(contextNode, resolveLocal));
   });
   return tokens;
 }
@@ -142,7 +159,10 @@ const OPTION_VALUE_PATTERN = /^-{1,2}[^=\s]+=(.+)$/;
  * here is what lets the projection see option-embedded paths without per-command
  * option tables (ADR 0009, #645).
  */
-function collectEmbeddedOptionValues(node: TSNode): string[] {
+function collectEmbeddedOptionValues(
+  node: TSNode,
+  resolveLocal?: (name: string) => readonly string[] | null | undefined,
+): string[] {
   const values: string[] = [];
   for (let i = 0; i < node.childCount; i++) {
     const child = node.child(i);
@@ -150,8 +170,10 @@ function collectEmbeddedOptionValues(node: TSNode): string[] {
     if (child.type === "command_name" || child.type === "variable_assignment") continue;
     if (!ARG_NODE_TYPES.has(child.type)) continue;
 
-    const value = OPTION_VALUE_PATTERN.exec(resolveNodeText(child))?.[1];
-    if (value !== undefined) values.push(value);
+    for (const text of resolvedTexts(child, resolveLocal)) {
+      const value = OPTION_VALUE_PATTERN.exec(text)?.[1];
+      if (value !== undefined) values.push(value);
+    }
   }
   return values;
 }
@@ -311,7 +333,11 @@ function classifyPatternCommandFlag(
  * additionally signal that an explicit script was provided via
  * flag, so no inline positional script is expected.
  */
-function collectPatternCommandTokens(node: TSNode, config: PatternCommandConfig): string[] {
+function collectPatternCommandTokens(
+  node: TSNode,
+  config: PatternCommandConfig,
+  resolveLocal?: (name: string) => readonly string[] | null | undefined,
+): string[] {
   const patternPositionals = config.patternPositionals ?? 1;
   let hasExplicitScript = false;
   let positionalsSeen = 0;
@@ -329,11 +355,12 @@ function collectPatternCommandTokens(node: TSNode, config: PatternCommandConfig)
     // Only process argument-like nodes; recurse into others
     // (e.g. command_substitution) for nested commands.
     if (!ARG_NODE_TYPES.has(child.type)) {
-      tokens.push(...collectPathCandidateTokens(child));
+      tokens.push(...collectPathCandidateTokens(child, resolveLocal));
       continue;
     }
 
-    const text = resolveNodeText(child);
+    const alternatives = resolvedTexts(child, resolveLocal);
+    const text = alternatives[0] ?? resolveNodeText(child, resolveLocal);
 
     // Handle consumed argument from previous flag.
     if (nextArgAction === "skip") {
@@ -341,7 +368,7 @@ function collectPatternCommandTokens(node: TSNode, config: PatternCommandConfig)
       continue;
     }
     if (nextArgAction === "extract") {
-      tokens.push(text);
+      tokens.push(...alternatives);
       nextArgAction = null;
       continue;
     }
@@ -369,8 +396,8 @@ function collectPatternCommandTokens(node: TSNode, config: PatternCommandConfig)
       continue; // Skip: this is an inline pattern/script.
     }
 
-    // File argument — collect as path candidate.
-    tokens.push(text);
+    // File argument — collect every bounded local-binding alternative.
+    tokens.push(...alternatives);
   }
 
   return tokens;
@@ -380,7 +407,18 @@ function collectPatternCommandTokens(node: TSNode, config: PatternCommandConfig)
  * Collect all argument tokens from a generic (non-pattern-first) command node,
  * skipping the command name and variable assignments.
  */
-function collectGenericCommandTokens(node: TSNode): string[] {
+function resolvedTexts(
+  node: TSNode,
+  resolveLocal?: (name: string) => readonly string[] | null | undefined,
+): string[] {
+  if (!resolveLocal) return [resolveNodeText(node)];
+  return resolveNodeTextAlternatives(node, resolveLocal) ?? [node.text];
+}
+
+function collectGenericCommandTokens(
+  node: TSNode,
+  resolveLocal?: (name: string) => readonly string[] | null | undefined,
+): string[] {
   const tokens: string[] = [];
   let seenCommandName = false;
 
@@ -404,12 +442,12 @@ function collectGenericCommandTokens(node: TSNode): string[] {
 
     // Argument nodes: resolve their text and collect.
     if (ARG_NODE_TYPES.has(child.type)) {
-      tokens.push(resolveNodeText(child));
+      tokens.push(...resolvedTexts(child, resolveLocal));
       continue;
     }
 
     // Recurse into other children (e.g. command_substitution nested in args)
-    tokens.push(...collectPathCandidateTokens(child));
+    tokens.push(...collectPathCandidateTokens(child, resolveLocal));
   }
 
   return tokens;

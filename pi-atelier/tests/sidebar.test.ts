@@ -24,7 +24,9 @@ import {
 	buildSidebarSnapshot,
 	createSidebarComponent,
 	createSidebarController,
+	renderProgressLines,
 	renderSidebarLines,
+	sidebarRegionHeights,
 } from "../src/sidebar.js";
 import { SIDEBAR_WIDTH } from "../src/split-pane.js";
 import type { AtelierState } from "../src/types.js";
@@ -872,16 +874,101 @@ describe("sidebar snapshot and layout", () => {
 		});
 	});
 
-	it("renders only the Activity monitor in a full-height dock", () => {
+	it("renders both sections without redundant headings", () => {
 		const lines = renderSidebarLines(snapshot(), theme, 44, 36, false, 0);
 		const rows = contentRows(lines);
 		expect(lines).toHaveLength(36);
 		expect(lines.every((line) => visibleWidth(line) <= 44)).toBe(true);
-		expect(lines.every((line) => stripAnsi(line).startsWith("│ "))).toBe(true);
-		expect(rows[0]).toBe("Ready");
+		expect(
+			lines.every((line) => {
+				const plain = stripAnsi(line);
+				return plain.startsWith("│ ") || /^├─+$/.test(plain);
+			}),
+		).toBe(true);
+		expect(rows).not.toContain("PROGRESS");
+		expect(rows).not.toContain("ACTIVITY");
+		expect(rows[0]).toBe("Observer unavailable");
+		expect(rows).toContain("Ready");
 		expect(rows).toContain("TTFT ~ · TPS ~");
-		for (const absent of ["ACTIVITY", "RUN", "AGENT", "CTX", "GIT", "SESSION", "USE", "PLAN", "ALERTS"]) {
+		for (const absent of ["RUN", "AGENT", "CTX", "GIT", "SESSION", "USE", "PLAN", "ALERTS"]) {
 			expect(rows).not.toContain(absent);
+		}
+	});
+
+	it("allocates equal Progress and Activity regions around a fixed separator", () => {
+		expect(sidebarRegionHeights(37)).toEqual({ progress: 18, separator: 1, activity: 18 });
+		expect(sidebarRegionHeights(36)).toEqual({ progress: 17, separator: 1, activity: 18 });
+		expect(sidebarRegionHeights(20)).toEqual({ progress: 9, separator: 1, activity: 10 });
+	});
+
+	it("renders inferred progress fields in the upper half without a heading", () => {
+		const observed = {
+			...snapshot(),
+			progressObserver: {
+				phase: "ready" as const,
+				modelId: "litellm/luna",
+				summary: {
+					goal: "Deliver observer",
+					progress: "Config complete",
+					current: "Building UI",
+					next: "Verify tests",
+					blockers: "None",
+				},
+			},
+		};
+		const rows = contentRows(renderSidebarLines(observed, theme, 44, 20, false));
+		expect(rows.slice(0, 9).join(" ")).toContain("Goal Deliver observer");
+		expect(rows.slice(0, 9).join(" ")).toContain("Done Config complete");
+		expect(rows.slice(0, 9).join(" ")).toContain("Next Verify tests");
+		expect(rows[0]).toBe("Summary · litellm/luna");
+		expect(rows.indexOf("Now Building UI")).toBeLessThan(rows.indexOf("Next Verify tests"));
+		expect(rows.indexOf("Next Verify tests")).toBeLessThan(rows.indexOf("Blockers None"));
+		expect(rows.indexOf("Blockers None")).toBeLessThan(rows.indexOf("Goal Deliver observer"));
+		expect(rows.indexOf("Goal Deliver observer")).toBeLessThan(rows.indexOf("Done Config complete"));
+		expect(rows).not.toContain("PROGRESS");
+		expect(rows).not.toContain("ACTIVITY");
+		expect(rows.indexOf("Ready")).toBe(10);
+	});
+
+	it("wraps long progress values instead of clipping them at the pane edge", () => {
+		const observed = {
+			...snapshot(),
+			progressObserver: {
+				phase: "ready" as const,
+				modelId: "litellm/luna",
+				summary: {
+					goal: "Implement a progress observer whose long summaries remain fully readable in narrow terminals",
+					progress: "Configuration and scheduling are complete",
+					current: "Wrapping every field while preserving semantic colors",
+					next: "Verify the complete sentence appears across continuation lines",
+				},
+			},
+		};
+		const lines = renderProgressLines(observed, theme, 28, 1, false);
+		const progressText = contentRows(lines).join(" ").replace(/\s+/g, " ");
+		expect(lines.every((line) => visibleWidth(line) <= 28)).toBe(true);
+		expect(progressText).toContain(
+			"Goal Implement a progress observer whose long summaries remain fully readable in narrow terminals",
+		);
+		expect(progressText).toContain("Next Verify the complete sentence appears across continuation lines");
+	});
+
+	it("keeps both equal regions at short usable heights", () => {
+		const lines = renderSidebarLines(withActivity(activeActivity()), theme, 44, 9, false, 20_000);
+		const rows = contentRows(lines);
+		expect(rows).not.toContain("PROGRESS");
+		expect(rows).not.toContain("ACTIVITY");
+		expect(stripAnsi(lines[sidebarRegionHeights(9).progress] ?? "")).toMatch(/^├─+$/);
+	});
+
+	it("keeps the left rail and midpoint divider fixed across the full pane", () => {
+		const lines = renderSidebarLines(withActivity(activeActivity()), theme, 44, 37, false, 20_000);
+		const regions = sidebarRegionHeights(37);
+		expect(lines).toHaveLength(37);
+		for (const [index, line] of lines.entries()) {
+			const plain = stripAnsi(line);
+			if (index === regions.progress) expect(plain).toMatch(/^├─{43}$/);
+			else expect(plain.startsWith("│ ")).toBe(true);
 		}
 	});
 

@@ -8,6 +8,7 @@
         "-code-blocks/index.ts",
         "-desktop-notifications/index.ts",
         "-pi-permission-system/src/index.ts",
+        "-progress-observer/index.ts",
         "-pi-atelier/extensions/index.ts"
       ]
     }
@@ -17,6 +18,7 @@
     "../code-blocks/index.ts",
     "../desktop-notifications/index.ts",
     "../pi-permission-system/src/index.ts",
+    "../progress-observer/index.ts",
     "../pi-atelier/extensions/index.ts"
   ]
 }

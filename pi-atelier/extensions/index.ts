@@ -28,7 +28,12 @@ import {
 } from "../src/sidebar.js";
 import { createSidebarPanelRegistry, type SidebarPanelRegistry } from "../src/sidebar-panels.js";
 import { AtelierRuntime, createInertAtelierState } from "../src/state.js";
-import { type AtelierState, type FooterPanelSummary, type FooterState } from "../src/types.js";
+import {
+	type AtelierState,
+	type FooterPanelSummary,
+	type FooterState,
+	type ProgressObserverSnapshot,
+} from "../src/types.js";
 
 export type {
 	SidebarPanelContribution,
@@ -85,6 +90,7 @@ interface ActiveSession {
 	persisted: boolean;
 	branchEntryCount: number;
 	panelSummaries: readonly FooterPanelSummary[];
+	progressObserver: ProgressObserverSnapshot | undefined;
 	autoModeState:
 		| {
 				enabled: boolean;
@@ -271,6 +277,44 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 		};
 	}
 
+	function progressObserverSnapshot(raw: unknown): ProgressObserverSnapshot | undefined {
+		if (typeof raw !== "object" || raw === null) return undefined;
+		const value = raw as Record<string, unknown>;
+		const phases = new Set(["waiting", "observing", "ready", "error", "disabled", "unavailable"]);
+		if (value.version !== 1 || !phases.has(String(value.phase)) || typeof value.modelId !== "string")
+			return undefined;
+		const clean = (text: unknown, max = 500): string | undefined =>
+			typeof text === "string"
+				? text
+						.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+						.replace(/\s+/g, " ")
+						.trim()
+						.slice(0, max) || undefined
+				: undefined;
+		let summary: ProgressObserverSnapshot["summary"];
+		if (typeof value.summary === "object" && value.summary !== null) {
+			const item = value.summary as Record<string, unknown>;
+			const goal = clean(item.goal);
+			const progress = clean(item.progress);
+			const current = clean(item.current);
+			const next = clean(item.next);
+			const blockers = clean(item.blockers);
+			if (goal && progress && current && next)
+				summary = { goal, progress, current, next, ...(blockers ? { blockers } : {}) };
+		}
+		const message = clean(value.message, 300);
+		return {
+			phase: value.phase as ProgressObserverSnapshot["phase"],
+			modelId: clean(value.modelId, 160) ?? "unknown",
+			...(typeof value.updatedAt === "number" && Number.isFinite(value.updatedAt)
+				? { updatedAt: value.updatedAt }
+				: {}),
+			...(value.stale === true ? { stale: true } : {}),
+			...(message ? { message } : {}),
+			...(summary ? { summary } : {}),
+		};
+	}
+
 	function getSidebarSnapshot(targetSession: ActiveSession): SidebarSnapshot {
 		if (targetSession.retired || activeSession !== targetSession) {
 			return buildSidebarSnapshot({
@@ -291,6 +335,7 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 			extensionStatuses: targetSession.extensionStatuses,
 			runActivity: runActivity.getSnapshot(),
 			...(targetSession.autoModeState ? { autoModeState: targetSession.autoModeState } : {}),
+			...(targetSession.progressObserver ? { progressObserver: targetSession.progressObserver } : {}),
 			sidebarPanels: [],
 		});
 	}
@@ -550,6 +595,7 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 				persisted: Boolean(initializationContext.sessionManager.getSessionFile()),
 				branchEntryCount: initializationContext.sessionManager.getBranch().length,
 				panelSummaries: [],
+				progressObserver: undefined,
 				autoModeState: undefined,
 				footerGeneration: 0,
 				retired: false,
@@ -573,6 +619,13 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 					if (permission) nextSession.runActivity.recordPermission(permission);
 				};
 			nextSession.permissionDisposers.push(
+				pi.events.on("progress-observer:state", (raw) => {
+					if (activeSession !== nextSession || nextSession.retired) return;
+					const snapshot = progressObserverSnapshot(raw);
+					if (!snapshot) return;
+					nextSession.progressObserver = snapshot;
+					nextSession.sidebar.requestRender();
+				}),
 				pi.events.on("permissions:ui_prompt", trackPermission(permissionFromPrompt)),
 				pi.events.on("permissions:decision", trackPermission(permissionFromDecision)),
 				pi.events.on("auto-mode:decision", trackPermission(permissionFromAuto)),
@@ -602,6 +655,7 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 				}),
 			);
 			pi.events.emit("auto-mode:discover", {});
+			pi.events.emit("progress-observer:discover", { version: 1 });
 
 			if (isFresh() && activeSession === nextSession) {
 				installFooter(nextSession);

@@ -30,9 +30,20 @@ import type { TSNode } from "./parser.ts";
  * carries additional children and is therefore rejected without this module
  * needing to enumerate bash's expansion operators.
  */
-export function resolvePlainVariableExpansion(node: TSNode): string | null {
+export function resolvePlainVariableExpansion(
+  node: TSNode,
+  resolveLocal?: (name: string) => readonly string[] | null | undefined,
+): string | null {
   const name = plainVariableName(node);
-  return name === null ? null : (RESOLVABLE_VARIABLES.get(name)?.() ?? null);
+  if (name === null) return null;
+  const local = resolveLocal?.(name);
+  if (local !== undefined) return local?.length === 1 ? local[0] : null;
+  return RESOLVABLE_VARIABLES.get(name)?.() ?? null;
+}
+
+/** Name carried by a structurally plain expansion, for bounded local dataflow. */
+export function plainExpansionName(node: TSNode): string | null {
+  return plainVariableName(node);
 }
 
 /**

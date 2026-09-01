@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.0.3 — 2026-09-01
+
+- Split the fullscreen sidebar into equal-height inferred summary and direct activity regions, each independently scrollable, behind a fixed full-height rail and fixed horizontal separator; omit redundant section headings.
+- Consume the standalone Progress Observer through bounded replayable events without coupling Atelier to its model or configuration.
+
 ## 1.0.2 — 2026-08-31
 
 - Triple the Activity Sidebar's retained tool history from 12 to 36 entries; its contained ScrollView provides access beyond the visible pane.

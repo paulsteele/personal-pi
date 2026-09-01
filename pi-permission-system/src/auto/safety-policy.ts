@@ -29,6 +29,7 @@ export interface SafetyContext {
     readonly workdir: string | null;
     readonly commands: readonly GuardCommandFact[];
     readonly parseComplete: boolean;
+    readonly unresolvedPathExpression?: boolean;
   } | null;
   readonly paths: readonly GuardPathFact[];
   readonly riskMarkers: readonly string[];
@@ -408,6 +409,15 @@ export function evaluateSafety(
         };
       }
     }
+  }
+  if (context.shell?.unresolvedPathExpression) {
+    return {
+      kind: "require_human",
+      category: "unresolved_path_expression",
+      reason:
+        "A filesystem path contains a shell expansion that could not be resolved statically; fresh human approval is required.",
+      riskMarkers: [...risks, "unresolved-path-expression"],
+    };
   }
   for (const command of context.shell?.commands ?? []) {
     if (!command.argv) {

@@ -818,6 +818,33 @@ describe("extension registration", () => {
 		expect(reloaded).toContain("Ready");
 	});
 
+	it("discovers and renders bounded progress-observer state through the event seam", async () => {
+		const h = harness();
+		await start(h);
+		expect(h.pi.events.emit).toHaveBeenCalledWith("progress-observer:discover", { version: 1 });
+		h.pi.events.emit("progress-observer:state", {
+			version: 1,
+			phase: "ready",
+			modelId: "litellm/luna",
+			summary: {
+				goal: "Ship progress UI",
+				progress: "Observer connected",
+				current: "Rendering the split",
+				next: "Run tests",
+				blockers: "None",
+			},
+		});
+		const text = renderOverlayText(h);
+		expect(text).not.toContain("PROGRESS");
+		expect(text).toContain("Ship progress UI");
+		expect(text).not.toContain("ACTIVITY");
+
+		h.pi.events.emit("progress-observer:state", { version: 2, phase: "ready", modelId: "bad" });
+		expect(renderOverlayText(h)).toContain("Ship progress UI");
+		await h.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, h.ctx);
+		expect(h.getEventBusHandlerCount("progress-observer:state")).toBe(0);
+	});
+
 	it("forwards run and turn events into sidebar activity without putting tool history in the footer", async () => {
 		const h = harness();
 		await start(h);

@@ -1,62 +1,59 @@
 {
-	"name": "@paulsteele/pi-atelier",
+	"name": "@paulsteele/pi-progress-observer",
 	"version": "1.0.3",
 	"private": true,
-	"description": "Personal source-owned Pi Atelier fork",
+	"description": "Passive side-model progress summaries for Pi",
 	"type": "module",
 	"license": "MIT",
 	"keywords": [
 		"pi-package",
 		"pi",
 		"extension",
-		"tui",
-		"status-bar"
+		"progress",
+		"observer"
 	],
 	"files": [
-		"extensions",
-		"src",
-		"README.md",
-		"CHANGELOG.md",
-		"FORK.md",
-		"LICENSE"
+		"config.ts",
+		"events.ts",
+		"index.ts",
+		"observer.ts",
+		"scheduler.ts",
+		"README.md"
 	],
 	"pi": {
 		"extensions": [
-			"./extensions/index.ts"
+			"./index.ts"
 		]
 	},
-	"repository": {
-		"type": "git",
-		"url": "https://github.com/paulsteele/personal-pi.git",
-		"directory": "pi-atelier"
-	},
-	"bugs": {
-		"url": "https://github.com/paulsteele/personal-pi/issues"
-	},
-	"homepage": "https://github.com/paulsteele/personal-pi/tree/main/pi-atelier",
 	"scripts": {
 		"test": "vitest run",
-		"test:watch": "vitest",
 		"typecheck": "tsc --noEmit",
 		"lint": "biome lint .",
 		"format": "biome format --write .",
 		"format:check": "biome format .",
-		"check:pack": "node scripts/verify-pack.mjs",
+		"check:pack": "node verify-pack.mjs",
 		"check": "npm run typecheck && npm run lint && npm run format:check && npm test && npm run check:pack"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-coding-agent": ">=0.80.7",
-		"@earendil-works/pi-tui": ">=0.80.7"
+		"@earendil-works/pi-ai": "0.84.x",
+		"@earendil-works/pi-coding-agent": "0.84.x",
+		"typebox": "1.3.x"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.4",
+		"@earendil-works/pi-ai": "0.84.3",
 		"@earendil-works/pi-coding-agent": "0.84.2",
-		"@earendil-works/pi-tui": "0.84.2",
 		"@types/node": "24.12.4",
+		"typebox": "1.3.7",
 		"typescript": "5.9.3",
 		"vitest": "4.1.10"
 	},
 	"engines": {
 		"node": ">=22.19.0"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/paulsteele/personal-pi.git",
+		"directory": "progress-observer"
 	}
 }

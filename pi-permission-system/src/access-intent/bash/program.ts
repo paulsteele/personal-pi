@@ -23,6 +23,7 @@ export class BashProgram {
     private readonly guardCommandUnits: readonly BashCommand[],
     private readonly resolvedExternalPaths: readonly AccessPath[],
     private readonly resolvedRuleCandidates: readonly BashPathRuleCandidate[],
+    private readonly unresolvedPathExpression: boolean,
     private readonly complete: boolean,
   ) {}
 
@@ -52,10 +53,10 @@ export class BashProgram {
   ): Promise<BashProgram> {
     const parser = await getParser();
     const tree = parser.parse(command);
-    if (!tree) return new BashProgram(command, [], [], [], [], false);
+    if (!tree) return new BashProgram(command, [], [], [], [], false, false);
 
     try {
-      const { externalPaths, ruleCandidates } = new BashPathResolver(
+      const { externalPaths, ruleCandidates, unresolvedPathExpression } = new BashPathResolver(
         normalizer,
         options?.workdir,
       ).resolve(tree.rootNode);
@@ -66,6 +67,7 @@ export class BashProgram {
         expandGuardCommandFacts(parser, commandUnits),
         externalPaths,
         ruleCandidates,
+        unresolvedPathExpression,
         !tree.rootNode.hasError,
       );
     } finally {
@@ -139,6 +141,11 @@ export class BashProgram {
    */
   pathRuleCandidates(): BashPathRuleCandidate[] {
     return [...this.resolvedRuleCandidates];
+  }
+
+  /** Whether an access-bearing path expression could not be resolved statically. */
+  hasUnresolvedPathExpression(): boolean {
+    return this.unresolvedPathExpression;
   }
 }
 

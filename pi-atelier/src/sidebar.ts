@@ -1,6 +1,14 @@
 import { basename } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type Component, type OverlayHandle, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	HStack,
+	type OverlayHandle,
+	ScrollView,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import type { ThemeLike } from "./footer.js";
 import { aggregateMetrics } from "./metrics.js";
 import { type AtelierPalette, createPalette, type PaletteRole } from "./palette.js";
@@ -14,7 +22,7 @@ import {
 } from "./run-activity.js";
 import type { SidebarPanelData } from "./sidebar-panels.js";
 import { createSplitPaneController, type SplitPaneController } from "./split-pane.js";
-import { type AtelierState, type WorkspacePulseState } from "./types.js";
+import { type AtelierState, type ProgressObserverSnapshot, type WorkspacePulseState } from "./types.js";
 import type { WorkspacePulseData } from "./workspace-pulse.js";
 
 export interface SidebarSnapshotInput {
@@ -33,6 +41,7 @@ export interface SidebarSnapshotInput {
 		asked: number;
 	};
 	sidebarPanels?: readonly SidebarPanelData[];
+	progressObserver?: ProgressObserverSnapshot;
 }
 
 export interface SidebarSnapshot extends AtelierState {
@@ -51,6 +60,7 @@ export interface SidebarSnapshot extends AtelierState {
 		asked: number;
 	};
 	sidebarPanels?: readonly SidebarPanelData[];
+	progressObserver?: ProgressObserverSnapshot;
 }
 
 function workspacePulseData(pulse: WorkspacePulseState): WorkspacePulseData | undefined {
@@ -72,6 +82,7 @@ export function buildSidebarSnapshot(input: SidebarSnapshotInput): SidebarSnapsh
 		runActivity: input.runActivity ?? EMPTY_RUN_ACTIVITY,
 		...(input.autoModeState ? { autoModeState: input.autoModeState } : {}),
 		sidebarPanels: input.sidebarPanels ?? [],
+		...(input.progressObserver ? { progressObserver: input.progressObserver } : {}),
 	};
 }
 
@@ -376,6 +387,63 @@ function aggregateActivityText(activity: RunActivitySnapshot, compact: boolean):
 	return compact ? `${completed}✓ ${failed}✕` : `${completed} done · ${failed} fail`;
 }
 
+function wrappedProgressValue(
+	label: string,
+	value: string,
+	width: number,
+	palette: AtelierPalette,
+	role: PaletteRole = "primary",
+): string[] {
+	const prefix = `${label} `;
+	const prefixWidth = visibleWidth(prefix);
+	const valueWidth = Math.max(1, width - prefixWidth);
+	const wrapped = wrapTextWithAnsi(palette.paint(role, value), valueWidth);
+	return wrapped.map((line, index) =>
+		index === 0 ? `${palette.paint("muted", label)} ${line}` : `${" ".repeat(prefixWidth)}${line}`,
+	);
+}
+
+function progressRows(snapshot: SidebarSnapshot, palette: AtelierPalette, width: number): string[] {
+	const observer = snapshot.progressObserver;
+	const rows: string[] = [];
+	if (!observer) return [palette.paint("dim", "Observer unavailable")];
+	const status =
+		observer.phase === "observing"
+			? "Updating…"
+			: observer.phase === "waiting"
+				? "Waiting for activity"
+				: observer.phase === "disabled"
+					? "Disabled"
+					: observer.phase === "unavailable"
+						? "Unavailable"
+						: observer.phase === "error"
+							? "Update failed"
+							: observer.stale
+								? "Summary · stale"
+								: "Summary";
+	const role: PaletteRole =
+		observer.phase === "error" || observer.phase === "unavailable"
+			? "warning"
+			: observer.phase === "ready"
+				? "ready"
+				: "dim";
+	rows.push(...wrapTextWithAnsi(palette.paint(role, `${status} · ${display(observer.modelId)}`), width));
+	if (observer.summary) {
+		rows.push(
+			...wrappedProgressValue("Now", observer.summary.current, width, palette),
+			...wrappedProgressValue("Next", observer.summary.next, width, palette),
+		);
+		if (observer.summary.blockers)
+			rows.push(...wrappedProgressValue("Blockers", observer.summary.blockers, width, palette, "warning"));
+		rows.push(
+			...wrappedProgressValue("Goal", observer.summary.goal, width, palette),
+			...wrappedProgressValue("Done", observer.summary.progress, width, palette),
+		);
+	}
+	if (observer.message) rows.push(...wrapTextWithAnsi(palette.paint("dim", observer.message), width));
+	return rows;
+}
+
 function activityBandRows(
 	snapshot: SidebarSnapshot,
 	leadWidth: number,
@@ -418,7 +486,53 @@ function activityBandRows(
 	return rows;
 }
 
-export function renderSidebarLines(
+function renderProgressContent(
+	snapshot: SidebarSnapshot,
+	theme: ThemeLike,
+	width: number,
+	colorEnabled = true,
+): string[] {
+	const safeWidth = Math.max(1, Math.trunc(width));
+	const palette = createPalette(theme, colorEnabled);
+	return progressRows(snapshot, palette, safeWidth).map((row) => truncateToWidth(row, safeWidth, ""));
+}
+
+export function renderProgressLines(
+	snapshot: SidebarSnapshot,
+	theme: ThemeLike,
+	width: number,
+	height: number,
+	colorEnabled = true,
+): string[] {
+	const safeWidth = Math.max(0, Math.trunc(width));
+	const safeHeight = Math.max(0, Math.trunc(height));
+	if (safeWidth <= 0 || safeHeight <= 0) return [];
+	const palette = createPalette(theme, colorEnabled);
+	const contentWidth = Math.max(1, safeWidth - 2);
+	return renderDock(
+		renderProgressContent(snapshot, theme, contentWidth, colorEnabled),
+		safeWidth,
+		safeHeight,
+		palette,
+	);
+}
+
+function renderActivityContent(
+	snapshot: SidebarSnapshot,
+	theme: ThemeLike,
+	width: number,
+	colorEnabled = true,
+	now = Date.now(),
+): string[] {
+	const safeWidth = Math.max(1, Math.trunc(width));
+	const palette = createPalette(theme, colorEnabled);
+	const layout = sidebarLayout(safeWidth + 2);
+	return activityBandRows(snapshot, safeWidth, safeWidth, layout, palette, now).map((row) =>
+		truncateToWidth(row, safeWidth, ""),
+	);
+}
+
+export function renderActivityLines(
 	snapshot: SidebarSnapshot,
 	theme: ThemeLike,
 	width: number,
@@ -430,10 +544,46 @@ export function renderSidebarLines(
 	const safeWidth = Math.max(0, Math.trunc(width));
 	const safeHeight = Math.max(0, Math.trunc(height));
 	if (safeWidth <= 0 || safeHeight <= 0) return [];
-	const contentWidth = Math.max(0, safeWidth - 2);
-	const layout = sidebarLayout(safeWidth);
-	const rows = activityBandRows(snapshot, contentWidth, contentWidth, layout, palette, now);
-	return renderDock(rows, safeWidth, safeHeight, palette);
+	const contentWidth = Math.max(1, safeWidth - 2);
+	return renderDock(
+		renderActivityContent(snapshot, theme, contentWidth, colorEnabled, now),
+		safeWidth,
+		safeHeight,
+		palette,
+	);
+}
+
+export function renderSidebarLines(
+	snapshot: SidebarSnapshot,
+	theme: ThemeLike,
+	width: number,
+	height: number,
+	colorEnabled = true,
+	now = Date.now(),
+): string[] {
+	const safeWidth = Math.max(0, Math.trunc(width));
+	const regions = sidebarRegionHeights(height);
+	if (regions.separator === 0)
+		return renderActivityLines(snapshot, theme, safeWidth, regions.activity, colorEnabled, now);
+	const palette = createPalette(theme, colorEnabled);
+	const separator = `${palette.paint("dim", "├")}${palette.paint("dim", "─".repeat(Math.max(0, safeWidth - 1)))}`;
+	return [
+		...renderProgressLines(snapshot, theme, safeWidth, regions.progress, colorEnabled),
+		separator,
+		...renderActivityLines(snapshot, theme, safeWidth, regions.activity, colorEnabled, now),
+	];
+}
+
+export function sidebarRegionHeights(height: number): {
+	progress: number;
+	separator: number;
+	activity: number;
+} {
+	const safeHeight = Math.max(0, Math.trunc(height));
+	if (safeHeight < 3) return { progress: 0, separator: 0, activity: safeHeight };
+	const available = safeHeight - 1;
+	const progress = Math.floor(available / 2);
+	return { progress, separator: 1, activity: available - progress };
 }
 
 export interface SidebarComponentOptions {
@@ -456,8 +606,80 @@ function renderSidebarError(error: unknown, width: number, height: number): stri
 }
 
 export function createSidebarComponent(options: SidebarComponentOptions): Component {
-	return {
+	const content = (section: "progress" | "activity"): Component => ({
 		render(width) {
+			try {
+				return section === "progress"
+					? renderProgressContent(options.getSnapshot(), options.theme, width, options.colorEnabled ?? true)
+					: renderActivityContent(options.getSnapshot(), options.theme, width, options.colorEnabled ?? true);
+			} catch (error) {
+				return [sanitize(error instanceof Error ? error.message : String(error)) || "Sidebar unavailable"];
+			}
+		},
+		invalidate() {},
+	});
+	const progress = new ScrollView(content("progress"), {
+		primary: false,
+		overscroll: "contain",
+		scrollbar: "auto",
+	});
+	const activity = new ScrollView(content("activity"), {
+		primary: false,
+		overscroll: "contain",
+		scrollbar: "auto",
+	});
+	const divider = (): Component => ({
+		render: (width) => {
+			const palette = createPalette(options.theme, options.colorEnabled ?? true);
+			return [palette.paint("dim", "─".repeat(Math.max(1, width)))];
+		},
+		invalidate() {},
+	});
+	const rail: Component = {
+		render: () => {
+			const palette = createPalette(options.theme, options.colorEnabled ?? true);
+			const regions = sidebarRegionHeights(options.getHeight());
+			return Array.from({ length: options.getHeight() }, (_, index) =>
+				palette.paint("dim", regions.separator === 1 && index === regions.progress ? "├" : "│"),
+			);
+		},
+		invalidate() {},
+	};
+	const horizontalDivider = divider();
+	const body = {
+		render(width: number): string[] {
+			const regions = sidebarRegionHeights(options.getHeight());
+			if (regions.separator === 0) return activity.render(width);
+			return [
+				...progress.render(width).slice(0, regions.progress),
+				...horizontalDivider.render(width),
+				...activity.render(width).slice(0, regions.activity),
+			];
+		},
+		invalidate() {
+			progress.invalidate();
+			horizontalDivider.invalidate();
+			activity.invalidate();
+		},
+		[Symbol.for("@earendil-works/pi-tui/layout-node")]() {
+			const regions = sidebarRegionHeights(options.getHeight());
+			return {
+				type: "vstack" as const,
+				gap: 0,
+				align: "stretch" as const,
+				entries:
+					regions.separator === 0
+						? [{ component: activity, basis: regions.activity, grow: 0, shrink: 0 }]
+						: [
+								{ component: progress, basis: regions.progress, grow: 0, shrink: 0 },
+								{ component: horizontalDivider, basis: 1, grow: 0, shrink: 0 },
+								{ component: activity, basis: regions.activity, grow: 0, shrink: 0 },
+							],
+			};
+		},
+	};
+	class SidebarShell extends HStack {
+		override render(width: number): string[] {
 			const height = options.getHeight();
 			try {
 				return renderSidebarLines(
@@ -470,9 +692,12 @@ export function createSidebarComponent(options: SidebarComponentOptions): Compon
 			} catch (error) {
 				return renderSidebarError(error, width, height);
 			}
-		},
-		invalidate() {},
-	};
+		}
+	}
+	return new SidebarShell([
+		{ component: rail, basis: 1, grow: 0, shrink: 0, minSize: 1, maxSize: 1 },
+		{ component: body, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+	]);
 }
 
 export interface SidebarController {

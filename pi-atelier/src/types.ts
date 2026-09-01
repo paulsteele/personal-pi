@@ -5,6 +5,25 @@ export type BuiltinSidebarPanelId = "agent" | "activity" | "alerts" | "context" 
 /** Stable namespaced IDs are used by contributed panels. */
 export type ContributedSidebarPanelId = `${string}:${string}`;
 export type SidebarPanelId = BuiltinSidebarPanelId | ContributedSidebarPanelId;
+export type ProgressObserverPhase = "waiting" | "observing" | "ready" | "error" | "disabled" | "unavailable";
+
+export interface ProgressObserverSummary {
+	goal: string;
+	progress: string;
+	current: string;
+	next: string;
+	blockers?: string;
+}
+
+export interface ProgressObserverSnapshot {
+	phase: ProgressObserverPhase;
+	modelId: string;
+	updatedAt?: number;
+	stale?: boolean;
+	message?: string;
+	summary?: ProgressObserverSummary;
+}
+
 export interface ResponsePerformance {
 	ttftMs: number;
 	tokensPerSecond?: number;

@@ -1,11 +1,11 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { redactedJsonStringify } from "./log-redaction.ts";
 import {
   OWNER_ONLY_DIRECTORY_MODE,
   OWNER_ONLY_FILE_MODE,
   restrictExistingPathToOwner,
 } from "./log-file-permissions.ts";
+import { redactedJsonStringify } from "./log-redaction.ts";
 
 const MAX_FIELD = 1_000;
 function cap(value: unknown): unknown {

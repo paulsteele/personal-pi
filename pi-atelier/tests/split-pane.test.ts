@@ -77,6 +77,18 @@ describe("fixed fullscreen split", () => {
 		expect(split.isVisibleAtWidth(92)).toBe(true);
 	});
 
+	it("mounts the sidebar component directly so it can own nested progress/activity scrolling", () => {
+		const renderer = fullscreenRenderer(120);
+		renderer.setLayoutRoot({ render: (width) => [`main:${width}`], invalidate() {} });
+		const split = createSplitPaneController();
+		split.attach(
+			stableTuiReference(() => renderer),
+			sidebarComponent,
+		);
+		split.show();
+		expect(renderer.render(120).join("\n")).toContain("sidebar:44");
+	});
+
 	it("reserves fixed fullscreen columns and restores them when hidden", () => {
 		const renderer = fullscreenRenderer(120);
 		const widths: number[] = [];

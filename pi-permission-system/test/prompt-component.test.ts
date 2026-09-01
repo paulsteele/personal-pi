@@ -1,5 +1,5 @@
-import { expect, it, vi } from "vitest";
 import { matchesKey } from "@earendil-works/pi-tui";
+import { expect, it, vi } from "vitest";
 import { presentPermissionPrompt } from "#src/prompt/component.ts";
 import { buildPermissionPromptPayload } from "#src/prompt/payload.ts";
 

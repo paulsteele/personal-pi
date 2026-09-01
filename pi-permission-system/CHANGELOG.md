@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+## 1.0.3 — 2026-09-01
+
+- Closed Bash compound-command safety gaps by projecting `for`/`select` iterables, filesystem test operands, and statically resolvable local scalar bindings through control-flow scopes.
+- Preserved whole compound units while enumerating executable descendants, so deterministic command guards and explicit Bash policy denies cannot be hidden inside loops, conditions, case arms, groups, or function bodies.
+- Added a fail-closed human guard for path-bearing shell operands whose expansions remain unresolved, before classifier review.
+
 ## 1.0.2 — 2026-08-31
 
 - In human review prompts, color Tree-sitter Bash command units covered by deterministic `allow` policy with the policy color, while leaving unresolved units and the reviewed action warning-colored. This is presentation-only and does not change classifier inputs or decisions.
