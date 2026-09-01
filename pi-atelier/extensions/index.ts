@@ -299,8 +299,8 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 			const current = clean(item.current);
 			const next = clean(item.next);
 			const blockers = clean(item.blockers);
-			if (goal && progress && current && next)
-				summary = { goal, progress, current, next, ...(blockers ? { blockers } : {}) };
+			if (goal && progress && current)
+				summary = { goal, progress, current, ...(next ? { next } : {}), ...(blockers ? { blockers } : {}) };
 		}
 		const message = clean(value.message, 300);
 		return {

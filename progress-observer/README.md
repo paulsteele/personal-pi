@@ -42,7 +42,18 @@ Configuration is strict. A malformed file disables requests and publishes an una
 
 Each refresh is an additional model call and is not part of the primary agent's normal response usage display. Recent visible user/assistant text, tool metadata, and short tool-result excerpts can be sent to the configured observer provider. Inputs are size-bounded and use best-effort redaction for credential-like keys and common secret shapes, but redaction cannot guarantee that arbitrary sensitive text is removed. Choose the provider accordingly.
 
-The sidebar is an **inference from external evidence**, not the worker model's hidden reasoning and not proof that work is correct or complete. On timeout, malformed output, or provider failure, the previous successful inference remains visible as stale and the main agent continues unaffected.
+The sidebar is an **inference from the visible session record**, not the worker model's hidden reasoning and not proof that work is correct or complete. On timeout, malformed output, or provider failure, the previous successful inference remains visible as stale and the main agent continues unaffected.
+
+## Summary style
+
+Every field is a terse affirmative fragment about the work, with the subject dropped: `Adding PairSuccessFlow UI test fixtures`, not `The agent is adding UI test fixtures`. The observer never reports on the record it read, never hedges, and never states what did not happen. Work that is written but unverified surfaces as an affirmative next action instead:
+
+```text
+Now   Adding startup, pairing-resume, and PairSuccessFlow UI test fixtures
+Next  Compile and run the new UI tests
+```
+
+`Next` and `Blockers` are optional. When nothing in the session points at a next action, the row is omitted rather than filled with a guess, so `Next` is trustworthy whenever it appears.
 
 The design follows long-running-agent guidance favoring concise, externally inspectable progress state over raw logs or chain-of-thought:
 

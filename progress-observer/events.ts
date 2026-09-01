@@ -8,7 +8,7 @@ export interface ProgressSummary {
 	goal: string;
 	progress: string;
 	current: string;
-	next: string;
+	next?: string;
 	blockers?: string;
 }
 

@@ -930,6 +930,25 @@ describe("sidebar snapshot and layout", () => {
 		expect(rows.indexOf("Ready")).toBe(10);
 	});
 
+	it("drops the Next row when no next action is reported", () => {
+		const observed = {
+			...snapshot(),
+			progressObserver: {
+				phase: "ready" as const,
+				modelId: "litellm/luna",
+				summary: {
+					goal: "Deliver observer",
+					progress: "Config complete",
+					current: "Building UI",
+				},
+			},
+		};
+		const rows = contentRows(renderSidebarLines(observed, theme, 44, 20, false));
+		expect(rows).toContain("Now Building UI");
+		expect(rows.some((row) => row.startsWith("Next"))).toBe(false);
+		expect(rows.indexOf("Now Building UI")).toBeLessThan(rows.indexOf("Goal Deliver observer"));
+	});
+
 	it("wraps long progress values instead of clipping them at the pane edge", () => {
 		const observed = {
 			...snapshot(),

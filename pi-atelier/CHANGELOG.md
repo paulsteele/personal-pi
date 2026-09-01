@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.0.4 — 2026-09-01
+
+- Treat the observer's next action as optional: omit the `Next` row instead of rendering an unsupported guess, and accept published summaries that carry no next action instead of discarding them and holding the previous summary as stale.
+
 ## 1.0.3 — 2026-09-01
 
 - Split the fullscreen sidebar into equal-height inferred summary and direct activity regions, each independently scrollable, behind a fixed full-height rail and fixed horizontal separator; omit redundant section headings.

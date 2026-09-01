@@ -70,6 +70,16 @@ describe("observer prompt", () => {
 		expect(prompt).not.toContain("hunter2");
 		expect(prompt.length).toBeLessThanOrEqual(24_000);
 	});
+
+	it("does not frame the request in meta-commentary vocabulary", () => {
+		const prompt = buildObservationPrompt(
+			source([{ type: "message", message: { role: "user", content: "Add fixtures" } }]),
+			{ goal: "Goal", progress: "Done", current: "Now" },
+		);
+		expect(prompt).not.toMatch(/evidence/i);
+		expect(prompt).toContain("Report the current state of this work.");
+		expect(prompt).toContain("PREVIOUS REPORT");
+	});
 });
 
 describe("observer model call", () => {
@@ -94,6 +104,36 @@ describe("observer model call", () => {
 		const context = caller.complete.mock.calls[0]?.[1];
 		expect(context.tools[0].name).toBe("submit_progress");
 		expect(context.systemPrompt).toContain("Do not claim access to hidden reasoning");
+		expect(context.systemPrompt).toContain("never state what did not happen");
+		expect(context.systemPrompt).toContain("Never hedge");
+	});
+
+	it("omits next instead of forcing an invented step", async () => {
+		const response = summaryCall();
+		delete (response.content[0]?.arguments as Record<string, unknown>).next;
+		const result = await observe({
+			caller: { complete: vi.fn().mockResolvedValue(response) } as never,
+			model: {} as never,
+			prompt: "record",
+			config: DEFAULT_CONFIG,
+		});
+		expect(result).toEqual({
+			kind: "success",
+			summary: { goal: "Ship observer", progress: "Config is complete", current: "Writing tests" },
+		});
+		expect(result.kind === "success" && "next" in result.summary).toBe(false);
+	});
+
+	it("still requires goal, progress, and current", async () => {
+		const response = summaryCall();
+		delete (response.content[0]?.arguments as Record<string, unknown>).current;
+		const result = await observe({
+			caller: { complete: vi.fn().mockResolvedValue(response) } as never,
+			model: {} as never,
+			prompt: "record",
+			config: DEFAULT_CONFIG,
+		});
+		expect(result).toMatchObject({ kind: "error", cause: "malformed" });
 	});
 
 	it("reports malformed responses without inventing a summary", async () => {

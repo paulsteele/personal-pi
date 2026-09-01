@@ -429,10 +429,9 @@ function progressRows(snapshot: SidebarSnapshot, palette: AtelierPalette, width:
 				: "dim";
 	rows.push(...wrapTextWithAnsi(palette.paint(role, `${status} · ${display(observer.modelId)}`), width));
 	if (observer.summary) {
-		rows.push(
-			...wrappedProgressValue("Now", observer.summary.current, width, palette),
-			...wrappedProgressValue("Next", observer.summary.next, width, palette),
-		);
+		rows.push(...wrappedProgressValue("Now", observer.summary.current, width, palette));
+		if (observer.summary.next)
+			rows.push(...wrappedProgressValue("Next", observer.summary.next, width, palette));
 		if (observer.summary.blockers)
 			rows.push(...wrappedProgressValue("Blockers", observer.summary.blockers, width, palette, "warning"));
 		rows.push(
