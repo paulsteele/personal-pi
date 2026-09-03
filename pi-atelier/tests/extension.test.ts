@@ -320,7 +320,7 @@ describe("extension registration", () => {
 		expect(replacementSetFooter).toHaveBeenLastCalledWith(expect.any(Function));
 		expect(replacementSetFooter).not.toHaveBeenCalledWith(undefined);
 		expect(h.overlays[0]?.done).toHaveBeenCalledOnce();
-		expect(renderOverlayText(h, 1)).toContain("Ready");
+		expect(renderOverlayText(h, 1)).toContain("READY · ┃ 󰄋 ┃");
 	});
 
 	it("keeps cleanup exception-safe when independent disposers throw", async () => {
@@ -353,7 +353,7 @@ describe("extension registration", () => {
 		});
 
 		const sidebar = renderOverlayText(h);
-		expect(sidebar).toContain("Ready");
+		expect(sidebar).toContain("READY · ┃ 󰄋 ┃");
 		expect(sidebar).not.toContain("snapshot read failed");
 	});
 
@@ -592,7 +592,7 @@ describe("extension registration", () => {
 		await command(h, args, staleContext);
 
 		expect(h.overlays[1]?.done).not.toHaveBeenCalled();
-		expect(renderOverlayText(h, 1)).toContain("Ready");
+		expect(renderOverlayText(h, 1)).toContain("READY · ┃ 󰄋 ┃");
 		expect(h.setFooter).not.toHaveBeenCalled();
 		expect(staleContext.ui.notify).toHaveBeenLastCalledWith(
 			"Pi Atelier is not active in this session",
@@ -815,7 +815,7 @@ describe("extension registration", () => {
 		expect(beforeReload).not.toMatch(
 			/↳.*(policy-deny|auto-allow|auto-human|guard-human|guard-approved|skill-check|gate-error)/,
 		);
-		expect(reloaded).toContain("Ready");
+		expect(reloaded).toContain("READY · ┃ 󰄋 ┃");
 	});
 
 	it("discovers and renders bounded progress-observer state through the event seam", async () => {
@@ -868,7 +868,7 @@ describe("extension registration", () => {
 
 		const sidebarText = h.overlays[0]?.component.render(44).join("\n") ?? "";
 		expect(sidebarText).not.toContain("ACTIVITY");
-		expect(sidebarText).toContain("T03");
+		expect(sidebarText).toContain("Turn 3");
 		expect(sidebarText).toContain("bash");
 		expect(sidebarText).toContain("npm test");
 		expect(sidebarText).not.toContain("WORKING");
@@ -919,7 +919,7 @@ describe("extension registration", () => {
 			);
 
 			const streamingText = h.overlays[0]?.component.render(44).join("\n") ?? "";
-			expect(streamingText).toContain("TTFT 820ms · TPS ~");
+			expect(streamingText).toMatch(/󰔛.*820ms.*RUNNING.*~.*󰓅/);
 
 			vi.setSystemTime(2_920);
 			await h.handlers.get("message_update")?.(
@@ -931,7 +931,7 @@ describe("extension registration", () => {
 				h.ctx,
 			);
 			const estimatedText = h.overlays[0]?.component.render(44).join("\n") ?? "";
-			expect(estimatedText).toContain("TTFT 820ms · TPS ~20.0");
+			expect(estimatedText).toMatch(/󰔛.*820ms.*RUNNING.*~20\.0.*󰓅/);
 
 			vi.setSystemTime(4_420);
 			await h.handlers.get("message_end")?.(
@@ -943,7 +943,7 @@ describe("extension registration", () => {
 			);
 
 			const completedText = h.overlays[0]?.component.render(44).join("\n") ?? "";
-			expect(completedText).toContain("TTFT 820ms · TPS 48.0");
+			expect(completedText).toMatch(/󰔛.*820ms.*RUNNING.*48\.0.*󰓅/);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -1057,7 +1057,7 @@ describe("extension registration", () => {
 			await h.handlers.get("agent_settled")?.({ type: "agent_settled" }, h.ctx);
 			const settledRenderCount = h.overlays[0]?.requestRender.mock.calls.length ?? 0;
 			const settledText = h.overlays[0]?.component.render(44).join("\n") ?? "";
-			expect(settledText).toContain("Last run · 3s");
+			expect(settledText).toContain("FINISH · 3s");
 			expect(settledText).not.toContain("settled 3s");
 			expect(settledText).not.toContain("WORKING");
 
@@ -1089,8 +1089,8 @@ describe("extension registration", () => {
 		expect(h.overlays[0]?.done).toHaveBeenCalledOnce();
 		await command(h, "on");
 		const replacementText = h.overlays[1]?.component.render(44).join("\n") ?? "";
-		expect(replacementText).toContain("Ready");
-		expect(replacementText).toContain("TTFT ~ · TPS ~");
+		expect(replacementText).toContain("READY · ┃ 󰄋 ┃");
+		expect(replacementText).toMatch(/󰔛.*READY · ┃ 󰄋 ┃.*󰓅/);
 		expect(replacementText).not.toContain("old.ts");
 
 		const replacementRenderCount = h.overlays[1]?.requestRender.mock.calls.length ?? 0;
@@ -1126,7 +1126,7 @@ describe("extension registration", () => {
 		const text = h.overlays[0]?.component.render(44).join("\n") ?? "";
 		expect(text).not.toContain("WORKING");
 		expect(text).not.toContain("ACTIVITY");
-		expect(text).toContain("T01");
+		expect(text).toContain("Turn 1");
 	});
 
 	it("ignores stale activity events after a replacement session becomes active", async () => {
@@ -1162,7 +1162,7 @@ describe("extension registration", () => {
 			const activeText = h.overlays[1]?.component.render(44).join("\n") ?? "";
 			expect(activeText).not.toContain("Replacement session");
 			expect(activeText).not.toContain("ACTIVITY");
-			expect(activeText).toContain("T07");
+			expect(activeText).toContain("Turn 7");
 			expect(activeText).toContain("bash");
 			expect(activeText).toContain("npm run current");
 			expect(activeText).not.toContain("WORKING");
@@ -1197,7 +1197,7 @@ describe("extension registration", () => {
 
 			expect(h.overlays[1]?.requestRender.mock.calls.length).toBeGreaterThan(activeRenderCount);
 			const settledText = h.overlays[1]?.component.render(44).join("\n") ?? "";
-			expect(settledText).toContain("Last run · <1s");
+			expect(settledText).toContain("FINISH · <1s");
 			expect(settledText).not.toContain("Turn 7");
 			expect(settledText).not.toContain("settled");
 			expect(settledText).toContain("done");

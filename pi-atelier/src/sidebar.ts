@@ -15,8 +15,8 @@ import { type AtelierPalette, createPalette, type PaletteRole } from "./palette.
 import {
 	EMPTY_RUN_ACTIVITY,
 	formatDuration,
-	formatResponsePerformance,
 	type PermissionActivity,
+	responsePerformanceValues,
 	type RunActivitySnapshot,
 	type ToolActivity,
 } from "./run-activity.js";
@@ -122,26 +122,6 @@ function renderDock(rows: string[], width: number, height: number, palette: Atel
 function valueRow(value: string | undefined, palette: AtelierPalette, role: PaletteRole): string {
 	const text = display(value);
 	return palette.paint(text === "—" ? "dim" : role, text);
-}
-
-const COMPACT_SIDEBAR_MAX_WIDTH = 39;
-
-interface SidebarLayout {
-	compact: boolean;
-	showToolNames: boolean;
-}
-
-function sidebarLayout(width: number): SidebarLayout {
-	return { compact: width <= COMPACT_SIDEBAR_MAX_WIDTH, showToolNames: false };
-}
-
-function spacedRow(left: string, right: string, width: number): string {
-	const safeWidth = Math.max(0, Math.trunc(width));
-	const rightWidth = visibleWidth(right);
-	const leftMax = Math.max(0, safeWidth - rightWidth - 1);
-	const safeLeft = truncateToWidth(left, leftMax, "");
-	const gap = " ".repeat(Math.max(1, safeWidth - visibleWidth(safeLeft) - rightWidth));
-	return truncateToWidth(`${safeLeft}${gap}${right}`, safeWidth, "");
 }
 
 function durationForTool(tool: ToolActivity, now: number): string {
@@ -360,21 +340,18 @@ function standalonePermissionRows(
 	return rows;
 }
 
-function runSummaryRow(activity: RunActivitySnapshot, palette: AtelierPalette, now: number): string {
-	if (activity.phase === "idle") return palette.paint("ready", "Ready");
-	const duration =
-		activity.phase === "settled"
-			? formatDuration(activity.durationMs ?? Math.max(0, now - (activity.startedAt ?? now)))
-			: formatDuration(Math.max(0, now - (activity.startedAt ?? now)));
-	const role: PaletteRole = activity.failedCount > 0 ? "error" : "ready";
-	return palette.paint(role, `Last run · ${duration}`);
-}
-
 const TURN_GLYPHS = {
 	1: { outline: "󰲡", filled: "󰲠" }, // bottom-right from the Paddock
 	2: { outline: "󰲣", filled: "󰲢" }, // top-right
 	3: { outline: "󰲥", filled: "󰲤" }, // top-left
 	4: { outline: "󰲧", filled: "󰲦" }, // bottom-left
+} as const;
+
+const TRACK_GLYPHS = {
+	car: "󰄋", // md-car, front view
+	finish: "󰈼", // md-flag-checkered
+	ttft: "󰔛", // md-timer-outline
+	tps: "󰓅", // md-speedometer
 } as const;
 
 function centeredTrackContent(content: string, width: number, fill: string): string {
@@ -396,15 +373,115 @@ function turnGlyph(
 	return active ? theme.bold(palette.paint("working", glyph)) : palette.paint("dim", glyph);
 }
 
-function turnTrackRows(
+function metricWithIcon(
+	value: string,
+	available: boolean,
+	icon: string,
+	iconSide: "left" | "right",
+	width: number,
+	palette: AtelierPalette,
+): string {
+	const safeWidth = Math.max(0, Math.trunc(width));
+	if (safeWidth === 0) return "";
+	const paintedIcon = palette.paint(available ? "output" : "dim", icon);
+	if (safeWidth === 1) return paintedIcon;
+	const safeValue = truncateToWidth(palette.paint(available ? "output" : "dim", value), safeWidth - 1, "");
+	const compact = iconSide === "left" ? `${paintedIcon}${safeValue}` : `${safeValue}${paintedIcon}`;
+	const spaced = iconSide === "left" ? `${paintedIcon} ${safeValue}` : `${safeValue} ${paintedIcon}`;
+	return visibleWidth(spaced) <= safeWidth ? spaced : truncateToWidth(compact, safeWidth, "");
+}
+
+function trackDashboardRow(
 	activity: RunActivitySnapshot,
+	status: string,
+	statusRole: PaletteRole,
+	palette: AtelierPalette,
+	width: number,
+): string {
+	const safeWidth = Math.max(0, Math.trunc(width));
+	if (safeWidth === 0) return "";
+	const center = truncateToWidth(palette.paint(statusRole, status), Math.max(1, safeWidth - 4), "");
+	const centerWidth = visibleWidth(center);
+	const leftAreaWidth = Math.floor((safeWidth - centerWidth) / 2);
+	const rightAreaWidth = Math.max(0, safeWidth - centerWidth - leftAreaWidth);
+	const performance = responsePerformanceValues(activity.performance);
+	const left = metricWithIcon(
+		performance.ttft.text,
+		performance.ttft.available,
+		TRACK_GLYPHS.ttft,
+		"left",
+		Math.max(0, leftAreaWidth - 1),
+		palette,
+	);
+	const right = metricWithIcon(
+		performance.tps.text,
+		performance.tps.available,
+		TRACK_GLYPHS.tps,
+		"right",
+		Math.max(0, rightAreaWidth - 1),
+		palette,
+	);
+	const leftPadding = " ".repeat(Math.max(0, leftAreaWidth - visibleWidth(left)));
+	const rightPadding = " ".repeat(Math.max(0, rightAreaWidth - visibleWidth(right)));
+	return `${left}${leftPadding}${center}${rightPadding}${right}`;
+}
+
+function trackRail(
+	position: "top" | "bottom",
+	content: string,
+	width: number,
+	palette: AtelierPalette,
+	leftGlyph = "",
+	rightGlyph = "",
+): string {
+	const safeWidth = Math.max(0, Math.trunc(width));
+	const [leftCorner, rightCorner] = position === "top" ? (["╭", "╮"] as const) : (["╰", "╯"] as const);
+	const rawPrefix = leftGlyph ? `${leftCorner}─ ${leftGlyph} ` : leftCorner;
+	const rawSuffix = rightGlyph ? ` ${rightGlyph} ─${rightCorner}` : rightCorner;
+	const prefix = leftGlyph
+		? `${palette.paint("dim", `${leftCorner}─ `)}${leftGlyph}${palette.paint("dim", " ")}`
+		: palette.paint("dim", leftCorner);
+	const suffix = rightGlyph
+		? `${palette.paint("dim", " ")}${rightGlyph}${palette.paint("dim", ` ─${rightCorner}`)}`
+		: palette.paint("dim", rightCorner);
+	const centerWidth = Math.max(0, safeWidth - visibleWidth(rawPrefix) - visibleWidth(rawSuffix));
+	const safeContent = truncateToWidth(content ? ` ${content} ` : "", centerWidth, "");
+	const remaining = Math.max(0, centerWidth - visibleWidth(safeContent));
+	const leftFill = Math.floor(remaining / 2);
+	const rail = (length: number) => (length > 0 ? palette.paint("dim", "─".repeat(length)) : "");
+	return `${prefix}${rail(leftFill)}${safeContent}${rail(remaining - leftFill)}${suffix}`;
+}
+
+function trackCounts(auto: SidebarSnapshot["autoModeState"], palette: AtelierPalette): string {
+	return `${palette.paint("permissionAuto", `󰚩 ${finiteCount(auto?.allowed ?? 0)}`)} ${palette.paint(
+		"dim",
+		"·",
+	)} ${palette.paint("permissionHuman", `󰀄 ${finiteCount(auto?.asked ?? 0)}`)}`;
+}
+
+function activityTrackRows(
+	activity: RunActivitySnapshot,
+	auto: SidebarSnapshot["autoModeState"],
 	palette: AtelierPalette,
 	theme: ThemeLike,
 	width: number,
 	now: number,
 ): string[] {
 	const safeWidth = Math.max(0, Math.trunc(width));
-	if (safeWidth < 8) return [runSummaryRow(activity, palette, now)];
+	if (safeWidth < 8) {
+		const fallback =
+			activity.phase === "idle"
+				? "READY"
+				: activity.phase === "settled"
+					? activity.failedCount > 0
+						? "ISSUES"
+						: "FINISH"
+					: activity.turnNumber === undefined
+						? "RUNNING"
+						: `Turn ${finiteCount(activity.turnNumber)}`;
+		return [palette.paint(activity.failedCount > 0 ? "error" : "ready", fallback)];
+	}
+
 	const absoluteTurn = activity.turnNumber === undefined ? undefined : finiteCount(activity.turnNumber);
 	const activeTurn = absoluteTurn === undefined ? undefined : ((((absoluteTurn - 1) % 4) + 4) % 4) + 1;
 	const turn = activeTurn as keyof typeof TURN_GLYPHS | undefined;
@@ -414,51 +491,46 @@ function turnTrackRows(
 		"error",
 		`${failed}✕`,
 	)}`;
-	const duration = formatDuration(Math.max(0, now - (activity.startedAt ?? now)));
-	const total = absoluteTurn === undefined ? "RUN" : `T${absoluteTurn.toString().padStart(2, "0")}`;
-	const middle = `${total} · ${duration}`;
-	const edgeWidth = 10; // outer curve, spacing, and turn glyph on both sides
-	const centerWidth = Math.max(0, safeWidth - edgeWidth);
-	const topCenter = centeredTrackContent(` ${aggregate} `, centerWidth, "─");
-	const middleCenter = centeredTrackContent(palette.paint("working", middle), safeWidth - 2, " ");
+	const duration =
+		activity.phase === "settled"
+			? formatDuration(activity.durationMs ?? Math.max(0, now - (activity.startedAt ?? now)))
+			: formatDuration(Math.max(0, now - (activity.startedAt ?? now)));
+
+	let topLeft = "";
+	let topRight = "";
+	let bottomLeft = "";
+	let bottomRight = "";
+	let status: string;
+	let statusRole: PaletteRole;
+	if (activity.phase === "running") {
+		topLeft = turnGlyph(3, turn, palette, theme);
+		topRight = turnGlyph(2, turn, palette, theme);
+		bottomLeft = turnGlyph(4, turn, palette, theme);
+		bottomRight = turnGlyph(1, turn, palette, theme);
+		status = `${absoluteTurn === undefined ? "RUNNING" : `Turn ${absoluteTurn}`} · ${duration}`;
+		statusRole = "working";
+	} else if (activity.phase === "settled") {
+		const finishRole: PaletteRole = failed > 0 ? "error" : "ready";
+		topLeft = theme.bold(palette.paint(finishRole, TRACK_GLYPHS.finish));
+		topRight = theme.bold(palette.paint(finishRole, TRACK_GLYPHS.finish));
+		status = `${failed > 0 ? "ISSUES" : "FINISH"} · ${duration}`;
+		statusRole = finishRole;
+	} else {
+		status = `READY · ┃ ${TRACK_GLYPHS.car} ┃`;
+		statusRole = "ready";
+	}
+
 	return [
-		`${palette.paint("dim", "╭─ ")}${turnGlyph(3, turn, palette, theme)} ${topCenter} ${turnGlyph(2, turn, palette, theme)}${palette.paint("dim", " ─╮")}`,
-		`${palette.paint("dim", "│")}${middleCenter}${palette.paint("dim", "│")}`,
-		// The bottom rail is completed by activityBandRows once auto counts are known.
+		trackRail("top", aggregate, safeWidth, palette, topLeft, topRight),
+		`${palette.paint("dim", "│ ")}${trackDashboardRow(
+			activity,
+			status,
+			statusRole,
+			palette,
+			safeWidth - 4,
+		)}${palette.paint("dim", " │")}`,
+		trackRail("bottom", trackCounts(auto, palette), safeWidth, palette, bottomLeft, bottomRight),
 	];
-}
-
-function turnTrackBottomRow(
-	activity: RunActivitySnapshot,
-	auto: SidebarSnapshot["autoModeState"],
-	palette: AtelierPalette,
-	theme: ThemeLike,
-	width: number,
-): string {
-	const safeWidth = Math.max(0, Math.trunc(width));
-	const absoluteTurn = activity.turnNumber === undefined ? undefined : finiteCount(activity.turnNumber);
-	const activeTurn = absoluteTurn === undefined ? undefined : ((((absoluteTurn - 1) % 4) + 4) % 4) + 1;
-	const turn = activeTurn as keyof typeof TURN_GLYPHS | undefined;
-	const counts = auto
-		? `${palette.paint("permissionAuto", `󰚩 ${finiteCount(auto.allowed)}`)} ${palette.paint("dim", "·")} ${palette.paint(
-				"permissionHuman",
-				`󰀄 ${finiteCount(auto.asked)}`,
-			)}`
-		: "";
-	const centerWidth = Math.max(0, safeWidth - 10);
-	const center = centeredTrackContent(counts ? ` ${counts} ` : "", centerWidth, "─");
-	return `${palette.paint("dim", "╰─ ")}${turnGlyph(4, turn, palette, theme)} ${center} ${turnGlyph(1, turn, palette, theme)}${palette.paint("dim", " ─╯")}`;
-}
-
-function responsePerformanceRow(activity: RunActivitySnapshot, palette: AtelierPalette): string {
-	return palette.paint("output", formatResponsePerformance(activity.performance));
-}
-
-function aggregateActivityText(activity: RunActivitySnapshot, compact: boolean): string {
-	const completed = finiteCount(activity.completedCount);
-	const failed = finiteCount(activity.failedCount);
-	if (completed === 0 && failed === 0) return "";
-	return compact ? `${completed}✓ ${failed}✕` : `${completed} done · ${failed} fail`;
 }
 
 function wrappedProgressValue(
@@ -522,7 +594,6 @@ function activityBandRows(
 	snapshot: SidebarSnapshot,
 	leadWidth: number,
 	continuationWidth: number,
-	layout: SidebarLayout,
 	palette: AtelierPalette,
 	theme: ThemeLike,
 	now: number,
@@ -550,34 +621,7 @@ function activityBandRows(
 			),
 		);
 	}
-	if (activity.phase === "running") {
-		rows.push(
-			...turnTrackRows(activity, palette, theme, leadWidth, now),
-			turnTrackBottomRow(activity, snapshot.autoModeState, palette, theme, leadWidth),
-		);
-	} else {
-		const aggregate = aggregateActivityText(activity, layout.compact);
-		const summary = runSummaryRow(activity, palette, now);
-		rows.push(
-			aggregate
-				? spacedRow(
-						summary,
-						palette.paint(activity.failedCount > 0 ? "error" : "ready", aggregate),
-						leadWidth,
-					)
-				: summary,
-		);
-		if (snapshot.autoModeState) {
-			const auto = snapshot.autoModeState;
-			rows.push(
-				`${palette.paint("permissionAuto", `󰚩 ${auto.allowed} allow`)} ${palette.paint("dim", "·")} ${palette.paint(
-					"permissionHuman",
-					`󰀄 ${auto.asked} asked`,
-				)}`,
-			);
-		}
-	}
-	rows.push(responsePerformanceRow(activity, palette));
+	rows.push(...activityTrackRows(activity, snapshot.autoModeState, palette, theme, leadWidth, now));
 	for (const tool of tools) rows.push(...toolActivityRows(tool, continuationWidth, palette, now));
 	for (const permission of activity.standalonePermissions ?? []) {
 		rows.push(...standalonePermissionRows(permission, continuationWidth, palette));
@@ -625,8 +669,7 @@ function renderActivityContent(
 ): string[] {
 	const safeWidth = Math.max(1, Math.trunc(width));
 	const palette = createPalette(theme, colorEnabled);
-	const layout = sidebarLayout(safeWidth + 2);
-	return activityBandRows(snapshot, safeWidth, safeWidth, layout, palette, theme, now).map((row) =>
+	return activityBandRows(snapshot, safeWidth, safeWidth, palette, theme, now).map((row) =>
 		truncateToWidth(row, safeWidth, ""),
 	);
 }

@@ -23,14 +23,14 @@
     },
     "claude-skills": {
       "name": "@paulsteele/pi-claude-skills",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "peerDependencies": {
         "@earendil-works/pi-coding-agent": "0.84.x",
       },
     },
     "code-blocks": {
       "name": "@paulsteele/pi-code-blocks",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "peerDependencies": {
         "@earendil-works/pi-coding-agent": "0.84.x",
         "@earendil-works/pi-tui": "0.84.x",
@@ -38,14 +38,14 @@
     },
     "desktop-notifications": {
       "name": "@paulsteele/pi-desktop-notifications",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "peerDependencies": {
         "@earendil-works/pi-coding-agent": "0.84.x",
       },
     },
     "pi-atelier": {
       "name": "@paulsteele/pi-atelier",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "devDependencies": {
         "@biomejs/biome": "2.5.4",
         "@earendil-works/pi-coding-agent": "0.84.2",
@@ -61,7 +61,7 @@
     },
     "pi-permission-system": {
       "name": "@paulsteele/pi-permission-system",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "dependencies": {
         "tree-sitter-bash": "0.25.1",
         "web-tree-sitter": "0.26.12",
@@ -86,7 +86,7 @@
     },
     "progress-observer": {
       "name": "@paulsteele/pi-progress-observer",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "devDependencies": {
         "@biomejs/biome": "2.5.4",
         "@earendil-works/pi-ai": "0.84.3",

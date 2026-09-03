@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.0.6 — 2026-09-03
+
+- Keep the three-row Indianapolis track visible before, during, and after runs: show a front-view car on the ready grid, preserve the four active turn corners while running, and mark settled runs with checkered flags plus `FINISH` or error-colored `ISSUES` status.
+- Move stopwatch-marked TTFT and speedometer-marked TPS into mirrored infield positions around the phase, elapsed time, and expanded `Turn N` label; remove the separate performance row so downstream activity stays fixed.
+- Match the horizontal track rails to the dim vertical walls and inset the TTFT/TPS indicators one cell from each side.
+
 ## 1.0.5 — 2026-09-03
 
 - Replace the running `TXX` Activity summary with a connected three-row Indianapolis oval viewed from the Paddock: centered auto/model identity sits above it, the active corner is filled and bold, total turn and elapsed time occupy the infield, colored run/permission counts stay on the straights, corner and permission glyphs have explicit cell spacing, and redundant directional arrows are omitted.

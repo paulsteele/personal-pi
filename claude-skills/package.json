@@ -1,6 +1,6 @@
 {
   "name": "@paulsteele/pi-claude-skills",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "private": true,
   "description": "Expose trusted project Claude skills to Pi",
   "type": "module",

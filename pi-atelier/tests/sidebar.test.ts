@@ -888,8 +888,9 @@ describe("sidebar snapshot and layout", () => {
 		expect(rows).not.toContain("PROGRESS");
 		expect(rows).not.toContain("ACTIVITY");
 		expect(rows[0]).toBe("Observer unavailable");
-		expect(rows).toContain("Ready");
-		expect(rows).toContain("TTFT ~ · TPS ~");
+		expect(rows).toContainEqual(expect.stringMatching(/^│ 󰔛 ~\s+READY · ┃ 󰄋 ┃\s+~ 󰓅 │$/));
+		expect(rows).toContainEqual(expect.stringMatching(/^╭─+ 0✓ · 0✕ ─+╮$/));
+		expect(rows).toContainEqual(expect.stringMatching(/^╰─+ 󰚩 0 · 󰀄 0 ─+╯$/));
 		for (const absent of ["RUN", "AGENT", "CTX", "GIT", "SESSION", "USE", "PLAN", "ALERTS"]) {
 			expect(rows).not.toContain(absent);
 		}
@@ -927,7 +928,7 @@ describe("sidebar snapshot and layout", () => {
 		expect(rows.indexOf("Goal Deliver observer")).toBeLessThan(rows.indexOf("Done Config complete"));
 		expect(rows).not.toContain("PROGRESS");
 		expect(rows).not.toContain("ACTIVITY");
-		expect(rows.indexOf("Ready")).toBe(10);
+		expect(rows.findIndex((row) => row.includes("READY · ┃ 󰄋 ┃"))).toBe(11);
 	});
 
 	it("drops the Next row when no next action is reported", () => {
@@ -995,7 +996,7 @@ describe("sidebar snapshot and layout", () => {
 		for (const width of [28, 39, 40, 44, 72]) {
 			const lines = renderSidebarLines(withActivity(activeActivity()), theme, width, 1, false, 20_000);
 			expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
-			expect(lines.map(stripAnsi).join("\n")).toContain("T03 · 19s");
+			expect(lines.map(stripAnsi).join("\n")).toContain("Turn 3 · 19s");
 			expect(lines.map(stripAnsi).join("\n")).not.toContain("▌");
 		}
 	});
@@ -1032,13 +1033,12 @@ describe("sidebar snapshot and layout", () => {
 			const activity = { ...activeActivity(), turnNumber: item.absolute };
 			const rows = contentRows(renderSidebarLines(withActivity(activity), theme, 44, 36, false, 20_000));
 			const top = rows.find((row) => row.startsWith("╭─")) ?? "";
-			const middle =
-				rows.find((row) => row.includes(`T${String(item.absolute).padStart(2, "0")} · 19s`)) ?? "";
+			const middle = rows.find((row) => row.includes(`Turn ${item.absolute} · 19s`)) ?? "";
 			const bottom = rows.find((row) => row.startsWith("╰─")) ?? "";
 			expect(top).toContain(item.top[0]);
 			expect(top).toContain(item.top[1]);
 			expect(top).toMatch(/^╭─.*2✓ · 1✕.*─╮$/);
-			expect(middle).toMatch(/^│\s+T\d{2} · 19s\s+│$/);
+			expect(middle).toMatch(/^│ 󰔛 ~\s+Turn \d+ · 19s\s+~ 󰓅 │$/);
 			expect(middle).not.toMatch(/[]/);
 			expect(bottom).toContain(item.bottom[0]);
 			expect(bottom).toContain(item.bottom[1]);
@@ -1052,7 +1052,7 @@ describe("sidebar snapshot and layout", () => {
 			renderSidebarLines(withActivity(activeActivity()), theme, 44, 36, false, 20_000),
 		);
 		expect(rows).toContainEqual(expect.stringMatching(/^╭─ 󰲤 .*2✓ · 1✕.* 󰲣 ─╮$/));
-		expect(rows).toContainEqual(expect.stringMatching(/^│\s+T03 · 19s\s+│$/));
+		expect(rows).toContainEqual(expect.stringMatching(/^│ 󰔛 ~\s+Turn 3 · 19s\s+~ 󰓅 │$/));
 		expect(rows).toContainEqual(expect.stringMatching(/^╰─ 󰲧 .* 󰲡 ─╯$/));
 		expect(rows).toEqual(
 			expect.arrayContaining([
@@ -1072,15 +1072,17 @@ describe("sidebar snapshot and layout", () => {
 			autoModeState: { enabled: true, usable: true, modelId: "reviewer", allowed: 3, asked: 2 },
 		});
 		const rows = contentRows(renderSidebarLines(autoSnapshot, theme, 44, 36, false, 20_000));
-		const performance = rows.indexOf("TTFT ~ · TPS ~");
+		const dashboard = rows.findIndex(
+			(row) => row.startsWith("│ 󰔛 ~") && row.includes("Turn 3 · 19s") && row.endsWith("~ 󰓅 │"),
+		);
 		const auto = rows.findIndex((row) => row.trim() === "⏵⏵ auto · reviewer");
 		const trackTop = rows.findIndex((row) => row.startsWith("╭─"));
 		const counts = rows.findIndex((row) => row.startsWith("╰─") && row.includes("󰚩 3 · 󰀄 2"));
 		const firstTool = rows.findIndex((row) => /^read\s+src\/state\.ts/.test(row));
-		expect(performance).toBeGreaterThan(-1);
+		expect(dashboard).toBeGreaterThan(-1);
 		expect(auto).toBeLessThan(trackTop);
-		expect(trackTop).toBeLessThan(counts);
-		expect(counts).toBeLessThan(performance);
+		expect(trackTop).toBeLessThan(dashboard);
+		expect(dashboard).toBeLessThan(counts);
 		expect(counts).toBeLessThan(firstTool);
 	});
 
@@ -1237,7 +1239,7 @@ describe("sidebar snapshot and layout", () => {
 		expect(narrowRows).toContainEqual(expect.stringMatching(/^read\s+.+󰒃 ✓²\s+󰚩 ✓ 3s$/));
 	});
 
-	it("renders response performance as a compact optional Activity row", () => {
+	it("renders response performance as mirrored gauges inside the track", () => {
 		const ttftOnly = contentRows(
 			renderSidebarLines(
 				withActivity({
@@ -1257,7 +1259,7 @@ describe("sidebar snapshot and layout", () => {
 				2_000,
 			),
 		);
-		expect(ttftOnly).toContain("TTFT 820ms · TPS ~");
+		expect(ttftOnly).toContainEqual(expect.stringMatching(/^│ 󰔛 820ms\s+Turn 1 · 1s\s+~ 󰓅 │$/));
 
 		const estimated = contentRows(
 			renderSidebarLines(
@@ -1277,7 +1279,7 @@ describe("sidebar snapshot and layout", () => {
 				2_000,
 			),
 		);
-		expect(estimated).toContain("TTFT 820ms · TPS ~42.3");
+		expect(estimated).toContainEqual(expect.stringMatching(/^│ 󰔛 820ms\s+RUNNING · 1s\s+~42\.3 󰓅 │$/));
 
 		const completed = contentRows(
 			renderSidebarLines(
@@ -1298,14 +1300,14 @@ describe("sidebar snapshot and layout", () => {
 				5_000,
 			),
 		);
-		expect(completed).toContain("TTFT 1.4s · TPS 47.3");
+		expect(completed).toContainEqual(expect.stringMatching(/^│ 󰔛 1\.4s\s+FINISH · 4s\s+47\.3 󰓅 │$/));
+		expect(completed).toContainEqual(expect.stringMatching(/^╭─ 󰈼 .*0✓ · 0✕.* 󰈼 ─╮$/));
 	});
 
 	it("always renders idle placeholders and preserves settled activity", () => {
 		const idleRows = contentRows(renderSidebarLines(snapshot(), theme, 44, 36, false, 20_000));
 		expect(idleRows).not.toContain("ACTIVITY");
-		expect(idleRows).toContain("Ready");
-		expect(idleRows).toContain("TTFT ~ · TPS ~");
+		expect(idleRows).toContainEqual(expect.stringMatching(/^│ 󰔛 ~\s+READY · ┃ 󰄋 ┃\s+~ 󰓅 │$/));
 
 		const settledRows = contentRows(
 			renderSidebarLines(
@@ -1335,7 +1337,8 @@ describe("sidebar snapshot and layout", () => {
 				20_000,
 			),
 		);
-		expect(settledRows).toContainEqual(expect.stringContaining("Last run · 6s"));
+		expect(settledRows).toContainEqual(expect.stringMatching(/^╭─ 󰈼 .*0✓ · 1✕.* 󰈼 ─╮$/));
+		expect(settledRows).toContainEqual(expect.stringMatching(/^│ 󰔛 ~\s+ISSUES · 6s\s+~ 󰓅 │$/));
 		expect(settledRows).not.toContain("Turn 4 · settled 6s");
 		expect(settledRows).toEqual(
 			expect.arrayContaining([expect.stringMatching(/^edit\s+src\/sidebar\.ts\s+failed 2s$/)]),
@@ -1370,7 +1373,7 @@ describe("sidebar snapshot and layout", () => {
 		expect(idleWithRecent).toEqual(
 			expect.arrayContaining([expect.stringMatching(/^bash\s+npm test\s+done 1s$/)]),
 		);
-		expect(idleWithRecent).toContainEqual(expect.stringContaining("1 done · 0 fail"));
+		expect(idleWithRecent).toContainEqual(expect.stringMatching(/^╭─+ 1✓ · 0✕ ─+╮$/));
 
 		const idleWithActive = contentRows(
 			renderSidebarLines(
@@ -1413,7 +1416,7 @@ describe("sidebar snapshot and layout", () => {
 			),
 		);
 		expect(idleWithCounts).not.toContain("ACTIVITY");
-		expect(idleWithCounts).toContainEqual(expect.stringContaining("0 done · 2 fail"));
+		expect(idleWithCounts).toContainEqual(expect.stringMatching(/^╭─+ 0✓ · 2✕ ─+╮$/));
 	});
 
 	it("keeps active tools before recent tools and preserves parallel start order", () => {
