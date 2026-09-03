@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.0.5 — 2026-09-03
+
+- Replace the running `TXX` Activity summary with a connected three-row Indianapolis oval viewed from the Paddock: centered auto/model identity sits above it, the active corner is filled and bold, total turn and elapsed time occupy the infield, colored run/permission counts stay on the straights, corner and permission glyphs have explicit cell spacing, and redundant directional arrows are omitted.
+
+- Reorder the footer's required state as auto mode, Plan, then thinking level; keep thinking visible under width pressure, remove auto decision counts, and remove session name, branch-entry count, and persistence from the footer.
+
 ## 1.0.4 — 2026-09-01
 
 - Treat the observer's next action as optional: omit the `Next` row instead of rendering an unsupported guess, and accept published summaries that carry no next action instead of discarding them and holding the previous summary as stale.

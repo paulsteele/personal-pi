@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { statSync } from "node:fs";
+import { posix } from "node:path";
 import {
   type ExtensionAPI,
   type ExtensionContext,
@@ -64,6 +66,7 @@ interface Runtime {
   skills: readonly ActiveSkill[];
   gitRemotes: readonly string[];
   cache: Map<string, Verdict>;
+  sessionExternalDirectories: Set<string>;
   counts: { allowed: number; asked: number };
   publisher: ReturnType<typeof createAutoPublisher>;
   logger: ReviewLogger;
@@ -113,6 +116,18 @@ function toolInputPath(input: unknown): string | null {
 
 function requestId(toolCallId: string): string {
   return `perm-${toolCallId || crypto.randomUUID()}`;
+}
+
+function externalDirectoryForPath(value: string, normalizer: PathNormalizer): string | undefined {
+  const canonical = normalizer.forPath(value).boundaryValue() || normalizer.comparableValue(value);
+  if (!canonical || !posix.isAbsolute(canonical) || canonical === "/") return undefined;
+  try {
+    return statSync(canonical).isDirectory() ? canonical : posix.dirname(canonical);
+  } catch {
+    // A missing target may itself be a directory being created. Persisting that
+    // exact path is safer than broadening the grant to its existing parent.
+    return canonical;
+  }
 }
 
 function skillNameFromInput(value: string): string | null {
@@ -197,6 +212,7 @@ async function humanDecision(
     reason?: string;
     source?: "tool_call" | "skill_input" | "skill_read";
     payload?: PermissionPromptPayload;
+    allowDirectory?: string;
   },
 ): Promise<{ allowed: boolean; reason: string | null }> {
   const { ctx } = runtime;
@@ -225,11 +241,19 @@ async function humanDecision(
     "Permission Required",
     payload,
     classifierFeedback,
+    Boolean(request.allowDirectory),
   );
   if (ctx.mode === "tui")
     appendPermissionOutcome(runtime.pi, request.id, request.toolCallId || null, choice);
   if (!choice) return { allowed: false, reason: "Human cancelled permission confirmation." };
-  const allow = choice === "approve" || choice === "approve_note";
+  const allow = choice === "approve" || choice === "approve_directory" || choice === "approve_note";
+  if (choice === "approve_directory") {
+    if (!request.allowDirectory)
+      return { allowed: false, reason: "No specific external directory was available to allow." };
+    runtime.sessionExternalDirectories.add(request.allowDirectory);
+    runtime.cache.clear();
+    ctx.ui.notify(`Allowed external directory for this session: ${request.allowDirectory}`, "info");
+  }
   const noteChoice = choice === "approve_note" || choice === "deny_note";
   if (noteChoice) {
     const draft = await ctx.ui.input("Classifier note for this session");
@@ -314,6 +338,7 @@ function publish(runtime: Runtime): void {
 
 function policyForCall(
   config: Config,
+  sessionExternalDirectories: ReadonlySet<string>,
   toolName: string,
   command: string | null,
   directPath: string | null,
@@ -322,15 +347,31 @@ function policyForCall(
   program: BashProgram | null,
 ): { surface: string; value: string; decision: PolicyDecision } {
   const checks: Array<{ surface: string; value: string; decision: PolicyDecision }> = [];
+  const sessionAllows = (surface: string, matchValues: readonly string[]): boolean =>
+    surface === "external_directory" &&
+    matchValues.some((value) =>
+      [...sessionExternalDirectories].some(
+        (directory) => value === directory || value.startsWith(`${directory}/`),
+      ),
+    );
   const add = (surface: string, displayValue: string, matchValues = [displayValue]): void => {
     if ((surface === "path" || surface === "external_directory") && !(surface in config.permission))
       return;
-    for (const matchValue of matchValues)
-      checks.push({
-        surface,
-        value: displayValue,
-        decision: checkPolicy(config.permission, surface, matchValue),
-      });
+    const decisions = matchValues.map((matchValue) =>
+      checkPolicy(config.permission, surface, matchValue),
+    );
+    // Lexical and canonical aliases describe the same path. Any explicit deny
+    // remains strongest; otherwise an allow on either alias covers the access.
+    const explicitDeny = decisions.find((candidate) => candidate.state === "deny");
+    const decision =
+      explicitDeny ??
+      (sessionAllows(surface, matchValues)
+        ? { state: "allow" as const, matchedPattern: "<session-directory>", reason: null }
+        : undefined) ??
+      decisions.find((candidate) => candidate.state === "allow") ??
+      decisions[0] ??
+      checkPolicy(config.permission, surface, displayValue);
+    checks.push({ surface, value: displayValue, decision });
   };
   if (skillName) add("skill", skillName);
   if (directPath) {
@@ -486,6 +527,7 @@ export default function permissionSystem(pi: ExtensionAPI): void {
       skills: [],
       gitRemotes: [],
       cache: new Map(),
+      sessionExternalDirectories: new Set(),
       counts: { allowed: 0, asked: 0 },
       publisher: createAutoPublisher(pi.events),
       events: pi.events,
@@ -771,6 +813,7 @@ export default function permissionSystem(pi: ExtensionAPI): void {
     // A persistent deny remains stronger and is resolved before every escalation.
     const selected = policyForCall(
       current.config,
+      current.sessionExternalDirectories,
       toolName,
       command,
       directPath,
@@ -780,6 +823,10 @@ export default function permissionSystem(pi: ExtensionAPI): void {
     );
     const policyValue = selected.value;
     const policy = selected.decision;
+    const allowDirectory =
+      selected.surface === "external_directory"
+        ? externalDirectoryForPath(selected.value, normalizer)
+        : undefined;
     const promptSource = matchedSkill ? "skill_read" : "tool_call";
     const promptPayload = (
       category?: string,
@@ -870,7 +917,8 @@ export default function permissionSystem(pi: ExtensionAPI): void {
       });
       return human.allowed ? {} : { block: true, reason: human.reason ?? safety.reason };
     }
-    if (policy.state === "allow") {
+    const unresolvedPathExpression = safety.riskMarkers.includes("unresolved-path-expression");
+    if (policy.state === "allow" && !unresolvedPathExpression) {
       decision(current, {
         requestId: req,
         toolCallId: toolCallId || null,
@@ -883,7 +931,12 @@ export default function permissionSystem(pi: ExtensionAPI): void {
       });
       return {};
     }
-    let review: PermissionReview = { source: "policy", reason: policy.reason };
+    let review: PermissionReview = {
+      source: "policy",
+      reason: unresolvedPathExpression
+        ? "A filesystem path contains a shell expansion that could not be resolved statically."
+        : policy.reason,
+    };
     if (current.enabled) {
       const facts = classifyFacts(toolName, input, command, selected);
       const verdict = await modelDecision(
@@ -921,7 +974,14 @@ export default function permissionSystem(pi: ExtensionAPI): void {
       value: policyValue,
       pattern: policy.matchedPattern,
       source: promptSource,
-      payload: promptPayload(undefined, policy.reason ?? undefined, review),
+      ...(allowDirectory ? { allowDirectory } : {}),
+      payload: promptPayload(
+        undefined,
+        unresolvedPathExpression
+          ? "A filesystem path contains a shell expansion that could not be resolved statically."
+          : (policy.reason ?? undefined),
+        review,
+      ),
     });
     decision(current, {
       requestId: req,

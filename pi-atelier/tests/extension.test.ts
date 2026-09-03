@@ -1047,7 +1047,7 @@ describe("extension registration", () => {
 			expect(withResult).toContain("read");
 			expect(withResult).toContain("src/run-activity.ts");
 			expect(withResult).toContain("done 1s");
-			expect(withResult).toContain("1 done · 0 fail");
+			expect(withResult.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")).toContain("1✓ · 0✕");
 
 			const rendersBeforeTick = h.overlays[0]?.requestRender.mock.calls.length ?? 0;
 			vi.advanceTimersByTime(1_000);

@@ -24,7 +24,7 @@ describe("durable permission transcript entries", () => {
       review: { source: "classifier", reason: "review ".repeat(200), cause: "classifier" },
     });
     appendPermissionRequest({ appendEntry } as never, "r".repeat(200), "tool", payload);
-    appendPermissionOutcome({ appendEntry } as never, "r1", "tool", "approve_note");
+    appendPermissionOutcome({ appendEntry } as never, "r1", "tool", "approve_directory");
     expect(appendEntry.mock.calls[0]?.[0]).toBe(PERMISSION_REQUEST_ENTRY);
     expect(appendEntry.mock.calls[0]?.[1]).toMatchObject({
       version: 1,

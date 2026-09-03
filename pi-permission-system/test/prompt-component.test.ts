@@ -10,6 +10,27 @@ const payload = buildPermissionPromptPayload({
   review: { source: "classifier", reason: "The remote needs operator confirmation." },
 });
 
+it("offers a session directory grant only for external-directory prompts", async () => {
+  const select = vi.fn(async (_title: string, labels: string[]) => {
+    expect(labels).toEqual(["y approve once", "p allow directory for session", "n deny"]);
+    return "p allow directory for session";
+  });
+  const directoryPayload = buildPermissionPromptPayload({
+    surface: "external_directory",
+    value: "/outside/project",
+    matchedPattern: "*",
+  });
+  await expect(
+    presentPermissionPrompt(
+      { mode: "rpc", ui: { select } } as never,
+      "Permission Required",
+      directoryPayload,
+      false,
+      true,
+    ),
+  ).resolves.toBe("approve_directory");
+});
+
 it("uses a compact non-overlay action panel and ignores transcript page keys", async () => {
   let rendered: string[] = [];
   let doneCalls = 0;

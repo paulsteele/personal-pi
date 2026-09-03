@@ -49,7 +49,7 @@ export function appendPermissionOutcome(
     version: 1,
     requestId: boundedId(requestId),
     toolCallId: toolCallId ? boundedId(toolCallId) : null,
-    allowed: choice === "approve" || choice === "approve_note",
+    allowed: choice === "approve" || choice === "approve_directory" || choice === "approve_note",
   });
 }
 

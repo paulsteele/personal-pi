@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.0.5 — 2026-09-03
+
+- Align automatic observation with the sidebar's four-turn lap: first run at turn 4, then at turns 8, 12, and subsequent lap boundaries, while retaining age-based and manual refreshes.
+
 ## 1.0.4 — 2026-09-01
 
 - Report progress as terse affirmative fragments about the work with the subject dropped, and bar meta-commentary about the session record, hedging vocabulary, and statements about what has not happened.

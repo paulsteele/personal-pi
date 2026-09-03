@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.0.5 — 2026-09-03
+
+- Route unresolved path-bearing shell expansions through the auto classifier as an explicit risk marker, including when generic Bash policy allows the command; retain direct human review when auto mode is off and preserve stronger deterministic guards.
+- Add `Allow directory for session` to external-directory approval prompts; grant the canonical directory and its descendants in memory until session end without changing global policy or broadening to a parent.
+- Retry malformed classifier output up to twice with an explicit tool-call repair instruction before escalating to human approval, while retaining the original operation deadline and fail-closed behavior.
+- Simplify the armed auto-mode footer status to `⏵⏵ auto`; detailed allow and human-ask counts remain available through auto-mode events and Atelier Activity.
+
 ## 1.0.3 — 2026-09-01
 
 - Closed Bash compound-command safety gaps by projecting `for`/`select` iterables, filesystem test operands, and statically resolvable local scalar bindings through control-flow scopes.

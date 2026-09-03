@@ -3,10 +3,15 @@ import { type Component, matchesKey, truncateToWidth } from "@earendil-works/pi-
 import type { PermissionPromptPayload } from "./payload.ts";
 import { renderPermissionPrompt } from "./renderer.ts";
 
-export type HumanPromptChoice = "approve" | "approve_note" | "deny" | "deny_note";
+export type HumanPromptChoice =
+  | "approve"
+  | "approve_directory"
+  | "approve_note"
+  | "deny"
+  | "deny_note";
 
 interface Option {
-  key: "y" | "a" | "n" | "d";
+  key: "y" | "p" | "a" | "n" | "d";
   label: string;
   value: HumanPromptChoice;
 }
@@ -21,14 +26,23 @@ const CLASSIFIER_OPTIONS: readonly Option[] = [
   { key: "n", label: "Deny", value: "deny" },
   { key: "d", label: "Deny + classifier note", value: "deny_note" },
 ];
+const DIRECTORY_OPTION: Option = {
+  key: "p",
+  label: "Allow directory for session",
+  value: "approve_directory",
+};
 
 export async function presentPermissionPrompt(
   ctx: ExtensionContext,
   title: string,
   payload: PermissionPromptPayload,
   classifierFeedback: boolean,
+  allowDirectory = false,
 ): Promise<HumanPromptChoice | null> {
-  const options = classifierFeedback ? CLASSIFIER_OPTIONS : STANDARD_OPTIONS;
+  const baseOptions = classifierFeedback ? CLASSIFIER_OPTIONS : STANDARD_OPTIONS;
+  const options = allowDirectory
+    ? [baseOptions[0] ?? STANDARD_OPTIONS[0], DIRECTORY_OPTION, ...baseOptions.slice(1)]
+    : baseOptions;
   if (ctx.mode !== "tui") {
     const rendered = renderPermissionPrompt(payload, 80);
     const labels = options.map((option) => `${option.key} ${option.label.toLowerCase()}`);

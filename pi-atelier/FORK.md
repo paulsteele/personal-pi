@@ -55,8 +55,8 @@ Primary files:
 - `extensions/index.ts`
 - footer/split/extension tests
 
-Atelier's registered footer is a single-line Nerd Font overview for Agent/model state, Git churn,
-session identity, context, usage, Plan, alerts, and external contribution summaries. It remains in
+Atelier's registered footer is a single-line Nerd Font overview for auto mode, Plan, thinking level,
+model state, Git churn, context, usage, performance, alerts, and external contribution summaries. It remains in
 Pi's native dock while the Activity Sidebar is presented. The existing guarded Pi 0.84 adapter only
 owns the transcript/sidebar split and leaves unknown layouts untouched.
 
@@ -74,9 +74,13 @@ Primary files:
 
 The fork owns `plannotator:progress`, reconstructing the active branch's durable Plannotator state.
 Planning and execution progress are summarized in the footer, which remains visible beside the
-Activity region. The integration replays `[DONE:n]` markers after the latest execution boundary
-and clears only the duplicate `plannotator-progress` widget. Plannotator's status is required in the
-responsive footer and is preserved until the final width clamp at extremely narrow widths.
+Activity region. Running Activity starts with auto/model identity above a connected three-row oval;
+from the Paddock view its filled/bold active corner advances Turn 1 bottom-right, Turn 2 top-right,
+Turn 3 top-left, and Turn 4 bottom-left. Absolute turn and elapsed time occupy the infield while
+run and permission counts occupy the straights. The integration replays `[DONE:n]` markers after the latest execution boundary
+and clears only the duplicate `plannotator-progress` widget. Plannotator's status is the second footer
+item, immediately after auto mode. It is required and preserved until the final width clamp at
+extremely narrow widths.
 
 **Invariant:** paths must resolve through existing ancestors, remain inside `ctx.cwd`, and use Markdown
 extensions. Never trust session/tool-call paths directly.
@@ -119,9 +123,9 @@ requests-to-human share `requestId` and must merge rather than appear twice. Rep
 may be visually collapsed with a count, but must not be discarded from the activity model. Nerd Font
 semantic icons (`nf-md-security`, `nf-md-robot`, and `nf-md-account`) are the sole source labels,
 always separated from outcome marks by whitespace; adjacent copy must not repeat words such as
-`auto allow` or `policy allow`. Policy, security, auto, and human badges use distinct colors. Auto
-summary counts use the same glyph vocabulary (`󰚩 allow · 󰀄 asked`) and never imply classifier denial.
-While the sidebar is hidden, width pressure must never drop the auto-mode footer item: while a
+`auto allow` or `policy allow`. Policy, security, auto, and human badges use distinct colors. The
+footer shows only the armed auto-mode label; its decision counts remain in Activity. While the sidebar
+is hidden, width pressure must never drop the auto-mode footer item: while a
 classifier is approving actions on the operator's behalf, that fact has to stay visible.
 
 ### 7. Plain activity labels
@@ -142,8 +146,9 @@ Maxis-style working phrases are removed from runtime state and both UI surfaces.
 Upstream `src/menu.ts` and `src/settings-workspace.ts`, their tests, all shortcuts, display editor,
 tool-list editor, model/tool/session actions, and enable/disable flows are removed. The sole command is
 `/atelier [on|off|toggle]`. There is no `pi-atelier.json`; Sidebar and footer behavior is fixed in
-source. The persistent footer uses a single responsive Nerd Font strip for activity, model/thinking,
-Git, session, extension summaries, usage/cost/cache, response performance, and context.
+source. The persistent footer uses a single responsive Nerd Font strip ordered as auto mode, Plan,
+required thinking level, model, Git, context, usage/cost/cache, response performance, alerts, and
+extension summaries. Session name, branch-entry count, and persistence are not footer content.
 
 ## Reconcile a future upstream release
 

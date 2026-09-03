@@ -15,7 +15,7 @@ export const DEFAULT_CONFIG: ObserverConfig = Object.freeze({
 	model: "amod-gpt-5.6-luna",
 	enabledByDefault: true,
 	timeoutMs: 20_000,
-	turnInterval: 5,
+	turnInterval: 4,
 	maxAgeMs: 120_000,
 });
 

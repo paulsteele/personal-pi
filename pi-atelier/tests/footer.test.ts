@@ -83,9 +83,8 @@ describe("Nerd Font telemetry footer", () => {
 	it("renders one dense native strip with all core groups at wide widths", () => {
 		const line = plainAt(260);
 		for (const marker of [
-			"󰒋 gpt-5.6-sol",
+			"MEDIUM · 󰒋 gpt-5.6-sol",
 			"󰊢 repo · main",
-			"󰆍 Sidebar implementation",
 			"󰍛 100k [■■■·······] 372k",
 			"󰓅 in324k out15k cache5.9M/99% $5.041",
 			"󰔟 ~ · ~t/s",
@@ -110,12 +109,15 @@ describe("Nerd Font telemetry footer", () => {
 		}
 	});
 
-	it("progressively compacts and drops optional groups", () => {
+	it("progressively compacts and drops optional groups while preserving thinking", () => {
 		const wide = plainAt(260);
 		const medium = plainAt(92);
 		const narrow = plainAt(40);
 		expect(wide).toContain("OPENAI-CODEX");
+		expect(wide).not.toContain("Sidebar implementation");
+		expect(wide).not.toContain("saved");
 		expect(medium).toContain("󰒋 gpt-5.6-sol");
+		expect(narrow).toContain("MEDIUM");
 		expect(visibleWidth(medium)).toBeLessThanOrEqual(92);
 		expect(visibleWidth(narrow)).toBeLessThanOrEqual(40);
 	});
@@ -186,19 +188,25 @@ describe("Nerd Font telemetry footer", () => {
 		const line = plainAt(400, {
 			...state,
 			plannotatorStatus: "⏸ plan",
-			autoModeStatus: "⏵⏵ auto 12/1",
+			autoModeStatus: "⏵⏵ auto",
 			extensionStatuses: ["sync warning"],
 			panelSummaries: [{ id: "vendor:queue", title: "Queue", summary: "2 pending" }],
 		});
-		for (const text of ["⏸ plan", "⏵⏵ auto 12/1", "󰀦 sync warning", "󰮯 Queue 2 pending"]) {
+		for (const text of ["⏸ plan", "⏵⏵ auto", "󰀦 sync warning", "󰮯 Queue 2 pending"]) {
 			expect(line).toContain(text);
 		}
 	});
 
-	it("keeps armed auto mode and active Plan visible at practical narrow width", () => {
-		const line = plainAt(56, { ...state, autoModeStatus: "⏵⏵ auto 12/1", plannotatorStatus: "⏸ plan" });
-		expect(line).toContain("⏵⏵ auto");
-		expect(line).toContain("⏸ plan");
+	it("renders Plan second and keeps required status ahead of optional model detail", () => {
+		const renderState = { ...state, autoModeStatus: "⏵⏵ auto", plannotatorStatus: "⏸ plan" };
+		const wide = plainAt(260, renderState);
+		expect(wide.indexOf("⏵⏵ auto")).toBeLessThan(wide.indexOf("⏸ plan"));
+		expect(wide.indexOf("⏸ plan")).toBeLessThan(wide.indexOf("MEDIUM"));
+		expect(wide.indexOf("MEDIUM")).toBeLessThan(wide.indexOf("󰒋 gpt-5.6-sol"));
+
+		const narrow = plainAt(56, renderState);
+		expect(narrow).toContain("⏵⏵ auto");
+		expect(narrow).toContain("⏸ plan");
 	});
 
 	it("sanitizes dynamic text and bounds every responsive width", () => {

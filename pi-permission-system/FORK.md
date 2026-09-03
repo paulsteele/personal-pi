@@ -49,13 +49,13 @@ auto mode **141 tests**, Atelier **12 files / 222 tests**, and patch harness **4
 1. A deterministic guard can require a fresh human but can never grant or deny by itself.
 2. Policy deny wins before model or human escalation.
 3. Sensitive access and known high-impact work always require one-shot human approval; headless operation blocks.
-4. The classifier can only allow or require a human. Timeout/unavailability/malformed replies/failure require a human with UI or block headlessly; external cancellation never creates a stale prompt.
+4. The classifier can only allow or require a human. A malformed reply receives up to two bounded repair attempts under the original operation deadline; exhaustion, timeout, unavailability, or failure requires a human with UI or blocks headlessly. External cancellation never creates a stale prompt.
 5. Every tool-call prompt and final decision carries `toolCallId`; every request transition retains `requestId`.
-6. Permission requests and human outcomes are versioned, durable, non-context transcript entries; the compact decision controls do not replace the thread.
+6. Permission requests and human outcomes are versioned, durable, non-context transcript entries; the compact decision controls do not replace the thread. External-directory prompts may grant the specific canonical directory and its descendants only for the current runtime session; grants are memory-only, clear at session shutdown/reload, and must not broaden to a parent or filesystem root.
 7. Classifier notes are separate versioned non-context session entries. They influence later model review only, never guards/policy, and their text never enters Activity, transcript requests, or JSONL.
 8. Activity and permission UI share provenance glyphs: `󰚩` classifier, `󰀄` human, and `󰒃` security/policy.
 9. There is exactly one local permission/auto owner at runtime.
-10. Bash compound syntax cannot hide deterministic path/command guards or an explicit inner Bash policy deny. The local projection performs bounded same-program scalar assignment dataflow; unresolved path-bearing expansions require fresh human approval instead of reaching the classifier.
+10. Bash compound syntax cannot hide deterministic path/command guards or an explicit inner Bash policy deny. The local projection performs bounded same-program scalar assignment dataflow. Unresolved path-bearing expansions are mandatory review risk: auto mode sends them to the classifier even when generic policy allows the command, while manual mode asks the human. Sensitive paths and other deterministic guards still require fresh human approval.
 
 ## Selective upstream adoption
 

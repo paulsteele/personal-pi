@@ -88,7 +88,7 @@ export interface FooterState extends AtelierState {
 	panelSummaries?: readonly FooterPanelSummary[];
 	plannotatorStatus?: string;
 	/**
-	 * Compact auto-mode label (e.g. `⏵⏵ auto 12/1`), published by the local
+	 * Compact auto-mode label (`⏵⏵ auto`), published by the local
 	 * auto-mode extension. Present only while auto mode is armed, so a manual
 	 * session's rail is unchanged.
 	 */

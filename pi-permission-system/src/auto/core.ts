@@ -37,7 +37,5 @@ export type AutoModeSnapshot = {
   asked: number;
 };
 export function footerLabel(snapshot: AutoModeSnapshot): string {
-  return snapshot.enabled
-    ? `⏵⏵ auto${snapshot.allowed || snapshot.asked ? ` 󰚩 ${snapshot.allowed} · 󰀄 ${snapshot.asked}` : ""}`
-    : "⏸ manual";
+  return snapshot.enabled ? "⏵⏵ auto" : "⏸ manual";
 }

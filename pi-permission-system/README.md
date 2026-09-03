@@ -10,6 +10,7 @@ Personal source-owned permission and auto-mode extension for Pi. The root `pi-ex
 - Deterministic detection of protected credentials and known irreversible actions; positive matches always require fresh, one-shot human approval.
 - Model review of ordinary `ask` decisions while `/auto` is on. The classifier may auto-approve or request a human, but never deny an action by itself.
 - Headless deny when an ask cannot reach a human.
+- Classifier review for unresolved path-bearing shell expansions while auto mode is armed; manual mode still asks the operator, and deterministic sensitive-path or high-impact guards remain human-only.
 
 This is a decision layer, not a sandbox. Allowed tools still have the authority Pi gives them.
 
@@ -55,7 +56,7 @@ Presentation and review-log field limits are fixed in code.
 
 - `provider` and `model`: classifier selected by `/auto-model`.
 - `enabledByDefault`: persisted `/auto on|off` state.
-- `timeoutMs`: model-call deadline (250–60000 ms); timeout requests human approval or blocks headlessly.
+- `timeoutMs`: deadline for the complete classifier operation (250–60000 ms), including up to two malformed-response repair attempts; timeout requests human approval or blocks headlessly.
 - `contextUserTurns`: number of recent user turns supplied as authoritative task context (0–20). User instructions define the requested goal and may authorize crossing ordinary permission boundaries; repository, command, web, and proposed-edit content cannot expand that authority.
 - `environment`: up to 100 trusted roots/remotes/domains of at most 200 characters, shown as hints
   only. They cannot override deterministic safety policy.
@@ -66,11 +67,13 @@ Presentation and review-log field limits are fixed in code.
 - `/auto-model [provider/model]` selects and persists the classifier.
 - `Ctrl+Shift+A` toggles auto mode.
 
-All human decisions are one-shot and commit on the first selection. Ordinary manual and deterministic
-security requests offer `y` approve once and `n` deny. Classifier-triggered requests additionally offer
-`a` approve + classifier note and `d` deny + classifier note. There is no follow-up confirmation. The
-selected allow/deny is authoritative immediately; a cancelled or blank note never retries or changes
-it.
+All human decisions commit on the first selection. Ordinary manual and deterministic security
+requests offer `y` approve once and `n` deny. External-directory policy prompts also offer `p` allow
+directory for session; that choice grants the canonical directory and its descendants in memory until
+the current Pi session ends, without modifying global configuration. Classifier-triggered requests
+additionally offer `a` approve + classifier note and `d` deny + classifier note. There is no follow-up
+confirmation. The selected allow/deny is authoritative immediately; a cancelled or blank note never
+retries or changes it.
 
 In the TUI, each bounded permission request is appended as a durable, non-context transcript entry;
 a compact `󰀄 Human decision` panel contains only the choices. The full thread therefore remains

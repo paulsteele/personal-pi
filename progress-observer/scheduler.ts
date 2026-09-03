@@ -93,10 +93,9 @@ export function createObserverScheduler(options: SchedulerOptions): ObserverSche
 		turnEnded(revision) {
 			if (disposed || !enabled) return;
 			completedTurns += 1;
-			const first = lastRunAt === undefined && completedTurns === 1;
 			const turnsDue = completedTurns - turnsAtLastRun >= config.turnInterval;
 			const timeDue = lastRunAt !== undefined && now() - lastRunAt >= config.maxAgeMs;
-			if (first || turnsDue || timeDue) dispatch(revision);
+			if (turnsDue || timeDue) dispatch(revision);
 		},
 		refresh() {
 			// Manual refresh intentionally bypasses activity revision deduplication.

@@ -26,9 +26,9 @@ export interface ThemeLike {
 type FooterItemId =
 	| "auto"
 	| "plannotator"
+	| "thinking"
 	| "model"
 	| "git"
-	| "session"
 	| "context"
 	| "usage"
 	| "performance"
@@ -47,7 +47,6 @@ const DROP = {
 	panels: 0,
 	alerts: 5,
 	performance: 10,
-	session: 20,
 	usage: 30,
 	git: 40,
 	model: 50,
@@ -57,7 +56,6 @@ const DROP = {
 const ICON = {
 	model: "󰒋",
 	git: "󰊢",
-	session: "󰆍",
 	context: "󰍛",
 	usage: "󰓅",
 	performance: "󰔟",
@@ -163,12 +161,37 @@ function buildItems(state: FooterState, theme: ThemeLike, colorEnabled: boolean)
 		});
 	}
 
+	const plannotator = state.plannotatorStatus
+		? sanitize(stripTerminalSequences(state.plannotatorStatus))
+		: "";
+	if (plannotator) {
+		const rendered = palette.paint(plannotator.includes("📋") ? "accent" : "warning", plannotator);
+		add({
+			id: "plannotator",
+			full: rendered,
+			compact: rendered,
+			dropRank: Number.POSITIVE_INFINITY,
+			required: true,
+		});
+	}
+
+	const thinking = state.thinkingLevel ? sanitize(state.thinkingLevel).toUpperCase() : "";
+	if (thinking) {
+		const rendered = palette.paint("working", thinking);
+		add({
+			id: "thinking",
+			full: rendered,
+			compact: rendered,
+			dropRank: Number.POSITIVE_INFINITY,
+			required: true,
+		});
+	}
+
 	const model = state.modelId ? sanitize(state.modelId) : "";
 	if (model) {
 		const fullParts = [
 			palette.paint("primary", model),
 			...(state.provider ? [palette.paint("muted", sanitize(state.provider).toUpperCase())] : []),
-			...(state.thinkingLevel ? [palette.paint("working", sanitize(state.thinkingLevel).toUpperCase())] : []),
 			palette.paint(
 				state.metrics.subscription ? "ready" : "muted",
 				state.metrics.subscription ? "SUB" : "METERED",
@@ -185,22 +208,6 @@ function buildItems(state: FooterState, theme: ThemeLike, colorEnabled: boolean)
 
 	const workspace = workspaceText(state, palette);
 	if (workspace) add({ id: "git", ...workspace, dropRank: DROP.git, required: false });
-
-	if (state.sessionName || state.branchEntryCount !== undefined) {
-		const name = state.sessionName ? sanitize(state.sessionName) : "session";
-		const count = finiteCount(state.branchEntryCount);
-		const persistence = state.persisted === undefined ? "" : state.persisted ? "saved" : "ephemeral";
-		add({
-			id: "session",
-			full: `${palette.paint("accent", ICON.session)} ${palette.paint("primary", name)} ${palette.paint(
-				"muted",
-				[count ? count : "", persistence].filter(Boolean).join(" · "),
-			)}`.trimEnd(),
-			compact: `${palette.paint("accent", ICON.session)} ${palette.paint("muted", String(count))}`,
-			dropRank: DROP.session,
-			required: false,
-		});
-	}
 
 	const metrics = state.metrics;
 	const contextRoleValue = contextRole(metrics);
@@ -261,20 +268,6 @@ function buildItems(state: FooterState, theme: ThemeLike, colorEnabled: boolean)
 		dropRank: DROP.performance,
 		required: false,
 	});
-
-	const plannotator = state.plannotatorStatus
-		? sanitize(stripTerminalSequences(state.plannotatorStatus))
-		: "";
-	if (plannotator) {
-		const rendered = palette.paint(plannotator.includes("📋") ? "accent" : "warning", plannotator);
-		add({
-			id: "plannotator",
-			full: rendered,
-			compact: rendered,
-			dropRank: Number.POSITIVE_INFINITY,
-			required: true,
-		});
-	}
 
 	const statuses = state.extensionStatuses.map(sanitize).filter(Boolean);
 	if (statuses.length > 0) {

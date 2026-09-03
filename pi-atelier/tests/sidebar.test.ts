@@ -920,7 +920,7 @@ describe("sidebar snapshot and layout", () => {
 		expect(rows.slice(0, 9).join(" ")).toContain("Goal Deliver observer");
 		expect(rows.slice(0, 9).join(" ")).toContain("Done Config complete");
 		expect(rows.slice(0, 9).join(" ")).toContain("Next Verify tests");
-		expect(rows[0]).toBe("Summary · litellm/luna");
+		expect(rows[0]?.trim()).toBe("Summary · litellm/luna");
 		expect(rows.indexOf("Now Building UI")).toBeLessThan(rows.indexOf("Next Verify tests"));
 		expect(rows.indexOf("Next Verify tests")).toBeLessThan(rows.indexOf("Blockers None"));
 		expect(rows.indexOf("Blockers None")).toBeLessThan(rows.indexOf("Goal Deliver observer"));
@@ -1020,11 +1020,40 @@ describe("sidebar snapshot and layout", () => {
 		expect(text).not.toContain("feature/sidebar");
 	});
 
+	it("renders the connected Paddock-view oval with the active turn filled", () => {
+		const expected = [
+			{ absolute: 1, top: ["󰲥", "󰲣"], bottom: ["󰲧", "󰲠"] },
+			{ absolute: 2, top: ["󰲥", "󰲢"], bottom: ["󰲧", "󰲡"] },
+			{ absolute: 3, top: ["󰲤", "󰲣"], bottom: ["󰲧", "󰲡"] },
+			{ absolute: 4, top: ["󰲥", "󰲣"], bottom: ["󰲦", "󰲡"] },
+			{ absolute: 5, top: ["󰲥", "󰲣"], bottom: ["󰲧", "󰲠"] },
+		];
+		for (const item of expected) {
+			const activity = { ...activeActivity(), turnNumber: item.absolute };
+			const rows = contentRows(renderSidebarLines(withActivity(activity), theme, 44, 36, false, 20_000));
+			const top = rows.find((row) => row.startsWith("╭─")) ?? "";
+			const middle =
+				rows.find((row) => row.includes(`T${String(item.absolute).padStart(2, "0")} · 19s`)) ?? "";
+			const bottom = rows.find((row) => row.startsWith("╰─")) ?? "";
+			expect(top).toContain(item.top[0]);
+			expect(top).toContain(item.top[1]);
+			expect(top).toMatch(/^╭─.*2✓ · 1✕.*─╮$/);
+			expect(middle).toMatch(/^│\s+T\d{2} · 19s\s+│$/);
+			expect(middle).not.toMatch(/[]/);
+			expect(bottom).toContain(item.bottom[0]);
+			expect(bottom).toContain(item.bottom[1]);
+			expect(bottom).toMatch(/^╰─.*─╯$/);
+			expect(`${top}${middle}${bottom}`).not.toMatch(/[]/);
+		}
+	});
+
 	it("renders deterministic live run activity", () => {
 		const rows = contentRows(
 			renderSidebarLines(withActivity(activeActivity()), theme, 44, 36, false, 20_000),
 		);
-		expect(rows).toContainEqual(expect.stringMatching(/^T03 · 19s\s+2 done · 1 fail$/));
+		expect(rows).toContainEqual(expect.stringMatching(/^╭─ 󰲤 .*2✓ · 1✕.* 󰲣 ─╮$/));
+		expect(rows).toContainEqual(expect.stringMatching(/^│\s+T03 · 19s\s+│$/));
+		expect(rows).toContainEqual(expect.stringMatching(/^╰─ 󰲧 .* 󰲡 ─╯$/));
 		expect(rows).toEqual(
 			expect.arrayContaining([
 				expect.stringMatching(/^read\s+src\/state\.ts\s+18s$/),
@@ -1044,11 +1073,13 @@ describe("sidebar snapshot and layout", () => {
 		});
 		const rows = contentRows(renderSidebarLines(autoSnapshot, theme, 44, 36, false, 20_000));
 		const performance = rows.indexOf("TTFT ~ · TPS ~");
-		const auto = rows.indexOf("auto · reviewer");
-		const counts = rows.indexOf("󰚩 3 allow · 󰀄 2 asked");
+		const auto = rows.findIndex((row) => row.trim() === "⏵⏵ auto · reviewer");
+		const trackTop = rows.findIndex((row) => row.startsWith("╭─"));
+		const counts = rows.findIndex((row) => row.startsWith("╰─") && row.includes("󰚩 3 · 󰀄 2"));
 		const firstTool = rows.findIndex((row) => /^read\s+src\/state\.ts/.test(row));
 		expect(performance).toBeGreaterThan(-1);
-		expect(auto).toBeLessThan(counts);
+		expect(auto).toBeLessThan(trackTop);
+		expect(trackTop).toBeLessThan(counts);
 		expect(counts).toBeLessThan(performance);
 		expect(counts).toBeLessThan(firstTool);
 	});

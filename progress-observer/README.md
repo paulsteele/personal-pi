@@ -4,8 +4,8 @@ A globally loaded Pi extension that watches long-running TUI sessions with a sep
 
 ## Behavior
 
-- First refresh after the first completed model turn in a session.
-- Later refreshes after five additional turns or two minutes, whichever is due at the next turn boundary.
+- Refresh after each completed four-turn lap: turns 4, 8, 12, and so on.
+- After the first refresh, two minutes of age can also trigger an update at the next turn boundary.
 - At most one observer request runs at once; additional triggers coalesce into one refresh using the newest session snapshot.
 - Summaries are memory-only. Resume, fork, reload, and tree navigation clear stale state and regenerate from the active branch.
 - Print, JSON, and RPC sessions do not call the observer model because the result is a TUI presentation feature.
@@ -31,7 +31,7 @@ An absent file uses these defaults:
   "model": "amod-gpt-5.6-luna",
   "enabledByDefault": true,
   "timeoutMs": 20000,
-  "turnInterval": 5,
+  "turnInterval": 4,
   "maxAgeMs": 120000
 }
 ```

@@ -9,7 +9,7 @@ const flush = async () => {
 };
 
 describe("observer scheduler", () => {
-	it("runs after the first turn, then at five turns or two minutes", async () => {
+	it("runs at four-turn lap boundaries, then by lap or age", async () => {
 		let time = 1_000;
 		let revision = 0;
 		const nextRevision = () => `r${++revision}`;
@@ -23,10 +23,13 @@ describe("observer scheduler", () => {
 			now: () => time,
 		});
 		expect(states.at(-1)?.phase).toBe("waiting");
+		for (let index = 0; index < 3; index += 1) scheduler.turnEnded(nextRevision());
+		await flush();
+		expect(run).not.toHaveBeenCalled();
 		scheduler.turnEnded(nextRevision());
 		await flush();
 		expect(run).toHaveBeenCalledTimes(1);
-		for (let index = 0; index < 4; index += 1) scheduler.turnEnded(nextRevision());
+		for (let index = 0; index < 3; index += 1) scheduler.turnEnded(nextRevision());
 		await flush();
 		expect(run).toHaveBeenCalledTimes(1);
 		scheduler.turnEnded(nextRevision());
@@ -48,7 +51,7 @@ describe("observer scheduler", () => {
 			run,
 			now: () => time,
 		});
-		scheduler.turnEnded("same-leaf");
+		for (let index = 0; index < DEFAULT_CONFIG.turnInterval; index += 1) scheduler.turnEnded("same-leaf");
 		await flush();
 		time += DEFAULT_CONFIG.maxAgeMs;
 		scheduler.turnEnded("same-leaf");

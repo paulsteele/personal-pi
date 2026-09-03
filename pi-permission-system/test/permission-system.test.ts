@@ -100,6 +100,13 @@ afterEach(() => {
 });
 
 describe("integrated permission system", () => {
+  it("publishes only the compact armed auto-mode footer label", async () => {
+    const h = setup({ enabledByDefault: true });
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    expect(h.ctx.ui.setStatus).toHaveBeenLastCalledWith("auto-mode", "⏵⏵ auto");
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
   it("correlates a policy-allowed read with the host tool row", async () => {
     const h = setup();
     const decisions: any[] = [];
@@ -117,6 +124,58 @@ describe("integrated permission system", () => {
         result: "allow",
       }),
     ]);
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("allows an approved external directory for the rest of the session only", async () => {
+    const h = setup({
+      enabledByDefault: false,
+      permission: { "*": "ask", read: "allow", external_directory: "ask" },
+    });
+    h.ctx.ui.select.mockResolvedValueOnce("p allow directory for session");
+    const directory = join(h.agentDir, "outside/project");
+    const file = join(directory, "a.ts");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(file, "export {};\n");
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+
+    const first = await h.handlers.get("tool_call")?.(
+      { toolName: "read", toolCallId: "outside-1", input: { path: file } },
+      h.ctx,
+    );
+    expect(first).toEqual({});
+    expect(h.ctx.ui.select.mock.calls[0]?.[1]).toEqual([
+      "y approve once",
+      "p allow directory for session",
+      "n deny",
+    ]);
+    const allowedDirectory = h.ctx.ui.notify.mock.calls[0]?.[0]?.replace(
+      "Allowed external directory for this session: ",
+      "",
+    );
+    expect(allowedDirectory).toMatch(/\/outside\/project$/);
+    expect(h.ctx.ui.notify.mock.calls[0]?.[1]).toBe("info");
+    const persisted = JSON.parse(
+      readFileSync(join(h.agentDir, "extensions/pi-permission-system/config.json"), "utf8"),
+    );
+    expect(persisted.permission.external_directory).toBe("ask");
+
+    const second = await h.handlers.get("tool_call")?.(
+      { toolName: "read", toolCallId: "outside-2", input: { path: file } },
+      h.ctx,
+    );
+    expect(second).toEqual({});
+    expect(h.ctx.ui.select).toHaveBeenCalledTimes(1);
+
+    h.ctx.ui.select.mockResolvedValueOnce("n deny");
+    await h.handlers.get("session_shutdown")?.({}, h.ctx);
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    const nextSession = await h.handlers.get("tool_call")?.(
+      { toolName: "read", toolCallId: "outside-3", input: { path: file } },
+      h.ctx,
+    );
+    expect(nextSession).toMatchObject({ block: true });
+    expect(h.ctx.ui.select).toHaveBeenCalledTimes(2);
     rmSync(h.agentDir, { recursive: true, force: true });
   });
 
@@ -313,6 +372,57 @@ describe("integrated permission system", () => {
       h.ctx,
     );
     expect(result).toMatchObject({ block: true });
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("routes an unresolved shell path through the classifier even when Bash policy allows it", async () => {
+    const h = setup({
+      enabledByDefault: true,
+      permission: { "*": "allow", bash: "allow" },
+      modelReply: {
+        content: [{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "allow" } }],
+      },
+      branch: [
+        { type: "message", message: { role: "user", content: "read the configured report" } },
+      ],
+    });
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    const result = await h.handlers.get("tool_call")?.(
+      {
+        toolName: "bash",
+        toolCallId: "unresolved-classified",
+        input: { command: 'cat "$UNKNOWN/report.txt"' },
+      },
+      h.ctx,
+    );
+    expect(result).toEqual({});
+    expect(h.ctx.modelRegistry.complete).toHaveBeenCalledOnce();
+    const modelCalls = h.ctx.modelRegistry.complete.mock.calls as unknown as Array<
+      [unknown, { messages?: Array<{ content?: string }> }]
+    >;
+    const request = modelCalls[0]?.[1];
+    expect(request.messages?.[0]?.content).toContain("risk marker: unresolved-path-expression");
+    expect(h.ctx.ui.select).not.toHaveBeenCalled();
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("asks the human about an unresolved shell path when auto mode is off", async () => {
+    const h = setup({ enabledByDefault: false, permission: { "*": "allow", bash: "allow" } });
+    h.ctx.ui.select.mockResolvedValueOnce("n deny");
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    const result = await h.handlers.get("tool_call")?.(
+      {
+        toolName: "bash",
+        toolCallId: "unresolved-manual",
+        input: { command: 'cat "$UNKNOWN/report.txt"' },
+      },
+      h.ctx,
+    );
+    expect(result).toMatchObject({ block: true });
+    expect(h.ctx.ui.select.mock.calls[0]?.[0]).toContain(
+      "A filesystem path contains a shell expansion that could not",
+    );
+    expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
     rmSync(h.agentDir, { recursive: true, force: true });
   });
 

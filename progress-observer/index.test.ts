@@ -72,10 +72,14 @@ const flush = async () => {
 };
 
 describe("progress observer extension", () => {
-	it("runs fire-and-forget on the first TUI turn and publishes ready state", async () => {
+	it("runs fire-and-forget at the first four-turn lap boundary and publishes ready state", async () => {
 		const h = harness();
 		await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
-		await h.handlers.get("turn_end")?.({ turnIndex: 0 }, h.ctx);
+		for (let turnIndex = 0; turnIndex < 3; turnIndex += 1)
+			await h.handlers.get("turn_end")?.({ turnIndex }, h.ctx);
+		await flush();
+		expect(h.complete).not.toHaveBeenCalled();
+		await h.handlers.get("turn_end")?.({ turnIndex: 3 }, h.ctx);
 		await flush();
 		expect(h.complete).toHaveBeenCalledTimes(1);
 		expect(h.emitted.filter(([channel]) => channel === "progress-observer:state").at(-1)?.[1]).toMatchObject({

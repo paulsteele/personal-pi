@@ -181,12 +181,37 @@ it("maps timeout and call failure to typed human requests", async () => {
   ).resolves.toMatchObject({ kind: "require_human", cause: "call-failed" });
 });
 
-it("maps malformed output to a typed human request", async () => {
+it("repairs a malformed response before escalating to a human", async () => {
+  const complete = vi
+    .fn()
+    .mockResolvedValueOnce({ content: [{ type: "text", text: "This looks safe." }] })
+    .mockResolvedValueOnce({
+      content: [{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "allow" } }],
+    });
+
   await expect(
     classify({
-      caller: {
-        complete: vi.fn(async () => ({ content: [{ type: "text", text: "maybe" }] })),
-      } as never,
+      caller: { complete } as never,
+      model: {} as never,
+      facts,
+      context,
+      config: auto,
+    }),
+  ).resolves.toEqual({ kind: "allow", modelCalled: true });
+  expect(complete).toHaveBeenCalledTimes(2);
+  const repairRequest = complete.mock.calls[1]?.[1] as {
+    messages: Array<{ role: string; content: string }>;
+  };
+  expect(repairRequest.messages.at(-1)?.content).toContain(
+    "Do not answer with prose or plain JSON",
+  );
+});
+
+it("escalates after three malformed attempts", async () => {
+  const complete = vi.fn(async () => ({ content: [{ type: "text", text: "maybe" }] }));
+  await expect(
+    classify({
+      caller: { complete } as never,
       model: {} as never,
       facts,
       context,
@@ -195,8 +220,31 @@ it("maps malformed output to a typed human request", async () => {
   ).resolves.toEqual({
     kind: "require_human",
     reason:
-      "The classifier returned no usable structured verdict, so it could not approve this action.",
+      "The classifier returned no usable structured verdict after three attempts, so it could not approve this action.",
     cause: "malformed-response",
     modelCalled: true,
   });
+  expect(complete).toHaveBeenCalledTimes(3);
+});
+
+it("does not retry a valid human-review verdict", async () => {
+  const complete = vi.fn(async () => ({
+    content: [
+      {
+        type: "toolCall",
+        name: "submit_verdict",
+        arguments: { verdict: "require_human", reason: "Operator confirmation is needed." },
+      },
+    ],
+  }));
+  await expect(
+    classify({
+      caller: { complete } as never,
+      model: {} as never,
+      facts,
+      context,
+      config: auto,
+    }),
+  ).resolves.toMatchObject({ kind: "require_human", cause: "classifier" });
+  expect(complete).toHaveBeenCalledOnce();
 });

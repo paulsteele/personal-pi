@@ -410,15 +410,7 @@ export function evaluateSafety(
       }
     }
   }
-  if (context.shell?.unresolvedPathExpression) {
-    return {
-      kind: "require_human",
-      category: "unresolved_path_expression",
-      reason:
-        "A filesystem path contains a shell expansion that could not be resolved statically; fresh human approval is required.",
-      riskMarkers: [...risks, "unresolved-path-expression"],
-    };
-  }
+  if (context.shell?.unresolvedPathExpression) risks.add("unresolved-path-expression");
   for (const command of context.shell?.commands ?? []) {
     if (!command.argv) {
       risks.add("unstructured-command-unit");
