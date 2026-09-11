@@ -342,6 +342,151 @@ describe("integrated permission system", () => {
     rmSync(h.agentDir, { recursive: true, force: true });
   });
 
+  it.each([true, false])(
+    "honors the env-template allow rule for file tools and Bash (auto=%s)",
+    async (enabledByDefault) => {
+      const h = setup({
+        enabledByDefault,
+        permission: {
+          "*": "ask",
+          path: { "*": "allow", "*.env": "deny", "*.env.*": "deny", "*.env.example": "allow" },
+          read: "allow",
+          write: "allow",
+          edit: "allow",
+          bash: { "rg *": "allow" },
+        },
+      });
+      h.ctx.cwd = join(h.agentDir, "workspace");
+      mkdirSync(join(h.ctx.cwd, "nested"), { recursive: true });
+      writeFileSync(join(h.ctx.cwd, ".env.example"), "EXAMPLE=placeholder\n");
+      writeFileSync(join(h.ctx.cwd, "nested/.env.example"), "EXAMPLE=placeholder\n");
+      writeFileSync(join(h.ctx.cwd, "README.md"), "Example configuration\n");
+      const decisions: any[] = [];
+      h.events.on("permissions:decision", (event) => decisions.push(event));
+      await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+      try {
+        const calls = [
+          { toolName: "bash", input: { command: "rg -n EXAMPLE .env.example README.md" } },
+          { toolName: "read", input: { path: ".env.example" } },
+          { toolName: "read", input: { path: join(h.ctx.cwd, "nested/.env.example") } },
+          { toolName: "write", input: { path: ".env.example", content: "EXAMPLE=value\n" } },
+          {
+            toolName: "edit",
+            input: {
+              path: ".env.example",
+              edits: [{ oldText: "EXAMPLE=value", newText: "EXAMPLE=placeholder" }],
+            },
+          },
+        ];
+        for (const [index, call] of calls.entries()) {
+          const result = await h.handlers.get("tool_call")?.(
+            { ...call, toolCallId: `env-template-${index}` },
+            h.ctx,
+          );
+          expect(result).toEqual({});
+          expect(decisions.at(-1)).toMatchObject({ result: "allow", resolution: "policy_allow" });
+        }
+        expect(h.ctx.ui.select).not.toHaveBeenCalled();
+        expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
+      } finally {
+        rmSync(h.agentDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(["ask", "deny"])("retains explicit %s policy for env templates", async (state) => {
+    const h = setup({
+      enabledByDefault: false,
+      permission: { "*": "allow", path: { "*.env.example": state } },
+    });
+    h.ctx.ui.select.mockResolvedValueOnce("n deny");
+    const decisions: any[] = [];
+    h.events.on("permissions:decision", (event) => decisions.push(event));
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    try {
+      const result = await h.handlers.get("tool_call")?.(
+        { toolName: "read", toolCallId: "env-template-policy", input: { path: ".env.example" } },
+        h.ctx,
+      );
+      expect(result).toMatchObject({ block: true });
+      expect(decisions.at(-1)).toMatchObject({
+        result: "deny",
+        resolution: state === "deny" ? "policy_deny" : "user_denied",
+      });
+      expect(decisions.at(-1).category).toBeUndefined();
+      expect(h.ctx.ui.select).toHaveBeenCalledTimes(state === "deny" ? 0 : 1);
+      expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
+    } finally {
+      rmSync(h.agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["read", "bash"])(
+    "guards env-template symlinks to credentials through %s even with allow policy",
+    async (toolName) => {
+      const h = setup({ permission: { "*": "allow" } });
+      h.ctx.cwd = h.agentDir;
+      writeFileSync(join(h.agentDir, ".env"), "SYNTHETIC_TEST_SECRET=placeholder\n");
+      symlinkSync(join(h.agentDir, ".env"), join(h.agentDir, ".env.example"));
+      const autoEvents: any[] = [];
+      h.events.on("auto-mode:decision", (event) => autoEvents.push(event));
+      h.ctx.ui.select.mockResolvedValueOnce("n deny");
+      await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+      try {
+        const result = await h.handlers.get("tool_call")?.(
+          {
+            toolName,
+            toolCallId: "env-template-symlink",
+            input:
+              toolName === "read"
+                ? { path: ".env.example" }
+                : { command: "rg -n SYNTHETIC .env.example" },
+          },
+          h.ctx,
+        );
+        expect(result).toMatchObject({ block: true });
+        expect(autoEvents.at(-1)).toMatchObject({
+          mechanism: "guard",
+          category: "sensitive_path",
+          verdict: "require_human",
+        });
+        expect(h.ctx.ui.select).toHaveBeenCalledOnce();
+        expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
+      } finally {
+        rmSync(h.agentDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("still guards high-impact commands when they also access an env template", async () => {
+    const h = setup({ permission: { "*": "allow" } });
+    h.ctx.cwd = h.agentDir;
+    writeFileSync(join(h.ctx.cwd, ".env.example"), "EXAMPLE=placeholder\n");
+    const autoEvents: any[] = [];
+    h.events.on("auto-mode:decision", (event) => autoEvents.push(event));
+    h.ctx.ui.select.mockResolvedValueOnce("n deny");
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    try {
+      const result = await h.handlers.get("tool_call")?.(
+        {
+          toolName: "bash",
+          toolCallId: "env-template-push",
+          input: { command: "rg -n EXAMPLE .env.example && git push" },
+        },
+        h.ctx,
+      );
+      expect(result).toMatchObject({ block: true });
+      expect(autoEvents.at(-1)).toMatchObject({
+        mechanism: "guard",
+        category: "vcs_remote_mutation",
+        verdict: "require_human",
+      });
+      expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
+    } finally {
+      rmSync(h.agentDir, { recursive: true, force: true });
+    }
+  });
+
   it("routes an armed sensitive-path guard to human approval without classifier notes", async () => {
     const home = process.env.HOME ?? "/Users/test";
     const h = setup({ enabledByDefault: true });

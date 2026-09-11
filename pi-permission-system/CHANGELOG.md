@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.0.7 — 2026-09-11
+
+- Exempt the exact `.env.example` basename from the env-credential filename guard so normal permission rules apply to templates. Preserve protected credential directories, sensitive symlink targets, other env filenames, and high-impact command guards; cover file tools and Bash with regression tests in auto and manual modes.
+
 ## 1.0.5 — 2026-09-03
 
 - Route unresolved path-bearing shell expansions through the auto classifier as an explicit risk marker, including when generic Bash policy allows the command; retain direct human review when auto mode is off and preserve stronger deterministic guards.

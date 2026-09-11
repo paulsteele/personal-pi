@@ -107,7 +107,9 @@ function sensitivePathReason(
   const leaf = basename(normalized).toLowerCase();
   if (SECRET_SUFFIXES.some((suffix) => leaf.endsWith(suffix)))
     return "private key or certificate file";
-  if (SECRET_FILES.has(leaf) || /^\.env(?:\..+)?$/i.test(leaf) || COMMON_PRIVATE_KEYS.test(leaf))
+  // Exempt only the template filename, not credential directories or resolved aliases.
+  const isEnvCredential = leaf !== ".env.example" && /^\.env(?:\..+)?$/i.test(leaf);
+  if (SECRET_FILES.has(leaf) || isEnvCredential || COMMON_PRIVATE_KEYS.test(leaf))
     return "credential file";
 
   for (const directory of HOME_SECRET_DIRS) {
