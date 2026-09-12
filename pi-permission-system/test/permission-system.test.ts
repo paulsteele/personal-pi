@@ -458,6 +458,62 @@ describe("integrated permission system", () => {
     },
   );
 
+  it.each([true, false])(
+    "guards writes through dangling env-template links (auto=%s)",
+    async (enabledByDefault: boolean) => {
+      const h = setup({ permission: { "*": "allow" }, enabledByDefault });
+      h.ctx.cwd = h.agentDir;
+      symlinkSync(".env", join(h.agentDir, ".env.example"));
+      const autoEvents: any[] = [];
+      h.events.on("auto-mode:decision", (event) => autoEvents.push(event));
+      await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+      try {
+        for (const request of [
+          { toolName: "write", input: { path: ".env.example", content: "fixture" } },
+          { toolName: "bash", input: { command: "printf fixture > ./.env.example" } },
+        ]) {
+          h.ctx.ui.select.mockResolvedValueOnce("n deny");
+          const result = await h.handlers.get("tool_call")?.(
+            { ...request, toolCallId: `dangling-${request.toolName}` },
+            h.ctx,
+          );
+          expect(result).toMatchObject({ block: true });
+          expect(autoEvents.at(-1)).toMatchObject({
+            mechanism: "guard",
+            category: "sensitive_path",
+            verdict: "require_human",
+          });
+        }
+        expect(h.ctx.ui.select).toHaveBeenCalledTimes(2);
+        expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
+      } finally {
+        rmSync(h.agentDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("retains an explicit deny on a dangling symlink destination", async () => {
+    const h = setup({ permission: { "*": "allow", path: { "*.env": "deny" } } });
+    h.ctx.cwd = h.agentDir;
+    symlinkSync(".env", join(h.agentDir, ".env.example"));
+    await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+    try {
+      const result = await h.handlers.get("tool_call")?.(
+        {
+          toolName: "write",
+          toolCallId: "dangling-deny",
+          input: { path: ".env.example", content: "fixture" },
+        },
+        h.ctx,
+      );
+      expect(result).toMatchObject({ block: true });
+      expect(h.ctx.ui.select).not.toHaveBeenCalled();
+      expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
+    } finally {
+      rmSync(h.agentDir, { recursive: true, force: true });
+    }
+  });
+
   it("still guards high-impact commands when they also access an env template", async () => {
     const h = setup({ permission: { "*": "allow" } });
     h.ctx.cwd = h.agentDir;

@@ -6,6 +6,7 @@
       "name": "pi-extensions",
       "devDependencies": {
         "@biomejs/biome": "2.5.4",
+        "@earendil-works/pi-agent-core": "0.84.3",
         "@earendil-works/pi-ai": "0.84.3",
         "@earendil-works/pi-coding-agent": "0.84.2",
         "@earendil-works/pi-tui": "0.84.3",
@@ -15,6 +16,7 @@
         "vitest": "4.1.10",
       },
       "peerDependencies": {
+        "@earendil-works/pi-agent-core": "0.84.x",
         "@earendil-works/pi-ai": "0.84.x",
         "@earendil-works/pi-coding-agent": "0.84.x",
         "@earendil-works/pi-tui": "0.84.x",
@@ -81,6 +83,31 @@
         "@earendil-works/pi-ai": "0.84.x",
         "@earendil-works/pi-coding-agent": "0.84.x",
         "@earendil-works/pi-tui": "0.84.x",
+        "typebox": "1.3.x",
+      },
+    },
+    "pr-review": {
+      "name": "@paulsteele/pi-pr-review",
+      "version": "1.0.7",
+      "dependencies": {
+        "diff": "8.0.4",
+      },
+      "devDependencies": {
+        "@biomejs/biome": "2.5.4",
+        "@earendil-works/pi-agent-core": "0.84.3",
+        "@earendil-works/pi-ai": "0.84.3",
+        "@earendil-works/pi-coding-agent": "0.84.2",
+        "@earendil-works/pi-tui": "0.84.3",
+        "@types/node": "24.12.4",
+        "typebox": "1.3.7",
+        "typescript": "5.9.3",
+        "vitest": "4.1.10",
+      },
+      "peerDependencies": {
+        "@earendil-works/pi-agent-core": "0.84.x || 0.85.x",
+        "@earendil-works/pi-ai": "0.84.x || 0.85.x",
+        "@earendil-works/pi-coding-agent": "0.84.x || 0.85.x",
+        "@earendil-works/pi-tui": "0.84.x || 0.85.x",
         "typebox": "1.3.x",
       },
     },
@@ -225,6 +252,8 @@
     "@paulsteele/pi-desktop-notifications": ["@paulsteele/pi-desktop-notifications@workspace:desktop-notifications"],
 
     "@paulsteele/pi-permission-system": ["@paulsteele/pi-permission-system@workspace:pi-permission-system"],
+
+    "@paulsteele/pi-pr-review": ["@paulsteele/pi-pr-review@workspace:pr-review"],
 
     "@paulsteele/pi-progress-observer": ["@paulsteele/pi-progress-observer@workspace:progress-observer"],
 

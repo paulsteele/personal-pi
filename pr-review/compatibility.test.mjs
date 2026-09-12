@@ -1,0 +1,303 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { createInterface } from "node:readline";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { createHostLoader, openBrowserIfActive } from "./host-loader.mjs";
+
+test("cancelled viewer imports cannot launch a late browser", async () => {
+	let stopped = false,
+		opened = 0,
+		release;
+	const imported = new Promise((resolve) => {
+		release = resolve;
+	});
+	const pending = openBrowserIfActive(
+		() => imported,
+		"http://localhost/fixture",
+		() => stopped,
+	);
+	stopped = true;
+	release({
+		openBrowser: async () => {
+			opened++;
+		},
+	});
+	assert.equal(await pending, false);
+	assert.equal(opened, 0);
+	assert.equal(
+		await openBrowserIfActive(
+			() => {
+				throw new Error("must not import");
+			},
+			"http://localhost/fixture",
+			() => true,
+		),
+		false,
+	);
+});
+
+const piPackageDir = process.env.PR_REVIEW_TEST_PI_PACKAGE;
+const plannotatorDir = process.env.PR_REVIEW_TEST_PLANNOTATOR_PACKAGE;
+const here = dirname(fileURLToPath(import.meta.url));
+const configured = piPackageDir && plannotatorDir;
+const patch = [
+	"diff --git a/src/example.ts b/src/example.ts",
+	"index 1234567..7654321 100644",
+	"--- a/src/example.ts",
+	"+++ b/src/example.ts",
+	"@@ -1 +1 @@",
+	"-export const enabled = false;",
+	"+export const enabled = true;",
+	"",
+].join("\n");
+
+test("host loader resolves TypeBox subpaths and loads the extension entry point", {
+	skip: !configured,
+}, async () => {
+	const loader = createHostLoader(piPackageDir);
+	const { Check } = await loader.import("typebox/value");
+	assert.equal(typeof Check, "function");
+	const module = await loader.import(join(here, "index.ts"));
+	const commands = [],
+		tools = [];
+	module.default({
+		on() {},
+		registerCommand(name) {
+			commands.push(name);
+		},
+		registerTool(tool) {
+			tools.push(tool.name);
+		},
+	});
+	assert.deepEqual(commands, ["pr"]);
+	assert.deepEqual(tools, ["pr_review"]);
+});
+
+// Opt-in local probe: module paths are supplied explicitly, never inferred from private settings.
+test("installed Pi Agent executes a structured submission without a model call", {
+	skip: !configured,
+}, async () => {
+	const loader = createHostLoader(piPackageDir);
+	const { Agent } = await loader.import("@earendil-works/pi-agent-core");
+	const { createAssistantMessageEventStream } = await loader.import("@earendil-works/pi-ai");
+	const { Type } = await loader.import("typebox");
+	let submissions = 0;
+	let calls = 0;
+	const agent = new Agent({
+		initialState: {
+			model: {
+				id: "compatibility",
+				provider: "fake",
+				api: "openai-responses",
+				reasoning: false,
+				contextWindow: 8192,
+				maxTokens: 1024,
+			},
+			systemPrompt: "Compatibility fixture; no real model calls.",
+			tools: [
+				{
+					name: "submit_review",
+					label: "Submit",
+					description: "Submit fixture findings",
+					parameters: Type.Object({ findings: Type.Array(Type.String()) }),
+					execute: async (_id, params) => {
+						assert.deepEqual(params, { findings: [] });
+						submissions++;
+						return { content: [{ type: "text", text: "submitted" }], details: params, terminate: true };
+					},
+				},
+			],
+		},
+		streamFn: () => {
+			calls++;
+			const stream = createAssistantMessageEventStream();
+			const response = {
+				role: "assistant",
+				api: "openai-responses",
+				provider: "fake",
+				model: "compatibility",
+				timestamp: Date.now(),
+				content: [{ type: "toolCall", id: "submit-1", name: "submit_review", arguments: { findings: [] } }],
+				stopReason: "toolUse",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			};
+			stream.push({ type: "done", reason: "toolUse", message: response });
+			return stream;
+		},
+	});
+	await agent.prompt("Submit the empty fixture review.");
+	assert.equal(submissions, 1);
+	assert.equal(calls, 1, "terminating submission must not start another model turn");
+	assert.deepEqual(
+		agent.state.tools.map((tool) => tool.name),
+		["submit_review"],
+	);
+});
+
+async function startViewer(t) {
+	const dir = await mkdtemp(join(tmpdir(), "pi-pr-review-compat-"));
+	await mkdir(join(dir, "data"));
+	// A real file distinguishes captured source from accidental live-file fallback.
+	await mkdir(join(dir, "src"));
+	await writeFile(join(dir, "src", "example.ts"), "LIVE FILE MUST NOT REPLACE SNAPSHOT\n");
+	const child = spawn(
+		process.execPath,
+		[join(here, "compatibility-viewer.mjs"), piPackageDir, plannotatorDir],
+		{
+			cwd: dir,
+			env: {
+				...process.env,
+				PLANNOTATOR_AI: "disabled",
+				PLANNOTATOR_SHARE: "disabled",
+				PLANNOTATOR_REMOTE: "0",
+				PLANNOTATOR_PORT: "",
+				PLANNOTATOR_DATA_DIR: join(dir, "data"),
+				PI_CODING_AGENT_DIR: join(dir, "agent"),
+				PI_OFFLINE: "1",
+				PI_SKIP_VERSION_CHECK: "1",
+			},
+			stdio: ["pipe", "pipe", "pipe"],
+		},
+	);
+	let stderr = "";
+	child.stderr.on("data", (part) => {
+		stderr += part.toString();
+	});
+	const events = [];
+	const listeners = new Set();
+	const lines = createInterface({ input: child.stdout });
+	let exited = false;
+	const closed = new Promise((resolve) =>
+		child.once("close", (code, signal) => {
+			exited = true;
+			resolve({ code, signal });
+			for (const listener of listeners) listener();
+		}),
+	);
+	lines.on("line", (line) => {
+		if (!line.startsWith("PR_REVIEW_COMPAT ")) return;
+		events.push(JSON.parse(line.slice("PR_REVIEW_COMPAT ".length)));
+		for (const listener of listeners) listener();
+	});
+	const wait = (type) =>
+		new Promise((resolve, reject) => {
+			const timer = setTimeout(() => finish(new Error(`Timed out waiting for ${type}: ${stderr}`)), 30_000);
+			function finish(error, value) {
+				clearTimeout(timer);
+				listeners.delete(check);
+				if (error) reject(error);
+				else resolve(value);
+			}
+			function check() {
+				const failure = events.find((event) => event.type === "error" || event.type === "unexpected-network");
+				const event = events.find((event) => event.type === type);
+				if (failure) finish(new Error(JSON.stringify(failure)));
+				else if (event) finish(undefined, event);
+				else if (exited) finish(new Error(`Viewer exited before ${type}: ${stderr}`));
+			}
+			listeners.add(check);
+			check();
+		});
+	t.after(async () => {
+		if (!exited) child.kill("SIGTERM");
+		const killTimer = setTimeout(() => {
+			if (!exited) child.kill("SIGKILL");
+		}, 3000);
+		await closed;
+		clearTimeout(killTimer);
+		lines.close();
+		await rm(dir, { recursive: true, force: true });
+	});
+	child.stdin.write(
+		`${JSON.stringify({
+			type: "start",
+			patch,
+			annotations: [
+				{
+					source: "pr-review:compatibility",
+					author: "Correctness",
+					type: "concern",
+					filePath: "src/example.ts",
+					lineStart: 1,
+					lineEnd: 1,
+					side: "new",
+					text: "[high] F1: Review the changed default",
+					reasoning: "Captured quote: export const enabled = true;",
+				},
+			],
+		})}\n`,
+	);
+	const ready = await wait("ready");
+	assert.equal(ready.ids.length, 1);
+	return { ...ready, wait, closed, events, dir };
+}
+
+test("installed Plannotator serves and submits captured annotations with AI disabled", {
+	skip: !configured,
+	timeout: 45_000,
+}, async (t) => {
+	const viewer = await startViewer(t);
+	const diff = await (await fetch(`${viewer.url}/api/diff`)).json();
+	assert.equal(diff.rawPatch, patch);
+	assert.ok(!diff.gitContext, "snapshot mode must not expose a live Git context");
+	const ai = await (await fetch(`${viewer.url}/api/ai/capabilities`)).json();
+	assert.equal(ai.available, false);
+	const annotations = await (await fetch(`${viewer.url}/api/external-annotations`)).json();
+	assert.equal(annotations.annotations[0].id, viewer.ids[0]);
+	assert.equal(annotations.annotations[0].source, "pr-review:compatibility");
+	assert.equal(annotations.annotations[0].lineStart, 1);
+	assert.equal(annotations.annotations[0].side, "new");
+	for (const path of ["/api/file-content?path=src/example.ts", "/api/code-nav/file?path=src/example.ts"]) {
+		const denied = await fetch(`${viewer.url}${path}`);
+		assert.equal(denied.status, 400, `${path} must refuse live-file access`);
+		assert.ok((await denied.json()).error);
+	}
+	for (const [path, body] of [
+		["/api/git-add", { filePath: "src/example.ts" }],
+		["/api/diff/switch", { diffType: "staged" }],
+	]) {
+		const denied = await fetch(`${viewer.url}${path}`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+		assert.ok(denied.status >= 400, `${path} must refuse live Git operations`);
+	}
+	assert.equal((await (await fetch(`${viewer.url}/api/diff`)).json()).rawPatch, patch);
+	const html = await fetch(viewer.url);
+	assert.equal(html.status, 200);
+	assert.match(html.headers.get("content-type"), /text\/html/);
+	// API contract probe, not a fabricated human decision on a real review.
+	const submission = {
+		approved: false,
+		feedback: "Synthetic fixture feedback",
+		annotations: annotations.annotations,
+	};
+	const response = await fetch(`${viewer.url}/api/feedback`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(submission),
+	});
+	assert.equal(response.status, 200);
+	const decision = await viewer.wait("decision");
+	assert.equal(decision.result.approved, false);
+	assert.equal(decision.result.annotations[0].id, viewer.ids[0]);
+	assert.equal(decision.result.feedback, submission.feedback);
+	assert.deepEqual(await viewer.closed, { code: 0, signal: null });
+	assert.equal(
+		await readFile(join(viewer.dir, "src", "example.ts"), "utf8"),
+		"LIVE FILE MUST NOT REPLACE SNAPSHOT\n",
+	);
+	assert.ok(!viewer.events.some((event) => event.type === "unexpected-network"));
+});

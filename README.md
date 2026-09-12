@@ -11,7 +11,8 @@ Pi loads the entries in this deliberate order:
 3. `desktop-notifications` — provides actionable terminal-window notifications.
 4. `pi-permission-system` — source-owned permission and auto-mode fork.
 5. `progress-observer` — passive side-model progress inference.
-6. `pi-atelier` — source-owned fullscreen sidebar/footer fork.
+6. `pr-review` — code-owned reviews with private generated repo context and Plannotator findings.
+7. `pi-atelier` — source-owned fullscreen sidebar/footer fork.
 
 Permission System and Progress Observer load before Atelier so their replayable event state is available when Atelier subscribes. Desktop Notifications remains the sole notification owner.
 
@@ -37,7 +38,7 @@ bun run check
 pi
 ```
 
-Trust the checkout when Pi prompts. The committed `.pi/settings.json` disables all six resources from the globally configured release and loads the six local entries in the same order, so development does not create duplicate commands, UI owners, or event subscribers. This override applies only while Pi's working directory is this repository.
+Trust the checkout when Pi prompts. The committed `.pi/settings.json` disables all seven resources from the globally configured release and loads the seven local entries in the same order, so development does not create duplicate commands, UI owners, or event subscribers. This override applies only while Pi's working directory is this repository.
 
 ## Verification
 
@@ -62,7 +63,7 @@ bun run check:pack
 
 ## Releases
 
-The repository and all six workspace packages share one version.
+The repository and all seven workspace packages share one version.
 
 1. Start from a clean `main` checkout.
 2. Run `bun install --frozen-lockfile && bun run check`.
@@ -98,6 +99,9 @@ Source and dependencies live in Pi's managed git checkout. Runtime Permission Sy
 - config: `~/.pi/agent/extensions/pi-permission-system/config.json`
 - logs: `~/.pi/agent/extensions/pi-permission-system/logs/`
 - progress observer config: `~/.pi/agent/extensions/progress-observer/config.json`
+- PR review settings/profiles/reports: `~/.pi/agent/extensions/pr-review/`
+
+PR review methodology and personal-global rules are versioned here in `pr-review/prompts/`; only generated repo semantics and runtime settings live in Pi config. Run `/pr setup` to create or regenerate context, `/pr model` to choose its independent model, and `/pr` to review changes. Verified findings open in the already-installed, supported Plannotator UI; submitted feedback goes to the main agent without a second fix-selection screen. The harness never installs or updates Plannotator. See [`pr-review/README.md`](pr-review/README.md) for compatibility, privacy, scope, and verification details.
 
 The Progress Observer uses a separate model to infer goal/progress/current/next state for Atelier's upper sidebar pane. It is TUI-only, memory-only, never injects into the main agent conversation, and degrades without interrupting work. See [`progress-observer/README.md`](progress-observer/README.md) for cadence, commands, privacy, and cost details.
 

@@ -17,6 +17,7 @@ const expectedExtensions = [
   "./desktop-notifications/index.ts",
   "./pi-permission-system/src/index.ts",
   "./progress-observer/index.ts",
+  "./pr-review/index.ts",
   "./pi-atelier/extensions/index.ts",
 ];
 
@@ -56,6 +57,7 @@ describe("Pi package integration", () => {
       "desktop-notifications",
       "pi-permission-system",
       "progress-observer",
+      "pr-review",
       "pi-atelier",
     ]);
     expect(manifest.pi.extensions.indexOf("./pi-permission-system/src/index.ts")).toBeLessThan(
@@ -64,6 +66,29 @@ describe("Pi package integration", () => {
     expect(manifest.pi.extensions.indexOf("./progress-observer/index.ts")).toBeLessThan(
       manifest.pi.extensions.indexOf("./pi-atelier/extensions/index.ts"),
     );
+  });
+
+  test("development resources mirror the global manifest without duplicate owners", () => {
+    const settings = JSON.parse(readFileSync(resolve(root, ".pi/settings.json"), "utf8"));
+    expect(settings.extensions).toEqual(expectedExtensions.map((entry) => `.${entry}`));
+    expect(settings.packages[0].extensions).toEqual(expectedExtensions.map((entry) => `-${entry.slice(2)}`));
+    const review = readFileSync(resolve(root, "pr-review/index.ts"), "utf8");
+    expect(review).toContain('pi.registerCommand("pr"');
+    expect(review).toContain('name: "pr_review"');
+    expect(review).not.toContain('registerCommand("pr-refresh"');
+  });
+
+  test("lockfile workspace metadata matches manifests without changing package resolutions", () => {
+    const lock = JSON.parse(readFileSync(resolve(root, "bun.lock"), "utf8").replace(/,(\s*[}\]])/g, "$1"));
+    for (const workspace of ["", ...manifest.workspaces]) {
+      const pkg = JSON.parse(readFileSync(resolve(root, workspace, "package.json"), "utf8"));
+      expect(lock.workspaces[workspace].name).toBe(pkg.name);
+      for (const field of ["dependencies", "devDependencies", "peerDependencies"]) {
+        expect(lock.workspaces[workspace][field] ?? {}).toEqual(pkg[field] ?? {});
+      }
+      if (workspace) expect(lock.workspaces[workspace].version).toBe(pkg.version);
+    }
+    expect(lock.packages["@paulsteele/pi-pr-review"]).toEqual(["@paulsteele/pi-pr-review@workspace:pr-review"]);
   });
 
   test("keeps every extension independently packaged at the repository version", () => {

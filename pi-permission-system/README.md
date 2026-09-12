@@ -50,7 +50,7 @@ and rejected. Policy uses last matching rule wins inside a surface map.
 
 The sensitive-path guard does not treat the exact `.env.example` basename (case-insensitive)
 as credentials merely because of its name. It still applies ordinary path/tool policy and checks
-credential directories and resolved symlink targets. To allow templates while denying other env
+credential directories and resolved symlink targets, including dangling destinations for writes. To allow templates while denying other env
 files, order path rules as `"*.env": "deny"`, `"*.env.*": "deny"`, then `"*.env.example": "allow"`.
 Other `.env.*` names remain sensitive; allow rules do not bypass other deterministic guards.
 

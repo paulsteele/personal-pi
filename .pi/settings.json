@@ -9,6 +9,7 @@
         "-desktop-notifications/index.ts",
         "-pi-permission-system/src/index.ts",
         "-progress-observer/index.ts",
+        "-pr-review/index.ts",
         "-pi-atelier/extensions/index.ts"
       ]
     }
@@ -19,6 +20,7 @@
     "../desktop-notifications/index.ts",
     "../pi-permission-system/src/index.ts",
     "../progress-observer/index.ts",
+    "../pr-review/index.ts",
     "../pi-atelier/extensions/index.ts"
   ]
 }
