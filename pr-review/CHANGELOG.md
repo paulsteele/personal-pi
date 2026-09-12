@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.8
+
 - Preserve explicit no-fix outcomes and approval-note discussion in command/tool results; keep report locators after display truncation.
 - Harden capture against active Git filters, hidden index flags, symlinked ancestors, and unavailable shallow history; support directory-to-file replacements.
 - Bound blob-cache residency and fingerprint reads; stop searches at the match cap and pack reviewer/verifier inputs incrementally by bytes.
@@ -12,8 +14,6 @@
 - Show live phase activity and elapsed time, preserve cancellation, and keep command errors in the transcript.
 - Reject a missing `--base` reference before starting work and explain when only model selection—not repository setup—has completed.
 - Add command-level, dialog-ordering, fast-failure, spinner cleanup, and cancellation regression tests.
-
-## 1.0.7
 
 - Add code-owned PR review orchestration with versioned methodology and personal-global rules.
 - Add explicit setup/regeneration, independent model selection, private worktree-shared profiles, and blocking freshness checks.

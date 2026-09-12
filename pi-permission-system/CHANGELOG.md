@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.0.8
+
+- Resolve dangling symlink destinations when canonicalizing paths, preserving sensitive-target guards even when the target does not yet exist; add path and permission-system regression coverage.
+
 ## 1.0.7 — 2026-09-11
 
 - Exempt the exact `.env.example` basename from the env-credential filename guard so normal permission rules apply to templates. Preserve protected credential directories, sensitive symlink targets, other env filenames, and high-impact command guards; cover file tools and Bash with regression tests in auto and manual modes.
