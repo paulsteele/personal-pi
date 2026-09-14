@@ -67,6 +67,32 @@ it("keeps ['a','b'] and ['a+b'] specialist tasks distinct and rejects duplicate 
 	expect([...results.values()].flat()).toEqual(["finding"]);
 	expect(() => planReviewTasks([lens, lens], areas, files, "architecture")).toThrow("Duplicate");
 });
+it.each([false, true])(
+	"keeps one-off ownership exact within multi-file areas (connected=%s)",
+	(connected) => {
+		const files = changes.slice(0, 4);
+		const areas = connected
+			? [
+					{ id: "a", name: "A", files: files.slice(0, 2).map((f) => f.file), reason: "test", related: ["b"] },
+					{ id: "b", name: "B", files: files.slice(2).map((f) => f.file), reason: "test", related: ["a"] },
+				]
+			: reviewAreas(files).areas;
+		const matchedFiles = connected ? [files[0]!.file, files[2]!.file] : [files[0]!.file];
+		const lens = { id: "extra", name: "Extra", focus: "test", reading: [], reason: "approved", matchedFiles };
+		const oneOff = planReviewTasks([{ ...lens, exactScope: true }], areas, files, "architecture").filter(
+			(job) => !job.architecture,
+		);
+		expect(oneOff).toHaveLength(1);
+		expect(oneOff[0]!.files).toEqual(matchedFiles);
+		expect(oneOff[0]!.contextFiles).toEqual(
+			files.map((f) => f.file).filter((file) => !matchedFiles.includes(file)),
+		);
+		const saved = planReviewTasks([lens], areas, files, "architecture").filter((job) => !job.architecture);
+		expect(saved[0]!.files).toEqual(files.map((f) => f.file));
+		expect(saved[0]!.contextFiles).toEqual([]);
+	},
+);
+
 it("rejects incomplete or overlapping area partitions without losing files", () => {
 	const result = reviewAreas(changes, [
 		{ id: "bad", name: "Bad", reason: "bad", related: [], files: [changes[0]!.file] },

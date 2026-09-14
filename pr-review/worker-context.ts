@@ -52,7 +52,7 @@ export function responseReserve(model: Model<Api>): number {
 	return Math.max(128, Math.min(model.maxTokens, 8192, Math.floor(model.contextWindow / 4)));
 }
 
-/** Summarize only at a settled turn boundary. Coverage and result records live outside this lossy context. */
+/** Summarize consumed history only; retain the last successful response and its unread tool results. */
 export async function compactWorkerContext(options: {
 	messages: AgentMessage[];
 	model: Model<Api>;
@@ -60,11 +60,20 @@ export async function compactWorkerContext(options: {
 	signal?: AbortSignal | undefined;
 	onUsage: (usage: { input: number; output: number; cost: { total: number } }) => void;
 }): Promise<AgentMessage[]> {
+	// A failed provider request does not consume evidence. Find the last successful
+	// response, including when an overflow/error follows its tool results.
+	const cut = options.messages.findLastIndex(
+		(message) => message.role === "assistant" && !["error", "aborted"].includes(message.stopReason),
+	);
+	if (cut <= 0) throw new Error("No consumed history available for compaction");
+	const retained = options.messages
+		.slice(cut)
+		.filter((message) => message.role !== "assistant" || !["error", "aborted"].includes(message.stopReason));
 	const chunks: AgentMessage[][] = [];
 	let current: AgentMessage[] = [],
 		tokens = 0;
 	const allowance = Math.max(256, Math.floor(options.model.contextWindow / 3));
-	for (const message of options.messages) {
+	for (const message of options.messages.slice(0, cut)) {
 		// Serialized compaction input need not preserve tool protocol; output context does.
 		const size = estimateTokens(message);
 		if (current.length && tokens + size > allowance) {
@@ -106,5 +115,6 @@ export async function compactWorkerContext(options: {
 				},
 			],
 		},
+		...retained,
 	];
 }

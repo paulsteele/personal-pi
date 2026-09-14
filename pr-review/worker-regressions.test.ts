@@ -1,4 +1,8 @@
-import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
+import {
+	createAssistantMessageEventStream,
+	type AssistantMessage,
+	type Context,
+} from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import { expect, it, vi } from "vitest";
@@ -8,7 +12,11 @@ import { CoverageLedger } from "./tasks.js";
 import { FindingSchema, ReviewSubmission, VerificationSubmission, validate } from "./types.js";
 import { testConfig } from "./test-fixtures.js";
 
-function scriptedRegistry(actions: Array<{ name: string; args: unknown }>, contextWindow = 100000): Registry {
+function scriptedRegistry(
+	actions: Array<{ name: string; args: unknown }>,
+	contextWindow = 100000,
+	observe?: (context: Context, summary: boolean) => void,
+): Registry {
 	let next = 0;
 	const model = {
 		provider: "fake",
@@ -23,8 +31,9 @@ function scriptedRegistry(actions: Array<{ name: string; args: unknown }>, conte
 		hasConfiguredAuth: () => true,
 		getApiKeyAndHeaders: async () => ({ ok: true }),
 		getProvider: () => ({
-			streamSimple: (_model: unknown, context: { tools?: unknown[] }) => {
+			streamSimple: (_model: unknown, context: Context) => {
 				const summary = !context.tools?.length;
+				observe?.(context, summary);
 				const action = summary ? undefined : actions[next++];
 				if (!summary && !action) throw new Error("Script exhausted before worker completed");
 				const message = {
@@ -47,12 +56,151 @@ function scriptedRegistry(actions: Array<{ name: string; args: unknown }>, conte
 					},
 				} as AssistantMessage;
 				const stream = createAssistantMessageEventStream();
-				stream.push({ type: "done", reason: summary ? "stop" : "toolUse", message });
+				if (action?.name === "$overflow")
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: {
+							...message,
+							content: [],
+							stopReason: "error",
+							errorMessage: "Context window exhausted",
+						},
+					});
+				else stream.push({ type: "done", reason: summary ? "stop" : "toolUse", message });
 				return stream;
 			},
 		}),
 	} as unknown as Registry;
 }
+
+it("rejects completion until every task-input page is supplied, even after source coverage closes", async () => {
+	const input = { lens: { focus: "Distinct baseline guidance" }, manifest: "m".repeat(60000) };
+	const ledger = new CoverageLedger(["diff:a"]);
+	const submit = { name: "submit_result", args: { complete: true, limitations: [], findings: [] } };
+	const actions = [
+		{ name: "read_change", args: {} },
+		{ name: "read_task_input", args: { cursor: 0 } },
+		submit,
+	];
+	for (let cursor = 16000; cursor < JSON.stringify(input).length; cursor += 8000)
+		actions.push({ name: "read_task_input", args: { cursor } });
+	actions.push(submit, { name: "read_task_input", args: { cursor: 8000 } }, submit);
+	let rejected = 0,
+		compactions = 0;
+	const validated = vi.fn();
+	const result = await runWorker({
+		registry: scriptedRegistry(actions, 12000),
+		config: testConfig,
+		schema: ReviewSubmission,
+		system: "Review the full assignment",
+		input,
+		coverage: ledger,
+		validateResult: validated,
+		tools: [
+			{
+				name: "read_change",
+				label: "Read",
+				description: "Fixture",
+				parameters: Type.Object({}),
+				async execute() {
+					ledger.deliver("diff:a", 0, 4, 4);
+					return { content: [{ type: "text", text: "diff" }], details: {} };
+				},
+			},
+		],
+		event: (event) => {
+			if (event.type === "compacting") compactions++;
+			if (event.type === "tool" && event.text === "submit_result failed") {
+				expect(ledger.remaining).toEqual([]);
+				rejected++;
+			}
+		},
+	});
+	expect(result.ok).toBe(true);
+	expect(rejected).toBe(2);
+	expect(compactions).toBeGreaterThan(0);
+	expect(validated).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+	{ resourceId: "diff:a", overflow: false },
+	{ resourceId: "candidate:F1", overflow: false },
+	{ resourceId: "diff:a", overflow: true },
+])(
+	"retains exact unread $resourceId results across compaction (overflow=$overflow)",
+	async ({ resourceId, overflow }) => {
+		const page = "FINAL-RAW-EVIDENCE:" + "x".repeat(12000);
+		const ledger = new CoverageLedger([resourceId]);
+		const toolName = resourceId.startsWith("diff:") ? "read_change" : "read_candidate";
+		let compactions = 0;
+		const reviewerContexts: Context[] = [],
+			summaryContexts: Context[] = [];
+		const tools: AgentTool[] = [
+			{
+				name: "read_history",
+				label: "History",
+				description: "Previously consumed context",
+				parameters: Type.Object({}),
+				async execute() {
+					return { content: [{ type: "text", text: "h".repeat(26000) }], details: {} };
+				},
+			},
+			{
+				name: toolName,
+				label: "Read",
+				description: "Final evidence page",
+				parameters: Type.Object({}),
+				async execute() {
+					ledger.deliver(resourceId, 0, page.length, page.length);
+					return { content: [{ type: "text", text: page }], details: {} };
+				},
+			},
+		];
+		const result = await runWorker({
+			registry: scriptedRegistry(
+				[
+					{ name: "read_history", args: {} },
+					{ name: toolName, args: {} },
+					...(overflow ? [{ name: "$overflow", args: {} }] : []),
+					{ name: "submit_result", args: { complete: true, limitations: [], findings: [] } },
+				],
+				12000,
+				(context, summary) => {
+					(summary ? summaryContexts : reviewerContexts).push(JSON.parse(JSON.stringify(context)));
+				},
+			),
+			config: testConfig,
+			schema: ReviewSubmission,
+			system: "Independent lens-specific review",
+			input: {},
+			tools,
+			coverage: ledger,
+			event: (event) => {
+				if (event.type === "compacting") compactions++;
+			},
+		});
+		expect(result.ok).toBe(true);
+		expect(compactions).toBe(overflow ? 2 : 1);
+		const finalContext = reviewerContexts.at(-1)!;
+		expect(JSON.stringify(finalContext)).toContain("Working context summary");
+		expect(
+			finalContext.messages.some(
+				(message) =>
+					message.role === "toolResult" &&
+					message.content.some((block) => block.type === "text" && block.text === page),
+			),
+		).toBe(true);
+		expect(
+			finalContext.messages.some(
+				(message) =>
+					message.role === "assistant" &&
+					message.content.some((block) => block.type === "toolCall" && block.name === toolName),
+			),
+		).toBe(true);
+		expect(JSON.stringify(summaryContexts)).not.toContain("FINAL-RAW-EVIDENCE:");
+	},
+);
 
 it.each([false, true])(
 	"requires all pages of an oversized candidate, even with paged metadata input (%s)",

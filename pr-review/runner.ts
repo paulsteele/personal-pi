@@ -27,27 +27,70 @@ import { planReviewTasks, reviewAreas } from "./planning.js";
 import { redact } from "./report.js";
 import { CoverageLedger, RecoveryGate, TaskStore } from "./tasks.js";
 
+export type SuspendWork = <T>(wait: () => Promise<T>) => Promise<T>;
+
+/** Logical tasks retain their state while recovery releases and reacquires an execution permit. */
 export async function boundedMap<T, U>(
 	items: T[],
 	concurrency: number,
 	signal: AbortSignal,
-	run: (item: T, index: number) => Promise<U>,
+	run: (item: T, index: number, suspend: SuspendWork) => Promise<U>,
 ): Promise<U[]> {
-	const result: U[] = new Array(items.length);
-	let next = 0;
-	const workers = await Promise.allSettled(
-		Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-			for (;;) {
-				signal.throwIfAborted();
-				const index = next++;
-				if (index >= items.length) return;
-				result[index] = await run(items[index]!, index);
-			}
-		}),
-	);
-	const failure = workers.find((item): item is PromiseRejectedResult => item.status === "rejected");
-	if (failure) throw failure.reason;
-	return result;
+	if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error("Invalid concurrency");
+	type Release = () => void;
+	const waiting = new Set<(error?: unknown) => void>();
+	let active = 0;
+	const acquire = (): Promise<Release> => {
+		signal.throwIfAborted();
+		return new Promise((resolve, reject) => {
+			const grant = (error?: unknown) => {
+				waiting.delete(grant);
+				if (error !== undefined) return reject(error);
+				active++;
+				let released = false;
+				resolve(() => {
+					if (released) return;
+					released = true;
+					active--;
+					waiting.values().next().value?.();
+				});
+			};
+			if (active < concurrency) grant();
+			else waiting.add(grant);
+		});
+	};
+	const abort = () => {
+		for (const grant of waiting) grant(signal.reason ?? new Error("Review cancelled"));
+	};
+	signal.addEventListener("abort", abort, { once: true });
+	try {
+		const workers = await Promise.allSettled(
+			items.map(async (item, index) => {
+				let release: Release | undefined = await acquire();
+				const suspend: SuspendWork = async (wait) => {
+					if (!release) throw new Error("Task is already suspended");
+					release();
+					release = undefined;
+					try {
+						return await wait();
+					} finally {
+						release = await acquire();
+					}
+				};
+				try {
+					signal.throwIfAborted();
+					return await run(item, index, suspend);
+				} finally {
+					release?.();
+				}
+			}),
+		);
+		const failure = workers.find((item): item is PromiseRejectedResult => item.status === "rejected");
+		if (failure) throw failure.reason;
+		return workers.map((item) => (item as PromiseFulfilledResult<U>).value);
+	} finally {
+		signal.removeEventListener("abort", abort);
+	}
 }
 export async function review(options: {
 	ctx: ExtensionContext;
@@ -106,8 +149,13 @@ export async function review(options: {
 		coverage?: CoverageLedger,
 		validateResult?: (value: Static<T>) => Promise<void> | void,
 		candidateResources: Candidate[] = [],
+		suspend: SuspendWork = (wait) => wait(),
 	): Promise<WorkerResult<Static<T>>> {
 		const optional = stage === "propose" || stage === "consolidate";
+		const recover = async (reason: string) => {
+			await suspend(() => options.recovery!.block(id, reason, "queued"));
+			tasks.update(id, { state: "running" }, "Execution resumed");
+		};
 		const task = tasks.records.get(id)!;
 		tasks.update(id, {
 			state: "running",
@@ -175,7 +223,7 @@ export async function review(options: {
 							throw new Error("Finding outside assigned scope");
 					for (const advisory of value.advisories ?? []) await checkAdvisory(advisory, snapshot);
 				},
-				recover: options.recovery && !optional ? (reason) => options.recovery!.block(id, reason) : undefined,
+				recover: options.recovery && !optional ? recover : undefined,
 				progress: (note) => progress(redact(`${task.name}: ${note}`)),
 				event: (event) => {
 					if (signal.aborted) return;
@@ -228,7 +276,7 @@ export async function review(options: {
 				);
 				return result;
 			}
-			await options.recovery.block(id, result.error);
+			await recover(result.error);
 		}
 	}
 	try {
@@ -315,6 +363,7 @@ export async function review(options: {
 							].filter((path) => sources.has(path)),
 							reason: `User-approved proposal: ${item.reason}`,
 							matchedFiles: item.files,
+							exactScope: true,
 						});
 					else report.declined.push(item.specialist.name);
 				}
@@ -342,7 +391,7 @@ export async function review(options: {
 		>();
 		try {
 			await work(`Reviewing changes (${jobs.length} tasks, ${config.concurrency} concurrent)`, () =>
-				boundedMap(jobs, config.concurrency, signal, async (job) => {
+				boundedMap(jobs, config.concurrency, signal, async (job, _index, suspend) => {
 					const coverage = new CoverageLedger([
 						...job.files.map((file) => `diff:${file}`),
 						...job.lens.reading.map((file) => `doc:${file}`),
@@ -362,6 +411,9 @@ export async function review(options: {
 						},
 						snapshotTools(snapshot, (...args) => coverage.deliver(...args)),
 						coverage,
+						undefined,
+						[],
+						suspend,
 					);
 					settled.set(job.id, { result, coverage });
 					return result;
@@ -422,7 +474,7 @@ export async function review(options: {
 				`${batches[i]!.candidates.length} independent verdicts`,
 			);
 		await work(`Verifying findings (${batches.length} batches)`, () =>
-			boundedMap(batches, config.concurrency, signal, async (batch, index) => {
+			boundedMap(batches, config.concurrency, signal, async (batch, index, suspend) => {
 				const ids = new Set(batch.candidates.map((c) => c.id));
 				const coverage = new CoverageLedger([
 					...batch.candidates.map((candidate) => `candidate:${candidate.id}`),
@@ -491,6 +543,7 @@ export async function review(options: {
 					coverage,
 					validateVerdicts,
 					batch.candidates,
+					suspend,
 				);
 				for (const candidate of batch.candidates) {
 					const matched = result.ok ? result.value.verdicts.filter((v) => v.id === candidate.id) : [];

@@ -12,7 +12,8 @@ import {
 	type Profile,
 	type Finding,
 } from "./types.js";
-import { createWorkUI } from "./work-ui.js";
+import { awaitWithSignal, createWorkUI } from "./work-ui.js";
+import { TaskStore, RecoveryGate } from "./tasks.js";
 import { uiHarness } from "./ui.test.helpers.js";
 import { commit, fixture, put, testConfig, testDraft } from "./test-fixtures.js";
 vi.mock("./worker.js", () => ({ runWorker: vi.fn() }));
@@ -41,8 +42,10 @@ async function run(
 	const repo = await fixture();
 	roots.push(repo.root);
 	await put(repo.root, "a.ts", "export const enabled = false;\n");
+	if (withProposalUI) await put(repo.root, "b.ts", "unrelated before\n");
 	await commit(repo.root);
 	await put(repo.root, "a.ts", "export const enabled = true;\n");
+	if (withProposalUI) await put(repo.root, "b.ts", "unrelated after\n");
 	const snapshot = await capture(repo, { kind: "local" }, testConfig);
 	const profile: Profile = {
 		schemaVersion: 1,
@@ -148,7 +151,12 @@ it("does not restore missing inherited documents when a proposed specialist is a
 	expect(seen).toContain("extra");
 	expect(result.status).toBe("complete");
 	expect(result.contextNotes?.join(" ")).toContain("deleted-rules.md");
-	expect(result.lenses.find((lens) => lens.id === "extra")!.reading).toEqual([]);
+	expect(result.lenses.find((lens) => lens.id === "extra")).toMatchObject({ reading: [], exactScope: true });
+	expect(result.tasks!.find((task) => task.name === "Extra lens")!.files).toEqual(["a.ts"]);
+	const extra = vi
+		.mocked(runWorker)
+		.mock.calls.find(([options]) => (options.input as { lens?: { id: string } }).lens?.id === "extra")![0];
+	expect(extra.input).toMatchObject({ assignedFiles: ["a.ts"], relatedContextFiles: ["b.ts"] });
 	for (const [options] of vi.mocked(runWorker).mock.calls)
 		if (options.schema === VerificationSubmission) {
 			expect(options.coverage!.ids).toContain("candidate:F1");
@@ -161,6 +169,100 @@ it("does not restore missing inherited documents when a proposed specialist is a
 			await iterator.return?.();
 		}
 });
+it.each(["review", "verification"])("frees exhausted capacity during %s recovery", async (stage) => {
+	const repo = await fixture();
+	roots.push(repo.root);
+	await put(repo.root, "a.ts", "export const enabled = false;\n");
+	await commit(repo.root);
+	await put(repo.root, "a.ts", "export const enabled = true;\n");
+	const snapshot = await capture(repo, { kind: "local" }, testConfig);
+	const controller = new AbortController();
+	const tasks = new TaskStore(),
+		recovery = new RecoveryGate(tasks, controller.signal);
+	const calls = new Map<string, number>();
+	let progressed = false;
+	tasks.onChange(() => {
+		const ready =
+			stage === "review"
+				? recovery.blockers.size === 4 && tasks.records.get("review:style")?.state === "completed"
+				: recovery.blockers.has("verify:0") && tasks.records.get("verify:1")?.state === "completed";
+		if (ready) {
+			progressed = true;
+			recovery.retry();
+		}
+	});
+	vi.mocked(runWorker).mockImplementation((async (options: Parameters<typeof runWorker>[0]) => {
+		const input = options.input as { lens?: { id: string }; candidateIds?: string[] };
+		const id = input.lens?.id ?? input.candidateIds?.[0] ?? "scout";
+		calls.set(id, (calls.get(id) ?? 0) + 1);
+		let value: unknown = { specialists: [] };
+		if (options.schema === ReviewSubmission) {
+			if (stage === "review" && id !== "style") await options.recover!("Fixture obstacle");
+			value = {
+				complete: true,
+				limitations: [],
+				findings:
+					id === "security"
+						? Array.from({ length: 12 }, (_, i) => ({ ...finding, title: `Finding ${i}` }))
+						: [],
+			};
+		} else if (options.schema === VerificationSubmission) {
+			if (stage === "verification" && id === "F1") await options.recover!("Verifier obstacle");
+			value = { verdicts: input.candidateIds!.map((id) => ({ id, verdict: "dropped", reason: "Fixture" })) };
+		}
+		return { ok: true, value, usage: { input: 1, output: 1, cost: 0 } };
+	}) as typeof runWorker);
+	const concurrency = stage === "review" ? 4 : 1;
+	try {
+		const report = await review({
+			ctx: { modelRegistry: {} } as ExtensionContext,
+			config: { ...testConfig, concurrency },
+			profile: {
+				schemaVersion: 1,
+				contextVersion: 1,
+				repoId: repo.id,
+				generatedAt: "fixture",
+				generationModel: "fake/test",
+				sourceHashes: {},
+				draft: testDraft,
+			},
+			snapshot,
+			prompts: await loadPrompts(),
+			scope: { kind: "local" },
+			signal: controller.signal,
+			progress: () => {},
+			tasks,
+			recovery,
+		});
+		expect(progressed).toBe(true);
+		expect(report.issues).toEqual([]);
+		expect(report.ledger).toHaveLength(12);
+		expect([...calls.values()].every((count) => count === 1)).toBe(true);
+		expect(report.tasks!.every((task) => task.state === "completed")).toBe(true);
+		expect(report.metrics!.peakActive).toBeLessThanOrEqual(concurrency);
+	} finally {
+		controller.abort();
+		await snapshot.dispose?.();
+	}
+});
+
+it("cancels both queued permits and suspended recovery without launching queued work", async () => {
+	const controller = new AbortController();
+	const started: number[] = [];
+	const pending = boundedMap([0, 1, 2], 1, controller.signal, async (item, _index, suspend) => {
+		started.push(item);
+		const wait = () => awaitWithSignal(new Promise<void>(() => {}), controller.signal);
+		if (item === 0) await suspend(wait);
+		else await wait();
+		return item;
+	});
+	const rejected = expect(pending).rejects.toThrow("Fixture cancelled");
+	await vi.waitFor(() => expect(started).toEqual([0, 1]));
+	controller.abort(new Error("Fixture cancelled"));
+	await rejected;
+	expect(started).toEqual([0, 1]);
+});
+
 it("bounds parallelism and preserves input-order results", async () => {
 	let active = 0,
 		peak = 0;

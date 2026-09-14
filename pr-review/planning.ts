@@ -89,7 +89,9 @@ export function planReviewTasks(
 						group.add(area.id);
 			}
 			const assigned = areas.filter((a) => group.has(a.id));
-			const files = assigned.flatMap((a) => a.files);
+			const files = assigned
+				.flatMap((a) => a.files)
+				.filter((file) => !lens.exactScope || lens.matchedFiles!.includes(file));
 			const related = new Set(assigned.flatMap((a) => a.related));
 			jobs.push({
 				id: `review:${hash(JSON.stringify([lens.id, assigned.map((a) => a.id).sort()]))}`,
@@ -97,7 +99,7 @@ export function planReviewTasks(
 				files,
 				areas: assigned.map((a) => a.id),
 				contextFiles: areas
-					.filter((a) => related.has(a.id))
+					.filter((a) => group.has(a.id) || related.has(a.id))
 					.flatMap((a) => a.files)
 					.filter((file) => !files.includes(file)),
 				architecture: false,

@@ -2,13 +2,13 @@ import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream, readFileSync } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { Worker } from "node:worker_threads";
 import { lstat, readFile, readlink, realpath } from "node:fs/promises";
 import { dirname, join, matchesGlob } from "node:path";
 
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type, type TSchema } from "typebox";
 import { firstParent, git, gitBlobToFile, resolveCommit } from "./git.js";
+import { ExactDiffWorker } from "./exact-diff.js";
 import { SnapshotStore, textLineCount, textLinePage, textPage } from "./snapshot-store.js";
 import { safePath } from "./profile.js";
 import { hash } from "./prompts.js";
@@ -218,38 +218,10 @@ function patchData(patch: string) {
 	}
 	return { added, removed, oldLines, newLines };
 }
-interface DiffIndex {
-	metadataOnly: boolean;
-	oldRanges: Array<[number, number]>;
-	newRanges: Array<[number, number]>;
-}
 function expandRanges(ranges: Array<[number, number]>): Set<number> {
 	const lines = new Set<number>();
 	for (const [start, end] of ranges) for (let line = start; line <= end; line++) lines.add(line);
 	return lines;
-}
-async function exactDiff(data: Record<string, unknown>, signal?: AbortSignal): Promise<DiffIndex> {
-	signal?.throwIfAborted();
-	return new Promise((resolve, reject) => {
-		const worker = new Worker(new URL("./snapshot-diff.mjs", import.meta.url), { workerData: data });
-		let settled = false;
-		const finish = (error?: Error, value?: DiffIndex) => {
-			if (settled) return;
-			settled = true;
-			signal?.removeEventListener("abort", abort);
-			void worker.terminate();
-			if (error) reject(error);
-			else resolve(value!);
-		};
-		const abort = () => finish(new Error("Capture cancelled"));
-		signal?.addEventListener("abort", abort, { once: true });
-		worker.once("message", (value) => finish(value.error ? new Error(value.error) : undefined, value));
-		worker.once("error", (error) => finish(error));
-		worker.once("exit", () => {
-			if (!settled) finish(new Error("Exact diff worker stopped"));
-		});
-		if (signal?.aborted) abort();
-	});
 }
 export async function capture(
 	repo: Repo,
@@ -259,6 +231,7 @@ export async function capture(
 	signal?: AbortSignal,
 ): Promise<Snapshot> {
 	const store = await SnapshotStore.create(repo);
+	const diffWorker = new ExactDiffWorker();
 	try {
 		const head = await resolveCommit(repo.root, "HEAD", signal, true);
 		const live = await workingTree(repo, head, config, signal, store);
@@ -331,7 +304,7 @@ export async function capture(
 			}
 			try {
 				const patchPath = store.allocate();
-				const diff = await exactDiff(
+				const diff = await diffWorker.diff(
 					{
 						oldFile: old ? await entryPath(old) : empty,
 						newFile: next ? await entryPath(next) : empty,
@@ -437,8 +410,11 @@ export async function capture(
 			},
 		};
 	} catch (error) {
+		await diffWorker.dispose();
 		await store.dispose();
 		throw error;
+	} finally {
+		await diffWorker.dispose();
 	}
 }
 export async function assertCurrent(snapshot: Snapshot, config: Config, signal?: AbortSignal): Promise<void> {

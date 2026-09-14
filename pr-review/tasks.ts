@@ -128,7 +128,7 @@ export class RecoveryGate {
 		if (this.pending) await awaitWithSignal(this.pending, this.signal);
 		this.signal.throwIfAborted();
 	}
-	async block(id: string, reason: string): Promise<void> {
+	async block(id: string, reason: string, resumeState: "retrying" | "queued" = "retrying"): Promise<void> {
 		this.blockers.set(id, reason);
 		if (!this.pending)
 			this.pending = new Promise((resolve) => {
@@ -138,7 +138,7 @@ export class RecoveryGate {
 		this.store.setPhase("Blocked task: /pr retry or /pr cancel; other workers may continue");
 		await this.wait();
 		const task = this.store.records.get(id);
-		if (task) this.store.update(id, { state: "retrying", retries: task.retries + 1 }, "Retry requested");
+		if (task) this.store.update(id, { state: resumeState, retries: task.retries + 1 }, "Retry requested");
 	}
 	retry() {
 		const resume = this.resume;

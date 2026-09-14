@@ -174,6 +174,8 @@ export interface Lens {
 	reason: string;
 	/** Undefined means a whole-change lens. */
 	matchedFiles?: string[];
+	/** Approved one-offs own only matchedFiles; saved triggers own intersecting areas. */
+	exactScope?: boolean;
 }
 export interface LedgerEntry {
 	id: string;

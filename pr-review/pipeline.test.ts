@@ -9,12 +9,13 @@ import { TaskStore, RecoveryGate } from "./tasks.js";
 import { commit, fixture, put, testConfig, testDraft } from "./test-fixtures.js";
 
 it.each([
-	{ failScout: false, blockArchitecture: false },
-	{ failScout: true, blockArchitecture: false },
-	{ failScout: false, blockArchitecture: true },
+	{ failScout: false, blockArchitecture: false, concurrency: 4 },
+	{ failScout: true, blockArchitecture: false, concurrency: 4 },
+	{ failScout: false, blockArchitecture: true, concurrency: 4 },
+	{ failScout: false, blockArchitecture: true, concurrency: 1 },
 ])(
-	"reviews directly without regeneration or acknowledgments ($failScout / $blockArchitecture)",
-	async ({ failScout, blockArchitecture }) => {
+	"reviews directly without regeneration or acknowledgments ($failScout / $blockArchitecture / $concurrency)",
+	async ({ failScout, blockArchitecture, concurrency }) => {
 		const repo = await fixture();
 		await put(repo.root, "rules.md", "Read the whole change.\n");
 		await put(repo.root, "a.ts", "export const enabled = false;\n");
@@ -145,7 +146,7 @@ it.each([
 		try {
 			const report = await review({
 				ctx: { modelRegistry: registry } as unknown as ExtensionContext,
-				config: { ...testConfig, maxJobs: 1, maxTurns: 1, maxInputBytes: 1 },
+				config: { ...testConfig, concurrency, maxJobs: 1, maxTurns: 1, maxInputBytes: 1 },
 				profile: {
 					schemaVersion: 1,
 					contextVersion: 1,
@@ -176,7 +177,7 @@ it.each([
 			).toBe(true);
 			expect(report.findings).toHaveLength(1);
 			expect(report.advisories).toHaveLength(1);
-			expect(report.metrics!.peakActive).toBeLessThanOrEqual(4);
+			expect(report.metrics!.peakActive).toBeLessThanOrEqual(concurrency);
 			expect(report.usage.input).toBe(blockArchitecture ? 9 : 8);
 			if (blockArchitecture) expect(otherReviewersFinishedBeforeRetry).toBe(true);
 		} finally {

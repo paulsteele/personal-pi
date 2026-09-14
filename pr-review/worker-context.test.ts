@@ -29,7 +29,7 @@ it("continues beyond old turn quotas through repeated compaction without losing 
 				else turns++;
 				const tool =
 					turns <= 35
-						? { name: "read_task_input", arguments: { cursor: turns } }
+						? { name: "read_task_input", arguments: { cursor: turns <= 13 ? (turns - 1) * 8000 : turns } }
 						: turns === 36
 							? {
 									name: "record_checkpoint",

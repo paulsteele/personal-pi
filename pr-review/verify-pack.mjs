@@ -25,6 +25,7 @@ for (const path of [
 	"worker-context.ts",
 	"snapshot-store.ts",
 	"snapshot-diff.mjs",
+	"exact-diff.ts",
 	"README.md",
 	"package.json",
 ])

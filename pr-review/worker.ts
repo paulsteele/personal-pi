@@ -185,6 +185,7 @@ export async function runWorker<T extends TSchema>(options: {
 		stalled = false;
 	const recentSignatures: string[] = [];
 	let inputText = JSON.stringify(options.input);
+	const inputDelivery = new CoverageLedger(["task:input"]);
 	let result: Static<T> | undefined;
 	const textResult = (value: unknown) => ({
 		content: [{ type: "text" as const, text: JSON.stringify(value) }],
@@ -200,6 +201,7 @@ export async function runWorker<T extends TSchema>(options: {
 			async execute(_id, args) {
 				const cursor = (args as { cursor?: number }).cursor ?? 0;
 				const text = inputText.slice(cursor, cursor + 8000);
+				inputDelivery.deliver("task:input", cursor, cursor + text.length, inputText.length);
 				return textResult({
 					text,
 					nextOffset: cursor + text.length < inputText.length ? cursor + text.length : null,
@@ -235,10 +237,16 @@ export async function runWorker<T extends TSchema>(options: {
 			name: "coverage_state",
 			label: "Review coverage",
 			description:
-				"List context not yet supplied. Read diff:path with read_change, doc:path with read, and candidate:ID with read_candidate. Normal reads and inline context are tracked automatically; no acknowledgment tool call is necessary.",
+				"List context not yet supplied. Read task:input with read_task_input, diff:path with read_change, doc:path with read, and candidate:ID with read_candidate. Normal reads and inline context are tracked automatically; no acknowledgment tool call is necessary.",
 			parameters: Type.Object({ offset: Type.Optional(Type.Integer({ minimum: 0 })) }),
 			async execute(_id, args) {
-				return textResult(ledger.page((args as { offset?: number }).offset));
+				const offset = (args as { offset?: number }).offset ?? 0;
+				const remaining = [...inputDelivery.remaining, ...ledger.remaining];
+				return textResult({
+					total: ledger.total + 1,
+					remaining: remaining.slice(offset, offset + 100),
+					nextOffset: offset + 100 < remaining.length ? offset + 100 : null,
+				});
 			},
 		});
 		extra.push({
@@ -262,6 +270,7 @@ export async function runWorker<T extends TSchema>(options: {
 			label: "Report review blocker",
 			description:
 				"Pause this task for a human to resolve missing context or a genuine failure. Other review tasks may continue. Explain the specific obstacle; do not loop on failed reads or pretend the review is complete.",
+			executionMode: "sequential",
 			parameters: Type.Object({ reason: Type.String({ minLength: 1, maxLength: 1000 }) }),
 			async execute(_id, args) {
 				await options.recover!(redact((args as { reason: string }).reason));
@@ -297,6 +306,7 @@ export async function runWorker<T extends TSchema>(options: {
 					instruction: "Continue the unfinished review; saved partial findings need not be repeated.",
 				});
 			}
+			inputDelivery.assertComplete();
 			options.coverage?.assertComplete();
 			await options.validateResult?.(value);
 			result = value;
@@ -397,7 +407,9 @@ export async function runWorker<T extends TSchema>(options: {
 				emit({ type: "coverage", text: `${packed.delivered.length} complete resources supplied inline` });
 			}
 		}
-		let prompt = fits(inputText)
+		const inlineInput = fits(inputText);
+		if (inlineInput) inputDelivery.deliver("task:input", 0, inputText.length, inputText.length);
+		let prompt = inlineInput
 			? inputText
 			: "Read the complete original task context through read_task_input before working. Continue its character cursor until nextOffset is null. All referenced captured changes/documents remain available through snapshot tools.";
 		let previousStop = "",
