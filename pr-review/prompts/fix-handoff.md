@@ -1,6 +1,6 @@
 # Human review handoff
 
-The review result states the browser outcome and any human feedback. A missing, failed, LGTM, or closed browser decision authorizes no fixes. Only requestedIds identifies unchanged, verified findings requested for fixes. Canonical findings and source identity are provided separately from the human's discussion.
+The review result states the browser outcome and any human feedback. A missing, failed, LGTM, or closed browser decision authorizes no fixes. Only requestedIds identifies unchanged, verified findings requested for fixes. Canonical findings and source identity are provided separately from the human's discussion. Design advisories (A IDs) are unverified discussion material, never requestedIds or automatic fix authorization; submitting or replying to an advisory does not authorize applying it.
 
 Address human questions, objections, and constraints before editing. Edited finding text, replies, unknown comments, or approval notes are discussion—not blanket approval of the original suggestion. Ask a clarifying question only if intent remains ambiguous; do not ask the user to repeat a routine fix selection.
 

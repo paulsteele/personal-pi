@@ -1,11 +1,14 @@
 import { spawn } from "node:child_process";
+import { createWriteStream } from "node:fs";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { representatives } from "./findings.js";
-import { redact } from "./report.js";
+import { redact, renderAdvisory } from "./report.js";
 import { ensurePrivateDirectory, inside } from "./storage.js";
 import type { Snapshot } from "./snapshot.js";
 import type { Report } from "./types.js";
@@ -55,7 +58,7 @@ export function seeds(report: Report, snapshot: Snapshot): Seed[] {
 				lineEnd: 0,
 				side: "new",
 				text: redact(
-					`Review status: ${report.status}. ${report.changedFiles} files reviewed, ${report.omitted.length} omitted.\nScope: ${JSON.stringify(report.scope)}. Baseline: ${report.baseline ?? "empty tree"}; HEAD: ${report.head ?? "unborn"}; captured target: ${report.fingerprint.slice(0, 12)}.\n${report.issues.join("\n")}\n\n${instructions}`,
+					`Review status: ${report.status}. ${report.changedFiles} changed files in scope, ${report.omitted.length} excluded/unavailable.\nScope: ${JSON.stringify(report.scope)}. Baseline: ${report.baseline ?? "empty tree"}; HEAD: ${report.head ?? "unborn"}; captured target: ${report.fingerprint.slice(0, 12)}.\n${report.issues.join("\n")}\n\n${instructions}`,
 				),
 			},
 		},
@@ -91,6 +94,21 @@ export function seeds(report: Report, snapshot: Snapshot): Seed[] {
 			},
 		});
 	}
+	for (const advisory of report.advisories ?? [])
+		result.push({
+			findingIds: [],
+			annotation: {
+				source,
+				author: "Architecture advisory (unverified)",
+				type: "comment",
+				scope: "general",
+				filePath: "",
+				lineStart: 0,
+				lineEnd: 0,
+				side: "new",
+				text: renderAdvisory(advisory),
+			},
+		});
 	return result;
 }
 const signatureFields = [
@@ -217,6 +235,46 @@ async function cleanupAbandoned(directory: string): Promise<void> {
 		}
 	}
 }
+/** Export with backpressure. The helper, not Pi's TUI process, loads the final aggregate. */
+export async function prepareViewerPatch(
+	snapshot: Snapshot,
+	directory: string,
+	signal: AbortSignal,
+): Promise<string> {
+	const name = "diff.patch",
+		destination = join(directory, name);
+	signal.throwIfAborted();
+	if (snapshot.writePatch) await snapshot.writePatch(destination, signal);
+	else {
+		async function* chunks() {
+			for (const change of snapshot.changes) {
+				const descriptor = Object.getOwnPropertyDescriptor(change, "patch");
+				if (!descriptor || typeof descriptor.value !== "string")
+					throw new Error("Lazy snapshots must provide a streamed patch export");
+				const text = descriptor.value as string;
+				for (let offset = 0; offset < text.length; ) {
+					signal.throwIfAborted();
+					let end = Math.min(text.length, offset + 16000);
+					if (
+						end < text.length &&
+						/[\uD800-\uDBFF]/.test(text[end - 1]!) &&
+						/[\uDC00-\uDFFF]/.test(text[end]!)
+					)
+						end--;
+					yield text.slice(offset, end);
+					offset = end;
+				}
+			}
+		}
+		await pipeline(
+			Readable.from(chunks(), { objectMode: false }),
+			createWriteStream(destination, { flags: "wx", mode: 0o600 }),
+			{ signal },
+		);
+	}
+	signal.throwIfAborted();
+	return name;
+}
 export async function present(options: {
 	root: string;
 	piPackageDir: string;
@@ -237,6 +295,13 @@ export async function present(options: {
 		JSON.stringify({ kind: "pr-review-viewer", pid: process.pid }),
 		{ mode: 0o600 },
 	);
+	let patchFile: string;
+	try {
+		patchFile = await prepareViewerPatch(options.snapshot, directory, options.signal);
+	} catch (error) {
+		await rm(directory, { recursive: true, force: true });
+		throw error;
+	}
 	const executable = /^(node|bun)(\.exe)?$/.test(basename(process.execPath)) ? process.execPath : "node";
 	const child = spawn(
 		executable,
@@ -328,7 +393,7 @@ export async function present(options: {
 		if (options.signal.aborted) abort();
 		else
 			child.stdin.write(
-				`${JSON.stringify({ type: "start", diffType: viewerDiffType(options.report), base: options.report.baseline, patch: options.snapshot.changes.map((change) => change.patch).join(""), label: `${options.report.project}: ${options.report.baseline ?? "empty"} → captured ${options.report.fingerprint.slice(0, 12)}`, annotations: annotations.map((seed) => seed.annotation), openBrowser: options.openBrowser ?? true })}\n`,
+				`${JSON.stringify({ type: "start", diffType: viewerDiffType(options.report), base: options.report.baseline, patchFile, label: `${options.report.project}: ${options.report.baseline ?? "empty"} → captured ${options.report.fingerprint.slice(0, 12)}`, annotations: annotations.map((seed) => seed.annotation), openBrowser: options.openBrowser ?? true })}\n`,
 			);
 		await result;
 		options.signal.throwIfAborted();

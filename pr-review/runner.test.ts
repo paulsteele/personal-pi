@@ -33,7 +33,11 @@ const finding: Finding = {
 	rationale: "Fixture rationale",
 	evidence: [{ file: "a.ts", side: "new", line: 1, quote: "export const enabled = true;" }],
 };
-async function run(verdict: "confirmed" | "missing" | "bad-quote", withProposalUI = false) {
+async function run(
+	verdict: "confirmed" | "missing" | "bad-quote",
+	withProposalUI = false,
+	approveWithMissingReading = false,
+) {
 	const repo = await fixture();
 	roots.push(repo.root);
 	await put(repo.root, "a.ts", "export const enabled = false;\n");
@@ -47,7 +51,7 @@ async function run(verdict: "confirmed" | "missing" | "bad-quote", withProposalU
 		generatedAt: "fixture",
 		generationModel: "fake/test",
 		sourceHashes: {},
-		draft: testDraft,
+		draft: approveWithMissingReading ? { ...testDraft, requiredReading: ["deleted-rules.md"] } : testDraft,
 	};
 	const actual =
 		verdict === "bad-quote"
@@ -88,6 +92,16 @@ async function run(verdict: "confirmed" | "missing" | "bad-quote", withProposalU
 		return { ok: true, value, usage: { input: 1, output: 1, cost: 0 } };
 	}) as typeof runWorker);
 	const h = uiHarness();
+	if (approveWithMissingReading) {
+		let selected = false;
+		h.ui.select = async (_title, options) => {
+			if (!selected) {
+				selected = true;
+				return options.find((value) => value.startsWith("[ ]"));
+			}
+			return "Continue";
+		};
+	}
 	const controller = new AbortController();
 	const ctx = { modelRegistry: {}, ui: h.ui } as ExtensionContext;
 	const workUI = createWorkUI(ctx, controller.signal, () => controller.abort());
@@ -102,11 +116,12 @@ async function run(verdict: "confirmed" | "missing" | "bad-quote", withProposalU
 		progress: workUI.update,
 		...(withProposalUI ? { work: workUI.run } : {}),
 	});
+	await snapshot.dispose?.();
 	return { result, seen, ui: h.state };
 }
 it("runs every baseline and independently verifies before retaining a finding", async () => {
 	const { result, seen } = await run("confirmed");
-	expect(seen.sort()).toEqual(["correctness", "performance", "security", "style"]);
+	expect(seen.sort()).toEqual(["$architecture", "correctness", "performance", "security", "style"]);
 	expect(result.status).toBe("complete");
 	expect(result.findings).toHaveLength(1);
 	expect(result.ledger).toEqual([{ id: "F1", verdict: "confirmed", reason: "checked" }]);
@@ -128,6 +143,24 @@ it("closes the proposal spinner before asking which specialists to run", async (
 	expect(ui.closes).toBe(ui.factories);
 });
 
+it("does not restore missing inherited documents when a proposed specialist is approved", async () => {
+	const { result, seen } = await run("confirmed", true, true);
+	expect(seen).toContain("extra");
+	expect(result.status).toBe("complete");
+	expect(result.contextNotes?.join(" ")).toContain("deleted-rules.md");
+	expect(result.lenses.find((lens) => lens.id === "extra")!.reading).toEqual([]);
+	for (const [options] of vi.mocked(runWorker).mock.calls)
+		if (options.schema === VerificationSubmission) {
+			expect(options.coverage!.ids).toContain("candidate:F1");
+			const iterator = options.resources![Symbol.asyncIterator]();
+			const first = await iterator.next();
+			expect(first.value).toMatchObject({
+				id: "candidate:F1",
+				text: expect.stringContaining("Fixture problem"),
+			});
+			await iterator.return?.();
+		}
+});
 it("bounds parallelism and preserves input-order results", async () => {
 	let active = 0,
 		peak = 0;

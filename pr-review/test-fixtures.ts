@@ -7,13 +7,13 @@ import { BUDGETS } from "./config.js";
 import { resolveRepo } from "./git.js";
 import type { Config, Draft } from "./types.js";
 const exec = promisify(execFile);
-export const testConfig: Config = {
+export const testConfig = {
 	schemaVersion: 1,
 	provider: "fake",
 	model: "test",
 	thinking: "off",
 	...BUDGETS,
-};
+} satisfies Config;
 export const testDraft: Draft = {
 	name: "Fixture",
 	summary: "Synthetic repository",

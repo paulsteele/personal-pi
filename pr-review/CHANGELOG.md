@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Fix F19: release the idle command loop while command-launched reviews run, route phase progress and the viewer URL into live status, and preserve awaited tool results and session/cancellation ownership. Status/retry/cancel no longer queue behind browser feedback.
+
+- Fix authorized review findings: require complete candidate-body delivery; normalize approved specialist reading; use collision-checked hashed task IDs; distinguish successful grouping/search progress from loops; and pack inline context in linear time.
+- Index changed-line anchors during diff generation, use bounded indexed line/character reads with cancellation, and stream viewer patches to an owned aggregate loaded only by the isolated helper.
+- Guard and synchronously invalidate throttled tool updates on operation cancellation/session retirement.
+
+- Simplify setup: approved profiles remain reusable after repository changes; remove the source-fingerprint gate and automatic regeneration pressure.
+- Replace the large JSON approval modal with a private editable draft and `/pr setup approve`; add model-free `/pr setup edit` and explicit `/pr setup regenerate`.
+- Coalesce actual host UI updates, cache details, and stream specialist trigger matching rather than synchronously rereading/reparsing patches.
+- Supply captured context directly, count normal reads automatically, make checkpoints optional, and add an explicit blocker tool. Failed optional stages use deterministic fallbacks; one blocked reviewer no longer stops unrelated workers.
+- Persist a small sanitized live task journal and clean up setup snapshots so restarts do not erase all diagnostic evidence.
+
+- Replace reviewer × diff-batch fan-out with four whole-change baselines, an architecture/integration pass, and specialists routed to validated related-file areas.
+- Remove work-total quotas and size-based capture omissions; add authoritative coverage checkpoints, context compaction/continuation, and explicit Retry/Cancel recovery.
+- Capture large source/diffs in private run-scoped temporary backing files with indexed paging and cancellation-safe exact diff workers; clean up owned temporary data.
+- Add a shared terminal task dashboard for command/tool reviews: stable queue, full scope/usage/activity details, hide/reopen, and status/retry/cancel controls.
+- Verify related candidates across files without total batch caps, and keep unverified architecture advisories separate from fix-authorizing findings.
+- Normalize legacy config without rewriting it on read; preserve model/concurrency while retiring coverage-limiting settings. Persist task metrics and retain old-report compatibility.
+
 ## 1.0.8
 
 - Preserve explicit no-fix outcomes and approval-note discussion in command/tool results; keep report locators after display truncation.

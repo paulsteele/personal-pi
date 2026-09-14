@@ -1,4 +1,6 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import { realpath } from "node:fs/promises";
 import { promisify } from "node:util";
 import { hash } from "./prompts.js";
@@ -10,7 +12,7 @@ export async function git(
 	args: string[],
 	signal?: AbortSignal,
 	allowFailure: boolean | readonly number[] = false,
-	maxBytes = 32 * 1024 * 1024,
+	maxBytes = Number.POSITIVE_INFINITY,
 	input?: Buffer,
 ): Promise<Buffer> {
 	// Worktree comparisons can invoke clean/process filters even with --no-textconv.
@@ -42,6 +44,54 @@ export async function git(
 		throw new Error(`Git ${args[0]} failed; check repository state, refs, and available local objects.`, {
 			cause: error,
 		});
+	}
+}
+/** Stream immutable object bytes without shell, conversion filters, or a total-output quota. */
+export async function gitBlobToFile(
+	cwd: string,
+	oid: string,
+	path: string,
+	signal?: AbortSignal,
+): Promise<void> {
+	if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(oid)) throw new Error("Invalid immutable object ID");
+	signal?.throwIfAborted();
+	const child = spawn(
+		"git",
+		[
+			"--no-optional-locks",
+			"-c",
+			"core.fsmonitor=false",
+			"-c",
+			"core.hooksPath=/dev/null",
+			"cat-file",
+			"blob",
+			oid,
+		],
+		{
+			cwd,
+			stdio: ["ignore", "pipe", "pipe"],
+			env: { ...process.env, GIT_NO_LAZY_FETCH: "1", GIT_TERMINAL_PROMPT: "0" },
+		},
+	);
+	child.stderr.resume();
+	const closed = new Promise<void>((resolve, reject) => {
+		child.once("error", reject);
+		child.once("close", (code) =>
+			code === 0 ? resolve() : reject(new Error("Cannot read captured Git object")),
+		);
+	});
+	const abort = () => {
+		child.kill();
+	};
+	signal?.addEventListener("abort", abort, { once: true });
+	try {
+		await Promise.all([
+			closed,
+			pipeline(child.stdout, createWriteStream(path, { flags: "wx", mode: 0o600 }), { signal }),
+		]);
+	} finally {
+		child.kill();
+		signal?.removeEventListener("abort", abort);
 	}
 }
 async function assertFilterFree(cwd: string, signal?: AbortSignal): Promise<void> {

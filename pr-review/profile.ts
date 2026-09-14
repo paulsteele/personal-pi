@@ -81,21 +81,7 @@ export async function loadProfile(
 	const profile = validate(ProfileSchema, stored.value);
 	validateDraft(profile.draft);
 	if (profile.repoId !== repoId) throw new Error("Profile belongs to another repository");
-	if (JSON.stringify(Object.keys(profile.sourceHashes).sort()) !== JSON.stringify(sourcePaths(profile.draft)))
-		throw new Error("Profile source fingerprints are incomplete; rerun /pr setup");
+	// Fingerprints in older profiles are historical metadata, not a review prerequisite.
+	// Repository guidance is read from the current captured source on every review.
 	return { profile, revision: stored.revision };
-}
-export async function assertFresh(profile: Profile, read: (path: string) => Promise<Buffer>): Promise<void> {
-	const stale: string[] = [];
-	for (const path of sourcePaths(profile.draft)) {
-		try {
-			if (hash(await read(path)) !== profile.sourceHashes[path]) stale.push(path);
-		} catch {
-			stale.push(path);
-		}
-	}
-	if (stale.length)
-		throw new Error(
-			`Repository review context is stale; rerun /pr setup. Changed/missing sources: ${stale.join(", ")}`,
-		);
 }

@@ -75,6 +75,23 @@ it("uses public provider/auth context and accepts exactly one structured result"
 	});
 	expect(JSON.stringify(result)).not.toContain("fixture-secret");
 });
+it("does not let a failing progress renderer interrupt review work", async () => {
+	const value = { complete: true, limitations: [], findings: [] };
+	const result = await runWorker({
+		registry: fakeRegistry([value]),
+		config: testConfig,
+		schema: ReviewSubmission,
+		system: "Policy",
+		input: {},
+		progress: () => {
+			throw new Error("retired renderer");
+		},
+		event: () => {
+			throw new Error("retired observer");
+		},
+	});
+	expect(result).toMatchObject({ ok: true, value });
+});
 it("does not mistake text or malformed submissions for no findings", async () => {
 	for (const values of [[], [{ surprise: true }]]) {
 		const result = await runWorker({
@@ -97,15 +114,16 @@ it("cancels even while authentication is stalled", async () => {
 		system: "Fixed",
 		input: {},
 	});
-	expect(result).toMatchObject({ ok: false, error: "Worker deadline exhausted" });
+	expect(result).toMatchObject({ ok: false, error: "Provider request timed out" });
 });
-it("rejects oversized fixed context before dispatch", async () => {
+it("ignores the old arbitrary input quota", async () => {
+	const value = { complete: true, limitations: [], findings: [] };
 	const result = await runWorker({
-		registry: fakeRegistry([]),
+		registry: fakeRegistry([value]),
 		config: { ...testConfig, maxInputBytes: 10 },
 		schema: ReviewSubmission,
 		system: "Too large fixed instructions",
 		input: {},
 	});
-	expect(result).toMatchObject({ ok: false, error: "Required context exceeds worker input budget" });
+	expect(result).toMatchObject({ ok: true, value });
 });

@@ -1,28 +1,66 @@
-import type { Snapshot } from "./snapshot.js";
+import { snapshotLines, type Snapshot } from "./snapshot.js";
 import { safePath } from "./profile.js";
-import type { Candidate, Finding } from "./types.js";
+import type { Advisory, Candidate, Finding } from "./types.js";
 export const severityRank = { critical: 0, high: 1, medium: 2, low: 3 };
+export async function checkQuotedEvidence(
+	evidence: Finding["evidence"][number],
+	snapshot: Snapshot,
+): Promise<void> {
+	safePath(evidence.file);
+	const quote = evidence.quote.replace(/\r\n/g, "\n"),
+		count = quote.split("\n").length;
+	const page = await snapshotLines(
+		snapshot,
+		evidence.file,
+		evidence.side,
+		evidence.line,
+		count,
+		quote.length + count + 2,
+	);
+	if (page.text.split(/\r?\n/).slice(0, count).join("\n") !== quote)
+		throw new Error("Evidence quote does not match captured source");
+}
+export async function checkAdvisory(advisory: Omit<Advisory, "id">, snapshot: Snapshot): Promise<void> {
+	if (!advisory.files.length || !advisory.evidence.length)
+		throw new Error("Advisory needs changed-file scope and quoted evidence");
+	for (const file of advisory.files) {
+		safePath(file);
+		if (!snapshot.changes.some((change) => change.file === file || change.oldPath === file))
+			throw new Error("Advisory must concern changed files");
+	}
+	for (const evidence of advisory.evidence) await checkQuotedEvidence(evidence, snapshot);
+}
 export async function checkEvidence(finding: Finding, snapshot: Snapshot): Promise<void> {
 	safePath(finding.file);
 	const change = snapshot.changes.find((item) => item.file === finding.file || item.oldPath === finding.file);
 	if (!change) throw new Error("Finding does not target a reviewed file");
 	if (finding.endLine < finding.startLine) throw new Error("Invalid finding line range");
-	const fileLines = (await snapshot.read(finding.file, finding.side)).toString().split(/\r?\n/);
-	if (finding.endLine > fileLines.length) throw new Error("Finding line outside source");
-	const anchors = finding.side === "old" ? change.oldLines : change.newLines;
-	if (
-		!change.metadataOnly &&
-		![...anchors].some((line) => line >= finding.startLine && line <= finding.endLine)
-	)
-		throw new Error("Finding does not anchor to a changed hunk");
+	const lineCount = snapshot.lineCount
+		? await snapshot.lineCount(finding.file, finding.side)
+		: (await snapshot.read(finding.file, finding.side)).toString().split(/\r?\n/).length;
+	if (finding.endLine > lineCount) throw new Error("Finding line outside source");
+	if (!change.metadataOnly) {
+		let anchored: boolean;
+		if (change.changedRanges) {
+			const ranges = change.changedRanges[finding.side];
+			let low = 0,
+				high = ranges.length;
+			while (low < high) {
+				const middle = Math.floor((low + high) / 2);
+				if (ranges[middle]![1] < finding.startLine) low = middle + 1;
+				else high = middle;
+			}
+			anchored = low < ranges.length && ranges[low]![0] <= finding.endLine;
+		} else
+			anchored = [...(finding.side === "old" ? change.oldLines : change.newLines)].some(
+				(line) => line >= finding.startLine && line <= finding.endLine,
+			);
+		if (!anchored) throw new Error("Finding does not anchor to a changed hunk");
+	}
 	let primary = false;
 	for (const evidence of finding.evidence) {
-		safePath(evidence.file);
-		const source = (await snapshot.read(evidence.file, evidence.side)).toString().split(/\r?\n/);
-		const quote = evidence.quote.replace(/\r\n/g, "\n");
-		const count = quote.split("\n").length;
-		if (source.slice(evidence.line - 1, evidence.line - 1 + count).join("\n") !== quote)
-			throw new Error("Evidence quote does not match captured source");
+		await checkQuotedEvidence(evidence, snapshot);
+		const count = evidence.quote.replace(/\r\n/g, "\n").split("\n").length;
 		if (
 			evidence.file === finding.file &&
 			evidence.side === finding.side &&

@@ -40,7 +40,7 @@ export const ProfileSchema = object({
 	sourceHashes: Type.Record(Type.String(), text(64)),
 	draft: ProfileDraft,
 });
-export const ConfigSchema = object({
+export const LegacyConfigSchema = object({
 	schemaVersion: Type.Literal(1),
 	provider: text(256),
 	model: text(256),
@@ -55,6 +55,17 @@ export const ConfigSchema = object({
 	maxDiffBytes: Type.Integer({ minimum: 16000, maximum: 25000000 }),
 	historyLimit: Type.Integer({ minimum: 1, maximum: 100 }),
 });
+export const RuntimeConfigSchema = object({
+	schemaVersion: Type.Literal(2),
+	provider: text(256),
+	model: text(256),
+	thinking: enumeration(["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
+	concurrency: Type.Integer({ minimum: 1, maximum: 16 }),
+	requestTimeoutMs: Type.Integer({ minimum: 1000, maximum: 600000 }),
+	historyLimit: Type.Integer({ minimum: 1, maximum: 100 }),
+});
+export const ConfigSchema = Type.Union([LegacyConfigSchema, RuntimeConfigSchema]);
+export type RuntimeConfig = Static<typeof RuntimeConfigSchema>;
 export const Evidence = object({
 	file: text(1024),
 	side: Side,
@@ -73,6 +84,31 @@ export const FindingSchema = object({
 	rationale: text(),
 	evidence: list(Evidence, 8),
 });
+export const AdvisorySchema = object({
+	title: text(160),
+	files: list(text(1024), 64),
+	concern: text(),
+	recommendation: text(8000),
+	tradeoffs: text(),
+	evidence: list(Evidence, 8),
+});
+export type Advisory = Static<typeof AdvisorySchema> & { id: string };
+export const CheckpointSchema = object({
+	key: Type.Optional(text(120)),
+	reviewed: Type.Optional(list(text(2048), 100)),
+	notes: Type.Optional(text(12000)),
+	findings: Type.Optional(list(FindingSchema, 40)),
+	advisories: Type.Optional(list(AdvisorySchema, 12)),
+});
+export type Checkpoint = Static<typeof CheckpointSchema>;
+export const AreaSchema = object({
+	id: text(120),
+	name: text(160),
+	files: Type.Array(text(1024)),
+	reason: text(2000),
+	related: Type.Array(text(120)),
+});
+export type ReviewArea = Static<typeof AreaSchema>;
 export const ReviewSubmission = object({
 	complete: Type.Boolean(),
 	limitations: list(text(1000), 20),
@@ -90,6 +126,7 @@ export const VerificationSubmission = object({
 	),
 });
 export const ProposalSubmission = object({
+	areas: Type.Optional(Type.Array(AreaSchema)),
 	specialists: list(
 		object({
 			specialist: Specialist,
@@ -135,6 +172,8 @@ export interface Lens {
 	focus: string;
 	reading: string[];
 	reason: string;
+	/** Undefined means a whole-change lens. */
+	matchedFiles?: string[];
 }
 export interface LedgerEntry {
 	id: string;
@@ -167,6 +206,11 @@ export interface Report {
 	elapsedMs: number;
 	usage: { input: number; output: number; cost: number };
 	browser?: { decision: string; requestedIds: string[]; discussion: unknown[]; feedback: string };
+	areas?: ReviewArea[];
+	contextNotes?: string[];
+	tasks?: import("./tasks.js").TaskRecord[];
+	advisories?: Advisory[];
+	metrics?: { peakActive: number; modelRequests: number; compactions: number };
 }
 
 export function validate<T extends TSchema>(schema: T, value: unknown): Static<T> {

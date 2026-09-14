@@ -85,6 +85,8 @@ export async function initializeStorage(root: string): Promise<void> {
 			"Runtime .gitignore must contain only the ignore-all rule (plus blank lines/comments); conflicting rules are refused",
 		);
 }
+const isReport = (root: string, path: string) =>
+	/^repos\/[a-f0-9]{64}\/reports\/[a-f0-9-]{36}\.json$/.test(relative(root, path).split("\\").join("/"));
 export async function readStored(
 	root: string,
 	path: string,
@@ -92,7 +94,8 @@ export async function readStored(
 	await checkPath(root, path);
 	try {
 		const stat = await lstat(path);
-		if (!stat.isFile() || stat.size > 4 * 1024 * 1024) throw new Error("Invalid/oversized runtime file");
+		if (!stat.isFile() || (!isReport(root, path) && stat.size > 4 * 1024 * 1024))
+			throw new Error("Invalid/oversized runtime file");
 		const text = await readFile(path, "utf8");
 		return { value: JSON.parse(text) as unknown, revision: hash(text) };
 	} catch (error) {
@@ -128,7 +131,10 @@ export async function publish(
 			throw new Error("Runtime data changed since preview; retry setup.");
 		signal?.throwIfAborted();
 		const serialized = JSON.stringify(value, null, 2);
-		if (serialized === undefined || Buffer.byteLength(serialized) > 4 * 1024 * 1024)
+		if (
+			serialized === undefined ||
+			(!isReport(root, path) && Buffer.byteLength(serialized) > 4 * 1024 * 1024)
+		)
 			throw new Error("Runtime record exceeds storage budget or is not JSON data");
 		const handle = await open(temp, "wx", 0o600);
 		try {

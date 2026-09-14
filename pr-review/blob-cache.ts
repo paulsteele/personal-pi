@@ -32,13 +32,13 @@ export class BlobCache {
 		if (inFlight) return inFlight;
 		const load = this.tail.then(async () => {
 			const size = await this.options.size(id);
-			if (
-				!Number.isSafeInteger(size) ||
-				size < 0 ||
-				size > this.options.maxFileBytes ||
-				size > this.options.maxBytes
-			)
-				throw new Error("Source blob exceeds cache/file budget");
+			if (!Number.isSafeInteger(size) || size < 0) throw new Error("Invalid source blob size");
+			// Oversized entries bypass retention; cache capacity must never exclude source.
+			if (size > this.options.maxBytes) {
+				const data = await this.options.load(id, size);
+				if (data.length !== size) throw new Error("Source blob size changed while reading");
+				return data;
+			}
 			while (this.retained + size > this.options.maxBytes) {
 				const first = this.values.entries().next().value;
 				if (!first) throw new Error("Source cache budget exhausted");

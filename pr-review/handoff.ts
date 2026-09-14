@@ -26,7 +26,7 @@ export function reviewOutcome(
 		authorization,
 		`Requested verified finding IDs: ${JSON.stringify(requestedIds)}.`,
 		`Full structured report: ${path}`,
-		"Read browser.feedback, browser.discussion, findings, and groups in that report before acting. Duplicate groups describe one fix.",
+		"Read browser.feedback, browser.discussion, findings, and groups in that report before acting. Duplicate groups describe one fix. Design advisories are unverified discussion only; they never authorize fixes.",
 		instructions,
 	].join("\n\n");
 	return { text: `${prefix}\n\n${renderReport(report)}`, handoff };

@@ -50,6 +50,11 @@ async function interactive() {
 	} as unknown as ExtensionContext;
 	return { ...harness(), ...ui, repo, agentDir, ctx };
 }
+async function reviewCommand(h: Awaited<ReturnType<typeof interactive>>, args: string) {
+	const before = h.pi.sendMessage.mock.calls.length;
+	await h.commands.get("pr")!.handler(args, h.ctx);
+	await vi.waitFor(() => expect(h.pi.sendMessage.mock.calls.length).toBeGreaterThan(before));
+}
 it("registers only the unified command and review tool, without startup work", async () => {
 	const h = harness();
 	expect([...h.commands.keys()]).toEqual(["pr"]);
@@ -61,7 +66,7 @@ it("registers only the unified command and review tool, without startup work", a
 });
 it("rejects bare --base before opening a spinner or invoking Git/model work", async () => {
 	const h = await interactive();
-	await h.commands.get("pr")!.handler("--base", h.ctx);
+	await reviewCommand(h, "--base");
 	expect(h.state.factories).toBe(0);
 	expect(h.pi.sendMessage).toHaveBeenCalledWith(
 		expect.objectContaining({ display: true, content: expect.stringContaining("Missing base reference") }),
@@ -73,7 +78,7 @@ it.each(["", "--base main"])(
 	"reports missing approved context visibly for /pr %s and closes all spinners",
 	async (args) => {
 		const h = await interactive();
-		await h.commands.get("pr")!.handler(args, h.ctx);
+		await reviewCommand(h, args);
 		expect(h.pi.sendMessage).toHaveBeenCalledWith(
 			expect.objectContaining({
 				display: true,
@@ -86,7 +91,7 @@ it.each(["", "--base main"])(
 		expect(runWorker).not.toHaveBeenCalled();
 	},
 );
-it("completes setup with native dialogs between, never inside, work spinners", async () => {
+it("creates a draft with small interview dialogs, then approves it through a model-free command", async () => {
 	const h = await interactive();
 	await put(h.repo.root, "AGENTS.md", "Fixture rules\n");
 	vi.mocked(runWorker).mockImplementation((async (options: {
@@ -108,11 +113,19 @@ it("completes setup with native dialogs between, never inside, work spinners", a
 	await h.commands.get("pr")!.handler("setup", h.ctx);
 	expect(h.state.nativeDialogs).toContain("Independent PR review model");
 	expect(h.state.nativeDialogs).toContain("Fixture convention?");
-	expect(h.state.nativeDialogs).toContain("Activate this generated review context?");
+	expect(h.state.nativeDialogs).not.toContain("Activate this generated review context?");
+	expect(h.state.nativeDialogs.some((title) => title.includes("inspect or edit"))).toBe(false);
 	expect(h.state.frames.some((frame) => frame.includes("read: AGENTS.md"))).toBe(true);
 	expect(h.state.factories).toBe(h.state.closes);
 	expect(h.state.active).toBeUndefined();
 	const path = join(h.agentDir, "extensions", "pr-review", "repos", h.repo.id, "profile.json");
+	await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
+	expect(h.pi.sendMessage).toHaveBeenLastCalledWith(
+		expect.objectContaining({ content: expect.stringContaining("profile-draft.json") }),
+		expect.anything(),
+	);
+	await h.commands.get("pr")!.handler("setup approve", h.ctx);
+	expect(runWorker).toHaveBeenCalledTimes(2);
 	expect(JSON.parse(await readFile(path, "utf8")).repoId).toBe(h.repo.id);
 	expect(h.pi.sendMessage).toHaveBeenCalledWith(
 		expect.objectContaining({ content: expect.stringContaining("Saved generated PR review context") }),
@@ -137,7 +150,7 @@ it("explains incomplete setup and does not mistake a saved model for an approved
 	await expect(
 		readFile(join(h.agentDir, "extensions", "pr-review", "repos", h.repo.id, "profile.json")),
 	).rejects.toMatchObject({ code: "ENOENT" });
-	await h.commands.get("pr")!.handler("", h.ctx);
+	await reviewCommand(h, "");
 	expect(h.pi.sendMessage).toHaveBeenLastCalledWith(
 		expect.objectContaining({ content: expect.stringContaining("No approved repository review context") }),
 		{ triggerTurn: false },

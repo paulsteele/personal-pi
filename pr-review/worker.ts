@@ -6,8 +6,12 @@ import {
 	type Api,
 } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Static, TSchema } from "typebox";
-import { validate, type Config } from "./types.js";
+import { Type, type Static, type TSchema } from "typebox";
+import { CheckpointSchema, validate, type Config, type Checkpoint } from "./types.js";
+import { normalizeConfig } from "./config.js";
+import { redact } from "./report.js";
+import { CoverageLedger } from "./tasks.js";
+import { compactWorkerContext, contextTokens, packInlineContext, responseReserve } from "./worker-context.js";
 
 export type Registry = Pick<
 	ExtensionContext["modelRegistry"],
@@ -18,10 +22,31 @@ export interface WorkerUsage {
 	output: number;
 	cost: number;
 }
+export type WorkerEvent = {
+	type: "turn" | "tool" | "request" | "compacting" | "continued" | "retry" | "usage" | "coverage";
+	text: string;
+	turns?: number;
+	usage?: WorkerUsage;
+};
 export type WorkerResult<T> =
 	| { ok: true; value: T; usage: WorkerUsage }
 	| { ok: false; error: string; usage: WorkerUsage };
-function failure(model: Model<Api>, aborted: boolean): AssistantMessage {
+function providerFailureReason(error: unknown): string {
+	const text = typeof error === "string" ? error : error instanceof Error ? error.message : "";
+	if (/context[_ ](?:length|window)|too many tokens|token.*limit/i.test(text))
+		return "Provider context window exhausted";
+	if (/rate.?limit|too many requests|\b429\b/i.test(text)) return "Provider rate limited the review request";
+	if (/unauthori[sz]ed|authentication|\b401\b|\b403\b/i.test(text)) return "Provider authentication failed";
+	if (/timeout|timed out|deadline/i.test(text)) return "Provider request timed out";
+	if (/ECONN|ENOTFOUND|network|connection/i.test(text)) return "Provider connection failed";
+	return "Worker/provider request failed";
+}
+function failure(
+	model: Model<Api>,
+	aborted: boolean,
+	overflow = false,
+	reason = "Worker/provider request failed",
+): AssistantMessage {
 	return {
 		role: "assistant",
 		api: model.api,
@@ -30,7 +55,7 @@ function failure(model: Model<Api>, aborted: boolean): AssistantMessage {
 		timestamp: Date.now(),
 		content: [],
 		stopReason: aborted ? "aborted" : "error",
-		errorMessage: aborted ? "Worker cancelled" : "Review provider request failed",
+		errorMessage: aborted ? "Worker cancelled" : overflow ? "Worker context exceeds model window" : reason,
 		usage: {
 			input: 0,
 			output: 0,
@@ -41,48 +66,75 @@ function failure(model: Model<Api>, aborted: boolean): AssistantMessage {
 		},
 	};
 }
-/** Public registry bridge; deliberately does not copy the main session's context or extensions. */
-export function registryStream(registry: Registry, config: Config): StreamFn {
+/** Public registry bridge. Only an individual request has a liveness timeout, never the whole worker. */
+export function registryStream(registry: Registry, config: Config, request?: () => void): StreamFn {
 	return (model, context, options) => {
 		const output = createAssistantMessageEventStream();
-		let closed = false;
+		const controller = new AbortController();
+		const signal = options?.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+		let closed = false,
+			overflow = false,
+			reason = "Worker/provider request failed";
 		const fail = () => {
 			if (closed) return;
 			closed = true;
-			const error = failure(model, Boolean(options?.signal?.aborted));
+			const error = failure(model, Boolean(options?.signal?.aborted), overflow, reason);
 			output.push({ type: "error", reason: error.stopReason === "aborted" ? "aborted" : "error", error });
 		};
-		options?.signal?.addEventListener("abort", fail, { once: true });
+		const timer = setTimeout(() => {
+			reason = "Provider request timed out";
+			controller.abort();
+			fail();
+		}, normalizeConfig(config).requestTimeoutMs);
+		signal.addEventListener("abort", fail, { once: true });
 		void (async () => {
 			try {
-				if (options?.signal?.aborted) return fail();
-				if (Buffer.byteLength(JSON.stringify(context)) > config.maxInputBytes * 3) return fail();
+				if (signal.aborted) return fail();
+				request?.();
 				const auth = await registry.getApiKeyAndHeaders(model);
-				if (closed || options?.signal?.aborted) return fail();
+				if (closed || signal.aborted) return fail();
 				const provider = registry.getProvider(model.provider);
 				if (!auth.ok || !provider) return fail();
-				const effectiveModel = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
-				const stream = provider.streamSimple(effectiveModel, context, {
+				const effective = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
+				const stream = provider.streamSimple(effective, context, {
 					...options,
+					signal,
 					...(auth.apiKey ? { apiKey: auth.apiKey } : {}),
 					headers: { ...auth.headers, ...options?.headers },
 					env: { ...auth.env, ...options?.env },
-					timeoutMs: config.timeoutMs,
+					timeoutMs: normalizeConfig(config).requestTimeoutMs,
 					maxRetries: 1,
-					maxRetryDelayMs: Math.min(config.timeoutMs, 10000),
+					maxRetryDelayMs: 10000,
 				});
 				for await (const event of stream) {
 					if (closed) break;
+					timer.refresh();
 					output.push(event);
-					if (event.type === "done" || event.type === "error") closed = true;
+					if (event.type === "done" || event.type === "error") {
+						closed = true;
+						break;
+					}
 				}
 				if (!closed) fail();
-			} catch {
+			} catch (error) {
+				reason = providerFailureReason(error);
+				overflow =
+					error instanceof Error &&
+					/context[_ ](?:length|window)|too many tokens|token.*limit/i.test(error.message);
 				fail();
 			} finally {
-				options?.signal?.removeEventListener("abort", fail);
+				clearTimeout(timer);
+				signal.removeEventListener("abort", fail);
 			}
 		})();
+		// Also settle resources if authentication/provider ignores cancellation indefinitely.
+		output
+			.result()
+			.finally(() => {
+				clearTimeout(timer);
+				signal.removeEventListener("abort", fail);
+			})
+			.catch(() => {});
 		return output;
 	};
 }
@@ -95,44 +147,206 @@ export async function runWorker<T extends TSchema>(options: {
 	tools?: AgentTool[];
 	signal?: AbortSignal;
 	progress?: (text: string) => void;
+	event?: (event: WorkerEvent) => void;
+	coverage?: CoverageLedger | undefined;
+	resources?: AsyncIterable<{ id: string; text: string; total: number }> | undefined;
+	allowAdvisories?: boolean;
+	allowFindings?: boolean;
+	validateCheckpoint?: ((value: Checkpoint) => void | Promise<void>) | undefined;
+	validateResult?: ((value: Static<T>) => void | Promise<void>) | undefined;
+	recover?: ((reason: string) => Promise<void>) | undefined;
 }): Promise<WorkerResult<Static<T>>> {
 	const usage: WorkerUsage = { input: 0, output: 0, cost: 0 };
 	const model = options.registry.find(options.config.provider, options.config.model);
 	if (!model || !options.registry.hasConfiguredAuth(model))
 		return { ok: false, error: "Independent review model unavailable; use /pr model", usage };
-	const prompt = JSON.stringify(options.input);
-	if (Buffer.byteLength(options.system + prompt) > options.config.maxInputBytes)
-		return { ok: false, error: "Required context exceeds worker input budget", usage };
-	let submitted = false;
-	let invalidSubmission = false;
+	const emit = (event: WorkerEvent) => {
+		try {
+			options.progress?.(redact(event.text));
+		} catch {
+			/* Presentation cannot fail model work. */
+		}
+		try {
+			options.event?.({ ...event, text: redact(event.text) });
+		} catch {
+			/* Retired observers are non-authoritative. */
+		}
+	};
+	const addUsage = (value: { input: number; output: number; cost: { total: number } }) => {
+		usage.input += value.input;
+		usage.output += value.output;
+		usage.cost += value.cost.total;
+		emit({ type: "usage", text: "Usage updated", usage: { ...usage } });
+	};
+	let submitted = false,
+		invalidSubmission = false,
+		turns = 0,
+		compact = false,
+		stalled = false;
+	const recentSignatures: string[] = [];
+	let inputText = JSON.stringify(options.input);
 	let result: Static<T> | undefined;
-	let turns = 0;
-	let timedOut = false;
+	const textResult = (value: unknown) => ({
+		content: [{ type: "text" as const, text: JSON.stringify(value) }],
+		details: {},
+	});
+	const extra: AgentTool[] = [
+		{
+			name: "read_task_input",
+			label: "Read task context",
+			description:
+				"Page the complete original JSON task input when it is too large to inline. Cursor counts characters.",
+			parameters: Type.Object({ cursor: Type.Optional(Type.Integer({ minimum: 0 })) }),
+			async execute(_id, args) {
+				const cursor = (args as { cursor?: number }).cursor ?? 0;
+				const text = inputText.slice(cursor, cursor + 8000);
+				return textResult({
+					text,
+					nextOffset: cursor + text.length < inputText.length ? cursor + text.length : null,
+				});
+			},
+		},
+	];
+	if (options.coverage) {
+		const ledger = options.coverage;
+		extra.push({
+			name: "record_checkpoint",
+			label: "Record review checkpoint",
+			description:
+				"Optionally save intermediate findings or cross-file notes during a large review. No keys, read acknowledgments, or coverage IDs are required. Submit final findings directly through submit_result when they fit.",
+			parameters: CheckpointSchema,
+			executionMode: "sequential",
+			async execute(_id, args) {
+				const value = validate(CheckpointSchema, args);
+				if (value.findings?.length && options.allowFindings === false)
+					throw new Error("This stage must not invent findings");
+				if (value.advisories?.length && !options.allowAdvisories)
+					throw new Error("Only architecture may submit advisories");
+				await options.validateCheckpoint?.(value);
+				ledger.checkpoint(value);
+				emit({
+					type: "coverage",
+					text: `${ledger.total - ledger.remaining.length}/${ledger.total} obligations reviewed`,
+				});
+				return textResult({ accepted: value.key, remaining: ledger.remaining.length });
+			},
+		} as AgentTool);
+		extra.push({
+			name: "coverage_state",
+			label: "Review coverage",
+			description:
+				"List context not yet supplied. Read diff:path with read_change, doc:path with read, and candidate:ID with read_candidate. Normal reads and inline context are tracked automatically; no acknowledgment tool call is necessary.",
+			parameters: Type.Object({ offset: Type.Optional(Type.Integer({ minimum: 0 })) }),
+			async execute(_id, args) {
+				return textResult(ledger.page((args as { offset?: number }).offset));
+			},
+		});
+		extra.push({
+			name: "checkpoint_notes",
+			label: "Cross-file notes",
+			description:
+				"Page accepted cross-file checkpoint notes after continuation/compaction. Offset counts checkpoints.",
+			parameters: Type.Object({ offset: Type.Optional(Type.Integer({ minimum: 0 })) }),
+			async execute(_id, args) {
+				const offset = (args as { offset?: number }).offset ?? 0;
+				return textResult({
+					notes: ledger.notes.slice(offset, offset + 4),
+					nextOffset: offset + 4 < ledger.notes.length ? offset + 4 : null,
+				});
+			},
+		});
+	}
+	if (options.recover)
+		extra.push({
+			name: "report_blocker",
+			label: "Report review blocker",
+			description:
+				"Pause this task for a human to resolve missing context or a genuine failure. Other review tasks may continue. Explain the specific obstacle; do not loop on failed reads or pretend the review is complete.",
+			parameters: Type.Object({ reason: Type.String({ minLength: 1, maxLength: 1000 }) }),
+			async execute(_id, args) {
+				await options.recover!(redact((args as { reason: string }).reason));
+				return textResult({
+					resumed: true,
+					instruction: "Retry the blocked work against the same snapshot.",
+				});
+			},
+		});
 	const submit: AgentTool<T> = {
 		name: "submit_result",
 		label: "Submit result",
-		description: "Submit the final structured result once. No further actions are allowed after submission.",
+		description:
+			"Submit the final review result. All assigned source must have been supplied to you, either inline or through normal reads. Intermediate result recording is optional.",
 		parameters: options.schema,
 		executionMode: "sequential",
 		async execute(_id, args) {
 			if (submitted) {
 				invalidSubmission = true;
-				throw new Error("Duplicate submission");
+				throw new Error("Duplicate final submission");
 			}
-			result = validate(options.schema, args);
+			const value = validate(options.schema, args);
+			if (options.coverage && (value as { complete?: boolean }).complete === false) {
+				const partial = value as { limitations?: string[]; findings?: Checkpoint["findings"] };
+				const reason = redact(partial.limitations?.join("; ") || "Reviewer reported unfinished work");
+				const checkpoint: Checkpoint = { findings: partial.findings ?? [], notes: reason };
+				await options.validateCheckpoint?.(checkpoint);
+				options.coverage.checkpoint(checkpoint);
+				if (!options.recover) throw new Error(reason);
+				await options.recover(reason);
+				return textResult({
+					resumed: true,
+					instruction: "Continue the unfinished review; saved partial findings need not be repeated.",
+				});
+			}
+			options.coverage?.assertComplete();
+			await options.validateResult?.(value);
+			result = value;
 			submitted = true;
-			return { content: [{ type: "text", text: "Result accepted" }], details: {}, terminate: true };
+			return { ...textResult({ accepted: true }), terminate: true };
 		},
 	};
-	const agent = new Agent({
+	const tools = [...(options.tools ?? []), ...extra, submit as AgentTool];
+	const stream = registryStream(options.registry, options.config, () =>
+		emit({ type: "request", text: "Model request" }),
+	);
+	const threshold = model.contextWindow - responseReserve(model);
+	const system =
+		options.system +
+		(options.coverage
+			? "\nReview the entire assigned scope. suppliedContext contains complete captured resources already provided to you. Read remaining sources normally; context delivery is tracked automatically. No read receipts or checkpoints are required. Use record_checkpoint only if you want to preserve intermediate findings/notes. Saved profile context is advisory; current captured code and documentation take precedence."
+			: "");
+	const agent: Agent = new Agent({
 		initialState: {
 			model,
-			systemPrompt: options.system,
+			systemPrompt: system,
 			thinkingLevel: model.reasoning ? options.config.thinking : "off",
-			tools: [...(options.tools ?? []), submit as AgentTool],
+			tools,
 		},
-		streamFn: registryStream(options.registry, options.config),
-		shouldStopAfterTurn: () => submitted || turns >= options.config.maxTurns,
+		streamFn: stream,
+		shouldStopAfterTurn: ({ message, toolResults }) => {
+			compact =
+				contextTokens(
+					system,
+					tools.map((t) => ({ name: t.name, parameters: t.parameters })),
+					agent.state.messages,
+				) > threshold;
+			const signature = JSON.stringify({
+				calls: message.content
+					.filter((block) => block.type === "toolCall")
+					.map((block) => ({ name: block.name, arguments: block.arguments })),
+				results: toolResults.map((result) => ({
+					toolName: result.toolName,
+					content: result.content,
+					isError: result.isError,
+				})),
+				content: toolResults.length ? undefined : message.content,
+				remaining: options.coverage?.remaining,
+				checkpoints: options.coverage?.notes.length,
+			});
+			recentSignatures.push(signature);
+			if (recentSignatures.length > 24) recentSignatures.shift();
+			stalled = recentSignatures.filter((value) => value === signature).length >= 4;
+			return submitted || compact || stalled;
+		},
 		beforeToolCall: async () => {
 			if (!submitted) return undefined;
 			invalidSubmission = true;
@@ -140,41 +354,110 @@ export async function runWorker<T extends TSchema>(options: {
 		},
 	});
 	const unsubscribe = agent.subscribe((event) => {
-		if (event.type === "turn_start") {
-			turns++;
-			options.progress?.(`turn ${turns}`);
+		if (event.type === "turn_start") emit({ type: "turn", text: `turn ${++turns}`, turns });
+		if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
+			const path =
+				event.type === "tool_execution_start" &&
+				event.args &&
+				typeof event.args.path === "string" &&
+				!event.args.path.startsWith("/") &&
+				!event.args.path.split("/").includes("..")
+					? `: ${event.args.path.slice(0, 1024)}`
+					: "";
+			emit({
+				type: "tool",
+				text: `${event.toolName}${path}${event.type === "tool_execution_end" ? (event.isError ? " failed" : " finished") : ""}`,
+			});
 		}
-		if (event.type === "tool_execution_start") options.progress?.(event.toolName);
-		if (event.type === "message_end" && event.message.role === "assistant") {
-			usage.input += event.message.usage.input;
-			usage.output += event.message.usage.output;
-			usage.cost += event.message.usage.cost.total;
-		}
+		if (event.type === "message_end" && event.message.role === "assistant") addUsage(event.message.usage);
 	});
 	const abort = () => agent.abort();
 	options.signal?.addEventListener("abort", abort, { once: true });
-	const timeout = setTimeout(() => {
-		timedOut = true;
-		agent.abort();
-	}, options.config.timeoutMs);
+	const recover = async (reason: string) => {
+		if (!options.recover) throw new Error(reason);
+		emit({ type: "retry", text: reason });
+		await options.recover(reason);
+		options.signal?.throwIfAborted();
+	};
 	try {
-		if (options.signal?.aborted) return { ok: false, error: "Cancelled", usage };
-		await agent.prompt(prompt);
-		if (options.signal?.aborted || timedOut)
-			return { ok: false, error: timedOut ? "Worker deadline exhausted" : "Cancelled", usage };
-		if (!submitted || invalidSubmission || result === undefined || agent.state.errorMessage)
-			return {
-				ok: false,
-				error: agent.state.errorMessage
-					? "Worker/provider failed"
-					: "Worker finished without a valid complete submission",
-				usage,
-			};
-		return { ok: true, value: result, usage };
-	} catch {
-		return { ok: false, error: "Worker failed", usage };
+		if (contextTokens(system, tools, []) >= threshold)
+			throw new Error("Model context cannot fit the review policy/tools; select a larger-context model");
+		const overhead = contextTokens(system, tools, []);
+		// Pi's text-only estimate is ceil(chars / 4); retain a final SDK check before crediting delivery.
+		const fitsLength = (chars: number) => overhead + Math.ceil(chars / 4) <= threshold * 0.75;
+		const fits = (text: string) =>
+			contextTokens(system, tools, [{ role: "user", timestamp: 0, content: [{ type: "text", text }] }]) <=
+			threshold * 0.75;
+		if (options.resources && fitsLength(inputText.length)) {
+			const packed = await packInlineContext(inputText, options.resources, fitsLength, options.signal);
+			if (fits(packed.text)) {
+				inputText = packed.text;
+				for (const resource of packed.delivered)
+					options.coverage?.deliver(resource.id, 0, resource.total, resource.total);
+				emit({ type: "coverage", text: `${packed.delivered.length} complete resources supplied inline` });
+			}
+		}
+		let prompt = fits(inputText)
+			? inputText
+			: "Read the complete original task context through read_task_input before working. Continue its character cursor until nextOffset is null. All referenced captured changes/documents remain available through snapshot tools.";
+		let previousStop = "",
+			repeated = 0;
+		for (;;) {
+			options.signal?.throwIfAborted();
+			await agent.prompt(prompt);
+			options.signal?.throwIfAborted();
+			if (submitted && result !== undefined) {
+				if (invalidSubmission || agent.state.errorMessage)
+					throw new Error("Worker violated final submission protocol");
+				return { ok: true, value: result, usage };
+			}
+			const overflow = /context|token.*limit|too (?:long|large)/i.test(agent.state.errorMessage ?? "");
+			if (stalled) {
+				await recover("Repeated identical activity without review progress");
+				stalled = false;
+				recentSignatures.length = 0;
+			} else if (compact || overflow) {
+				try {
+					emit({ type: "compacting", text: "Compacting context; coverage retained" });
+					agent.state.messages = await compactWorkerContext({
+						messages: agent.state.messages,
+						model,
+						stream,
+						signal: options.signal,
+						onUsage: addUsage,
+					});
+					compact = false;
+					emit({ type: "continued", text: "Continuing same review task" });
+				} catch {
+					options.signal?.throwIfAborted();
+					await recover("Context compaction failed");
+				}
+			} else if (agent.state.errorMessage) {
+				await recover(providerFailureReason(agent.state.errorMessage));
+				if (agent.state.messages.at(-1)?.role === "assistant")
+					agent.state.messages = agent.state.messages.slice(0, -1);
+			} else {
+				const stop = JSON.stringify({
+					remaining: options.coverage?.remaining,
+					last: (agent.state.messages.at(-1) as { content?: unknown } | undefined)?.content,
+				});
+				repeated = stop === previousStop ? repeated + 1 : 0;
+				previousStop = stop;
+				if (!options.coverage || repeated >= 2) {
+					await recover("Worker stopped without completing its structured submission");
+					repeated = 0;
+				}
+			}
+			prompt =
+				"Continue the same task. Inspect remaining coverage and prior checkpoint notes; finish required work, then submit_result. Do not repeat recorded findings.";
+		}
+	} catch (error) {
+		return {
+			ok: false,
+			error: options.signal?.aborted ? "Cancelled" : error instanceof Error ? error.message : "Worker failed",
+			usage,
+		};
 	} finally {
-		clearTimeout(timeout);
 		unsubscribe();
 		options.signal?.removeEventListener("abort", abort);
 		agent.clearAllQueues();

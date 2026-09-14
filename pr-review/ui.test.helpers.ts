@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { OverlayHandle } from "@earendil-works/pi-tui";
 
 interface TestComponent {
 	render(width: number): string[];
@@ -13,6 +14,9 @@ export function uiHarness() {
 		closes: 0,
 		nativeDialogs: [] as string[],
 		frames: [] as string[],
+		widgets: new Map<string, string[]>(),
+		statuses: new Map<string, string>(),
+		notifications: [] as Array<{ message: string; type: string | undefined }>,
 	};
 	let creating = false;
 	const render = () => {
@@ -23,7 +27,10 @@ export function uiHarness() {
 		state.nativeDialogs.push(name);
 	};
 	const ui = {
-		custom<T>(factory: (...args: any[]) => TestComponent): Promise<T> {
+		custom<T>(
+			factory: (...args: any[]) => TestComponent,
+			options?: { onHandle?: (handle: OverlayHandle) => void },
+		): Promise<T> {
 			if (creating || state.active) return Promise.reject(new Error("Nested custom UI"));
 			state.factories++;
 			return new Promise((resolve, reject) => {
@@ -53,6 +60,14 @@ export function uiHarness() {
 						if (!closed) {
 							mounted = value;
 							state.active = value;
+							options?.onHandle?.({
+								hide: () => done(undefined as T),
+								setHidden: () => {},
+								isHidden: () => false,
+								focus: () => {},
+								unfocus: () => {},
+								isFocused: () => true,
+							});
 							render();
 						}
 					});
@@ -78,8 +93,17 @@ export function uiHarness() {
 			native(title);
 			return prefill;
 		},
-		notify() {},
-		setStatus() {},
+		notify(message: string, type?: string) {
+			state.notifications.push({ message, type });
+		},
+		setStatus(key: string, text?: string) {
+			if (text === undefined) state.statuses.delete(key);
+			else state.statuses.set(key, text);
+		},
+		setWidget(key: string, lines?: string[]) {
+			if (lines === undefined) state.widgets.delete(key);
+			else state.widgets.set(key, lines);
+		},
 	};
 	return { state, ui: ui as unknown as ExtensionContext["ui"] };
 }

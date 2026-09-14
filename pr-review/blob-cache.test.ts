@@ -26,16 +26,18 @@ it("deduplicates pending reads, reserves before allocating, and bounds aggregate
 	expect(load).toHaveBeenCalledTimes(6);
 	expect(cache.stats.retainedBytes).toBeLessThanOrEqual(12);
 });
-it("rejects oversized/mismatched blobs without poisoning later reads or reservations", async () => {
-	const load = vi.fn(async (id: string) => Buffer.from(id === "bad" ? "wrong" : "ok"));
+it("bypasses cache for oversized blobs and rejects mismatches without poisoning later reads", async () => {
+	const load = vi.fn(async (id: string) =>
+		Buffer.from(id === "huge" ? "0123456789" : id === "bad" ? "wrong" : "ok"),
+	);
 	const cache = new BlobCache({
 		maxBytes: 4,
 		maxFileBytes: 4,
 		size: async (id) => (id === "huge" ? 10 : 2),
 		load,
 	});
-	await expect(cache.get("huge")).rejects.toThrow("budget");
-	expect(load).not.toHaveBeenCalled();
+	expect((await cache.get("huge")).length).toBe(10);
+	expect(cache.stats.retainedBytes).toBe(0);
 	await expect(cache.get("bad")).rejects.toThrow("size changed");
 	expect(cache.stats.reservedBytes).toBe(0);
 	expect((await cache.get("good")).toString()).toBe("ok");

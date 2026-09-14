@@ -39,7 +39,9 @@ it("evaluates path/content AND predicates on the same changed file", () => {
 });
 it("always includes the four shared baselines for prose-only edits", async () => {
 	expect(
-		selectLenses(testDraft, [{ ...change, file: "README.md" }], await loadPrompts()).map((lens) => lens.id),
+		(await selectLenses(testDraft, [{ ...change, file: "README.md" }], await loadPrompts())).map(
+			(lens) => lens.id,
+		),
 	).toEqual(["security", "performance", "correctness", "style"]);
 });
 it("requires exhaustive duplicate groups and never merges unrelated locations", () => {

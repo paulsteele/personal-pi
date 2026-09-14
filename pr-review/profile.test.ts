@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { assertFresh, fingerprints, validateDraft } from "./profile.js";
+import { loadProfile, validateDraft } from "./profile.js";
 import { hash, loadPrompts } from "./prompts.js";
 import { initializeStorage, profilePath, publish, readStored, storageRoot } from "./storage.js";
 import { saveModel, loadConfig } from "./config.js";
@@ -29,7 +29,7 @@ afterEach(async () => {
 describe("private profiles and fixed methodology", () => {
 	it("loads every fixed prompt and rejects generated workflow overrides", async () => {
 		const prompts = await loadPrompts();
-		expect(Object.keys(prompts.text)).toHaveLength(13);
+		expect(Object.keys(prompts.text)).toHaveLength(14);
 		expect(() => validateDraft({ ...draft, disableVerification: true })).toThrow();
 		expect(() => validateDraft({ ...draft, requiredReading: ["../auth.json"] })).toThrow();
 		expect(() =>
@@ -48,8 +48,8 @@ describe("private profiles and fixed methodology", () => {
 			}),
 		).toThrow();
 	});
-	it("requires explicit refresh for changed or missing sources", async () => {
-		const source = Buffer.from("stable rules");
+	it("loads approved legacy profiles without requiring source hashes to match current files", async () => {
+		const root = await temp();
 		const profile: Profile = {
 			schemaVersion: 1,
 			contextVersion: 1,
@@ -57,15 +57,10 @@ describe("private profiles and fixed methodology", () => {
 			generatedAt: "today",
 			generationModel: "fake/model",
 			draft,
-			sourceHashes: await fingerprints(draft, async () => source),
+			sourceHashes: {},
 		};
-		await expect(assertFresh(profile, async () => source)).resolves.toBeUndefined();
-		await expect(assertFresh(profile, async () => Buffer.from("changed"))).rejects.toThrow("/pr setup");
-		await expect(
-			assertFresh(profile, async () => {
-				throw new Error("missing");
-			}),
-		).rejects.toThrow("AGENTS.md");
+		await publish(root, profilePath(root, profile.repoId), profile, undefined);
+		expect((await loadProfile(root, profile.repoId))?.profile).toEqual(profile);
 	});
 	it("refuses checkout-local storage", async () => {
 		const root = await temp();
@@ -87,7 +82,12 @@ describe("private profiles and fixed methodology", () => {
 	it("persists independent model settings but never overwrites malformed config", async () => {
 		const root = await temp();
 		await saveModel(root, "fake", "independent", "high");
-		expect(await loadConfig(root)).toMatchObject({ model: "independent", concurrency: 4, timeoutMs: 300000 });
+		expect(await loadConfig(root)).toMatchObject({
+			schemaVersion: 2,
+			model: "independent",
+			concurrency: 4,
+			requestTimeoutMs: 300000,
+		});
 		await writeFile(join(root, "config.json"), "broken json");
 		await expect(saveModel(root, "fake", "replacement", "low")).rejects.toThrow();
 		expect(await readFile(join(root, "config.json"), "utf8")).toBe("broken json");

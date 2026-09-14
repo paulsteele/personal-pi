@@ -2,7 +2,13 @@ import { mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { representatives } from "./findings.js";
 import { publish, readStored } from "./storage.js";
-import type { Report } from "./types.js";
+import type { Advisory, Report } from "./types.js";
+
+export function renderAdvisory(advisory: Advisory): string {
+	return redact(
+		`### ${advisory.id}: ${advisory.title}\n**UNVERIFIED DESIGN ADVISORY — discussion only; no fixes authorized.**\nAffected: ${advisory.files.join(", ")}\n\n${advisory.concern}\n\nRecommendation: ${advisory.recommendation}\n\nTradeoffs: ${advisory.tradeoffs}\n\n${advisory.evidence.map((e) => `${e.file}:${e.line} (${e.side}) — ${e.quote}`).join("\n")}`,
+	);
+}
 
 export function redact(text: string): string {
 	return text
@@ -21,13 +27,15 @@ export function renderReport(report: Report): string {
 		"",
 		`**Project:** ${report.project}`,
 		`**Status:** ${report.status}`,
-		`**Files reviewed:** ${report.changedFiles}`,
+		`**Changed files in scope:** ${report.changedFiles}`,
 		`**Model:** ${report.model}`,
 		`**Reviewers:** ${report.lenses.map((lens) => lens.name).join(", ") || "none"}`,
 		`**Source:** ${report.baseline ?? "empty tree"} → ${report.head ?? "unborn"} (${report.fingerprint.slice(0, 12)})`,
 		"**Verification:** independent evidence review; tests/builds were not run",
 		"",
 	];
+	if (report.contextNotes?.length)
+		lines.push("## Context notes", ...report.contextNotes.map((note) => `- ${note}`), "");
 	if (report.issues.length)
 		lines.push("## Incomplete / limited areas", ...report.issues.map((issue) => `- ${issue}`), "");
 	for (const { primary, members } of representatives(report.findings, report.groups))
@@ -55,6 +63,27 @@ export function renderReport(report: Report): string {
 			);
 		else lines.push("No verified findings retained. This is not a clean-pass claim.");
 	}
+	if (report.advisories?.length)
+		lines.push(
+			"",
+			"## Unverified design advisories",
+			"These judgments were not independently verified and are not eligible for automatic fix authorization.",
+			...report.advisories.map(renderAdvisory),
+		);
+	if (report.tasks) {
+		lines.push(
+			"",
+			"## Task execution and coverage",
+			`${report.tasks.length} logical tasks; ${report.metrics?.modelRequests ?? "unknown"} model requests; ${report.metrics?.compactions ?? "unknown"} compactions; peak active ${report.metrics?.peakActive ?? "unknown"}.`,
+		);
+		for (const task of report.tasks)
+			lines.push(
+				`- ${task.name} [${task.state}] — ${task.files.length} files; ${task.remaining === undefined ? "coverage n/a" : `${(task.total ?? 0) - task.remaining}/${task.total} context resources supplied`}; ${task.turns} turns; ${task.retries} retries; ${task.startedAt && task.endedAt ? `${Math.round((task.endedAt - task.startedAt) / 1000)}s` : "not settled"}. ${task.reason}`,
+			);
+		lines.push(
+			"Task durations overlap and can include recovery waits; they are not additive wall time. Scope acknowledgments do not guarantee every defect was detected.",
+		);
+	} else lines.push("", "Task execution metrics unavailable for this older report.");
 	if (report.clean.length) lines.push("", "## Clean areas", ...report.clean.map((name) => `- ${name}`));
 	if (report.declined.length)
 		lines.push("", "## User-declined specialists", ...report.declined.map((name) => `- ${name}`));

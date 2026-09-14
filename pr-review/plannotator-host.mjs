@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { createHostLoader, openBrowserIfActive } from "./host-loader.mjs";
+import { readOwnedViewerPatch } from "./viewer-patch.mjs";
 
 const [piPackageDir, plannotatorDir] = process.argv.slice(2);
 const input = createInterface({ input: process.stdin });
@@ -29,13 +30,16 @@ globalThis.fetch = (request, options) => {
 };
 input.on("line", (line) => {
 	void (async () => {
-		if (Buffer.byteLength(line) > 32 * 1024 * 1024) throw new Error("Viewer input limit exceeded");
+		// The trusted parent sends the complete captured diff; its size is not a review quota.
 		const request = JSON.parse(line);
 		if (request.type === "cancel") return stop();
 		if (
 			started ||
 			request.type !== "start" ||
-			typeof request.patch !== "string" ||
+			!(
+				(request.patchFile === "diff.patch" && request.patch === undefined) ||
+				(request.patchFile === undefined && typeof request.patch === "string")
+			) ||
 			typeof request.label !== "string" ||
 			!Array.isArray(request.annotations)
 		)
@@ -56,6 +60,8 @@ input.on("line", (line) => {
 			process.env.PLANNOTATOR_REMOTE !== "0"
 		)
 			throw new Error("Viewer isolation settings missing");
+		const patch = request.patchFile ? await readOwnedViewerPatch(process.cwd(), process.ppid) : request.patch;
+		if (stopped) return;
 		const manifest = JSON.parse(await readFile(join(plannotatorDir, "package.json"), "utf8"));
 		if (manifest.name !== "@plannotator/pi-extension" || manifest.version !== "0.27.12")
 			throw new Error("Unsupported installed Plannotator version");
@@ -66,7 +72,7 @@ input.on("line", (line) => {
 		const html = await readFile(join(plannotatorDir, "review-editor.html"), "utf8");
 		if (stopped) return;
 		server = await module.startReviewServer({
-			rawPatch: request.patch,
+			rawPatch: patch,
 			gitRef: request.label,
 			diffType,
 			...(request.base ? { initialBase: request.base } : {}),

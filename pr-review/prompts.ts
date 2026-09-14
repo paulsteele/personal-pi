@@ -8,6 +8,7 @@ const names = [
 	"profile",
 	"propose",
 	"reviewer",
+	"architecture",
 	"verifier",
 	"consolidate",
 	"fix-handoff",
