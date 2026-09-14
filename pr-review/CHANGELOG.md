@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Frame the review dashboard with a theme-aware background, accent border, section dividers, status icons, and full-row selection highlighting. Cap its width at 120 columns and budget scrolling around the frame/footer on smaller terminals.
+
 - Fix F19: release the idle command loop while command-launched reviews run, route phase progress and the viewer URL into live status, and preserve awaited tool results and session/cancellation ownership. Status/retry/cancel no longer queue behind browser feedback.
 
 - Fix authorized review findings: require complete candidate-body delivery; normalize approved specialist reading; use collision-checked hashed task IDs; distinguish successful grouping/search progress from loops; and pack inline context in linear time.

@@ -48,7 +48,7 @@ export function uiHarness() {
 					creating = true;
 					const component = factory(
 						{ requestRender: render },
-						{ fg: (_color: string, text: string) => text },
+						{ fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text },
 						{
 							getKeys: () => ["escape"],
 							matches: (data: string, key: string) => data === "cancel-key" && key === "tui.select.cancel",

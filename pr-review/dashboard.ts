@@ -1,12 +1,28 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text, truncateToWidth, type OverlayHandle } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth, visibleWidth, type OverlayHandle } from "@earendil-works/pi-tui";
 import { redact } from "./report.js";
-import { TaskStore, type RecoveryGate } from "./tasks.js";
+import { TaskStore, type RecoveryGate, type TaskRecord, type TaskState } from "./tasks.js";
 import type { WorkPhase } from "./work-ui.js";
 
 interface ThemeLike {
-	fg(color: "accent" | "dim" | "text" | "success" | "warning" | "error" | "border", text: string): string;
+	fg(
+		color: "accent" | "muted" | "text" | "success" | "warning" | "error" | "borderAccent",
+		text: string,
+	): string;
+	bg(color: "customMessageBg" | "selectedBg", text: string): string;
 }
+const taskStyles: Record<TaskState, { symbol: string; color: Parameters<ThemeLike["fg"]>[0] }> = {
+	queued: { symbol: "○", color: "muted" },
+	running: { symbol: "●", color: "accent" },
+	compacting: { symbol: "↻", color: "accent" },
+	retrying: { symbol: "↻", color: "warning" },
+	blocked: { symbol: "!", color: "warning" },
+	completed: { symbol: "✓", color: "success" },
+	cancelled: { symbol: "×", color: "muted" },
+	failed: { symbol: "×", color: "error" },
+	skipped: { symbol: "–", color: "muted" },
+};
+const singleLine = (value: string) => redact(value).replace(/[\r\n\t]/g, " ");
 interface Keys {
 	matches(data: string, action: string): boolean;
 	getKeys(action: string): string[];
@@ -21,6 +37,7 @@ export class DashboardComponent {
 	private detail = false;
 	private detailOffset = 0;
 	private confirmCancel = false;
+	private pageSize = 1;
 	private detailCache: { key: string; lines: string[] } | undefined;
 	constructor(
 		private store: TaskStore,
@@ -52,12 +69,25 @@ export class DashboardComponent {
 			let move = 0;
 			if (this.keys.matches(data, "tui.select.up")) move = -1;
 			if (this.keys.matches(data, "tui.select.down")) move = 1;
-			if (this.keys.matches(data, "tui.select.pageUp")) move = -Math.max(1, this.height() - 10);
-			if (this.keys.matches(data, "tui.select.pageDown")) move = Math.max(1, this.height() - 10);
+			if (this.keys.matches(data, "tui.select.pageUp")) move = -this.pageSize;
+			if (this.keys.matches(data, "tui.select.pageDown")) move = this.pageSize;
 			if (this.detail) this.detailOffset = Math.max(0, this.detailOffset + move);
 			else this.selected = Math.max(0, Math.min(this.store.records.size - 1, this.selected + move));
 		}
 		this.renderNow();
+	}
+	private taskLine(task: TaskRecord, selected: boolean, width: number, now: number): string {
+		const style = taskStyles[task.state],
+			elapsed = task.startedAt ? `${Math.floor(((task.endedAt ?? now) - task.startedAt) / 1000)}s` : "—",
+			prefix = `${selected ? "▸" : " "}${style.symbol} ${task.state.padEnd(10)} `,
+			suffix = ` ${`${task.files.length} files`.padStart(9)} ${elapsed.padStart(5)}`,
+			nameWidth = width - visibleWidth(prefix) - visibleWidth(suffix),
+			name = singleLine(task.name);
+		return (
+			this.theme.fg(style.color, prefix) +
+			this.theme.fg("text", nameWidth >= 12 ? truncateToWidth(name, nameWidth, "…", true) : name) +
+			(nameWidth >= 12 ? this.theme.fg("muted", suffix) : "")
+		);
 	}
 	render(width: number): string[] {
 		if (width < 1) return [];
@@ -65,40 +95,83 @@ export class DashboardComponent {
 			rows = [...this.store.records.values()],
 			now = Date.now();
 		this.selected = Math.max(0, Math.min(this.selected, rows.length - 1));
-		const task = rows[this.selected];
-		const plain = (value: string) => truncateToWidth(redact(value), width);
-		const lines = [
-			this.theme.fg("accent", plain(`PR REVIEW · ${taskSummary(this.store)}`)),
-			plain(this.store.phase),
-			...(this.store.progress
-				? new Text(redact(this.store.progress), 0, 0).render(width).slice(0, Math.max(1, height - 5))
-				: []),
-		];
-		if (!this.detail) {
-			const capacity = Math.max(1, height - lines.length - 6),
-				start = Math.max(0, this.selected - capacity + 1);
-			for (let i = start; i < Math.min(rows.length, start + capacity); i++) {
-				const row = rows[i]!,
-					elapsed = row.startedAt ? `${Math.floor(((row.endedAt ?? now) - row.startedAt) / 1000)}s` : "—";
-				lines.push(
-					this.theme.fg(
-						i === this.selected ? "accent" : row.state === "blocked" ? "warning" : "text",
-						plain(
-							`${i === this.selected ? ">" : " "} ${row.state.padEnd(10)} ${row.name} · ${row.files.length} files · ${elapsed}`,
+		const task = rows[this.selected],
+			cancelKey = this.keys.getKeys("tui.select.cancel").join("/"),
+			help = this.confirmCancel
+				? "Cancel the whole review? y confirms; any other key returns"
+				: `↑↓ / PgUp/PgDn scroll · Enter ${this.detail ? "queue" : "details"} · ${cancelKey} hide · r retry · c cancel`;
+		// Truncation and Text wrapping can emit full SGR resets. Reapply the fill
+		// after each reset so even ellipses and trailing padding stay opaque.
+		const paint = (value: string, selected = false) =>
+			value
+				.split("\x1b[0m")
+				.map((part) =>
+					this.theme.bg(selected ? "selectedBg" : "customMessageBg", this.theme.fg("text", part)),
+				)
+				.join("\x1b[0m");
+		const helpColor = this.confirmCancel ? "warning" : "muted";
+		if (width < 6 || height < 5) {
+			this.pageSize = 1;
+			const compact = this.confirmCancel
+				? [help]
+				: ["PR REVIEW", task ? `${task.state}: ${task.name}` : this.store.phase, help];
+			return compact
+				.slice(0, height)
+				.map((text) =>
+					paint(
+						this.theme.fg(
+							this.confirmCancel ? "warning" : "text",
+							truncateToWidth(singleLine(text), width, "…", true),
 						),
 					),
 				);
-			}
-			if (rows.length)
-				lines.push(this.theme.fg("dim", plain(`Task ${this.selected + 1}/${rows.length} · Enter details`)));
-			if (task) {
-				lines.push(plain(`Selected: ${task.name} · ${task.activity}`));
-				lines.push(
-					plain(
-						`${task.remaining === undefined ? "" : `${(task.total ?? 0) - task.remaining}/${task.total} context resources · `}${task.turns} turns · ${task.compactions} compactions · ${task.retries} retries · updated ${Math.floor((now - task.updatedAt) / 1000)}s ago`,
-					),
-				);
-				lines.push(plain(task.reason));
+		}
+		const contentWidth = width - 4,
+			innerWidth = width - 2;
+		const line = (value: string, selected = false) =>
+			paint(this.theme.fg("borderAccent", "│")) +
+			paint(` ${truncateToWidth(value, contentWidth, "…", true)} `, selected) +
+			paint(this.theme.fg("borderAccent", "│"));
+		const plain = (value: string) => line(singleLine(value));
+		const rule = (left: string, right: string, title = "") => {
+			const label = truncateToWidth(title, innerWidth, "…"),
+				fill = "─".repeat(Math.max(0, innerWidth - visibleWidth(label)));
+			return paint(this.theme.fg("borderAccent", `${left}${label}${fill}${right}`));
+		};
+		const footer = new Text(help, 0, 0)
+			.render(contentWidth)
+			.slice(0, Math.min(3, Math.max(1, height - 8)))
+			.map((text) => line(this.theme.fg(helpColor, text)));
+		// Reserve the frame and footer before allocating scrollable content.
+		const bodyHeight = height - footer.length - 3;
+		const body: string[] = [];
+		if (bodyHeight >= 4) body.push(plain(taskSummary(this.store)));
+		if (bodyHeight >= 7) body.push(plain(this.store.phase));
+		if (this.store.progress) {
+			const progress = new Text(redact(this.store.progress), 0, 0).render(contentWidth);
+			body.push(...progress.slice(0, Math.min(2, Math.max(0, bodyHeight - 10))).map((text) => line(text)));
+		}
+		if (body.length) body.push(rule("├", "┤"));
+		const available = bodyHeight - body.length;
+		if (!this.detail) {
+			const showPosition = rows.length > 0 && available >= 2,
+				previewCount = task ? Math.min(3, Math.max(0, available - 4)) : 0,
+				capacity = Math.max(1, available - Number(showPosition) - (previewCount ? previewCount + 1 : 0)),
+				start = Math.max(0, this.selected - capacity + 1);
+			this.pageSize = capacity;
+			for (let i = start; i < Math.min(rows.length, start + capacity); i++)
+				body.push(line(this.taskLine(rows[i]!, i === this.selected, contentWidth, now), i === this.selected));
+			if (!rows.length) body.push(plain("No review tasks yet."));
+			if (showPosition)
+				body.push(line(this.theme.fg("muted", `Task ${this.selected + 1}/${rows.length} · Enter details`)));
+			if (task && previewCount) {
+				body.push(rule("├", "┤"));
+				const preview = [
+					`Selected: ${task.name} · ${task.activity}`,
+					`${task.remaining === undefined ? "" : `${(task.total ?? 0) - task.remaining}/${task.total} context resources · `}${task.turns} turns · ${task.compactions} compactions · ${task.retries} retries · updated ${Math.floor((now - task.updatedAt) / 1000)}s ago`,
+					task.reason,
+				];
+				body.push(...preview.slice(0, previewCount).map(plain));
 			}
 		} else if (task) {
 			const details = [
@@ -120,23 +193,28 @@ export class DashboardComponent {
 					(e) => `${new Date(e.at).toLocaleTimeString()} ${e.text}`,
 				),
 			];
-			const key = `${task.id}:${task.updatedAt}:${task.turns}:${task.requests}:${task.state}:${width}:${this.store.progress}`;
+			const key = `${task.id}:${task.updatedAt}:${task.turns}:${task.requests}:${task.state}:${contentWidth}:${this.store.progress}:${this.store.model}:${this.store.journalPath}`;
 			if (this.detailCache?.key !== key)
 				this.detailCache = {
 					key,
-					lines: details.flatMap((line) => new Text(redact(line), 0, 0).render(width)),
+					lines: details.flatMap((text) => new Text(redact(text), 0, 0).render(contentWidth)),
 				};
-			const wrapped = this.detailCache.lines;
-			this.detailOffset = Math.min(this.detailOffset, Math.max(0, wrapped.length - 1));
-			lines.push(
-				...wrapped.slice(this.detailOffset, this.detailOffset + Math.max(1, height - lines.length - 2)),
-			);
-		}
-		const cancelKey = this.keys.getKeys("tui.select.cancel").join("/");
-		const help = this.confirmCancel
-			? "Cancel the whole review? y confirms; any other key returns"
-			: `↑↓ / PgUp/PgDn scroll · Enter ${this.detail ? "queue" : "details"} · ${cancelKey} hide · r retry · c cancel`;
-		return [...lines.slice(0, Math.max(0, height - 1)), this.theme.fg("dim", plain(help))];
+			const wrapped = this.detailCache.lines,
+				capacity = Math.max(1, available - Number(available >= 2));
+			this.pageSize = capacity;
+			this.detailOffset = Math.min(this.detailOffset, Math.max(0, wrapped.length - capacity));
+			body.push(...wrapped.slice(this.detailOffset, this.detailOffset + capacity).map((text) => line(text)));
+			if (available >= 2)
+				body.push(
+					line(
+						this.theme.fg(
+							"muted",
+							`Details ${this.detailOffset + 1}–${Math.min(wrapped.length, this.detailOffset + capacity)}/${wrapped.length}`,
+						),
+					),
+				);
+		} else body.push(plain("No review tasks yet."));
+		return [rule("╭", "╮", "─ PR REVIEW "), ...body, rule("├", "┤"), ...footer, rule("╰", "╯")];
 	}
 	invalidate() {
 		this.detailCache = undefined;
@@ -225,7 +303,7 @@ export function createReviewDashboard(
 							store,
 							theme,
 							keys,
-							() => Math.max(1, (tui.terminal?.rows ?? 24) - 4),
+							() => Math.max(1, (tui.terminal?.rows ?? 24) - 2),
 							() => tui.requestRender(),
 							() => {
 								hide(true);
@@ -250,7 +328,7 @@ export function createReviewDashboard(
 					},
 					{
 						overlay: true,
-						overlayOptions: { anchor: "center", width: "95%", maxHeight: "95%", margin: 1 },
+						overlayOptions: { anchor: "center", width: 120, maxHeight: "100%", margin: 1 },
 						onHandle: (value) => {
 							mounted = value;
 							if (disposed || owner !== generation || closeRequested) safely(closeOwned);
