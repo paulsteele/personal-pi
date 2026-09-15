@@ -38,8 +38,9 @@ lines.on("line", (line) => {
 		if (request.type !== "start" || started) throw new Error("Invalid probe request");
 		started = true;
 		const manifest = JSON.parse(await readFile(join(plannotatorDir, "package.json"), "utf8"));
-		if (manifest.name !== "@plannotator/pi-extension" || manifest.version !== "0.27.12") {
-			throw new Error("Unsupported installed Plannotator version");
+		// This opt-in synthetic probe validates candidate releases before production allows them.
+		if (manifest.name !== "@plannotator/pi-extension") {
+			throw new Error("Expected an installed @plannotator/pi-extension package");
 		}
 		const loader = createHostLoader(piPackageDir);
 		const module = await loader.import(join(plannotatorDir, "server.ts"));

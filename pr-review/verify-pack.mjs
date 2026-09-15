@@ -12,6 +12,7 @@ for (const path of [
 	"runner.ts",
 	"snapshot.ts",
 	"plannotator.ts",
+	"plannotator-version.ts",
 	"plannotator-host.mjs",
 	"viewer-patch.mjs",
 	"host-loader.mjs",

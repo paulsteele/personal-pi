@@ -8,6 +8,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { representatives } from "./findings.js";
+import { assertSupportedPlannotatorVersion, supportedPlannotatorVersions } from "./plannotator-version.js";
 import { redact, renderAdvisory } from "./report.js";
 import { ensurePrivateDirectory, inside } from "./storage.js";
 import type { Snapshot } from "./snapshot.js";
@@ -201,8 +202,7 @@ export async function installedPlannotator(pi: Pick<ExtensionAPI, "getCommands">
 			try {
 				const manifest = JSON.parse(await readFile(join(directory, "package.json"), "utf8"));
 				if (manifest.name === "@plannotator/pi-extension") {
-					if (manifest.version !== "0.27.12")
-						throw new Error("Installed Plannotator version is not yet validated for PR review");
+					assertSupportedPlannotatorVersion(manifest.version);
 					await stat(join(directory, "server.ts"));
 					await stat(join(directory, "review-editor.html"));
 					return directory;
@@ -214,7 +214,7 @@ export async function installedPlannotator(pi: Pick<ExtensionAPI, "getCommands">
 		}
 	}
 	throw new Error(
-		"PR review requires the already-loaded supported Plannotator extension (0.27.12). No packages will be installed automatically.",
+		`PR review requires the already-loaded supported Plannotator extension (${supportedPlannotatorVersions.join(", ")}). No packages will be installed automatically.`,
 	);
 }
 async function cleanupAbandoned(directory: string): Promise<void> {

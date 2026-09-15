@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Validate Plannotator `0.27.14` alongside `0.27.12`, share the production version gate between discovery and the viewer host, and report installed/supported versions on mismatch. Allow the opt-in synthetic compatibility probe to test candidate releases before enabling them.
+
 ## 1.1.0
 
 - Frame the review dashboard with a theme-aware background, accent border, section dividers, status icons, and full-row selection highlighting. Cap its width at 120 columns and budget scrolling around the frame/footer on smaller terminals.

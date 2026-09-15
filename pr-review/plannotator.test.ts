@@ -1,14 +1,69 @@
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, it } from "vitest";
-import { interpretDecision, present, viewerDiffType, type Seed } from "./plannotator.js";
+import {
+	installedPlannotator,
+	interpretDecision,
+	present,
+	viewerDiffType,
+	type Seed,
+} from "./plannotator.js";
 import { capture } from "./snapshot.js";
 import { commit, fixture, put, testConfig } from "./test-fixtures.js";
 import type { Report } from "./types.js";
 const roots: string[] = [];
 afterEach(async () => {
 	for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
+function plannotatorCommands(path: string, name = "plannotator-review"): Pick<ExtensionAPI, "getCommands"> {
+	return {
+		getCommands: () => [
+			{
+				name,
+				source: "extension",
+				sourceInfo: { path, source: "npm:@plannotator/pi-extension", scope: "user", origin: "package" },
+			},
+		],
+	};
+}
+async function plannotatorFixture(version: unknown): Promise<string> {
+	const root = await mkdtemp(join(tmpdir(), "pr-plannotator-version-"));
+	roots.push(root);
+	await put(root, "package.json", JSON.stringify({ name: "@plannotator/pi-extension", version }));
+	await put(root, "index.ts", "");
+	await put(root, "server.ts", "");
+	await put(root, "review-editor.html", "");
+	return root;
+}
+it.each(["0.27.12", "0.27.14"])(
+	"discovers supported Plannotator %s from loaded commands",
+	async (version) => {
+		const root = await plannotatorFixture(version);
+		await expect(installedPlannotator(plannotatorCommands(root))).resolves.toBe(root);
+		await expect(
+			installedPlannotator(plannotatorCommands(join(root, "index.ts"), "plannotator-review:1")),
+		).resolves.toBe(root);
+	},
+);
+it.each(["0.27.11", "0.27.13", "0.27.15", "0.27.14-beta.1", "0.28.0", undefined, null, 27])(
+	"refuses unvalidated Plannotator version %s with actionable diagnostics",
+	async (version) => {
+		const root = await plannotatorFixture(version);
+		await expect(installedPlannotator(plannotatorCommands(root))).rejects.toThrow(
+			`Installed Plannotator version ${typeof version === "string" ? version : "(missing or invalid)"} is not yet validated for PR review. Supported versions: 0.27.12, 0.27.14. Load a supported version, then run /reload.`,
+		);
+	},
+);
+it("requires a loaded Plannotator package and its viewer assets", async () => {
+	await expect(installedPlannotator({ getCommands: () => [] })).rejects.toThrow("already-loaded");
+	const root = await plannotatorFixture("0.27.14");
+	await rm(join(root, "review-editor.html"));
+	await expect(installedPlannotator(plannotatorCommands(root))).rejects.toThrow("already-loaded");
+	await put(root, "review-editor.html", "");
+	await put(root, "package.json", JSON.stringify({ name: "not-plannotator", version: "0.27.14" }));
+	await expect(installedPlannotator(plannotatorCommands(root))).rejects.toThrow("already-loaded");
 });
 const seed: Seed = {
 	findingIds: ["F1"],
@@ -93,6 +148,9 @@ it("routes edits and reply threads to discussion and rejects duplicate IDs", () 
 it.skipIf(!process.env.PR_REVIEW_TEST_PI_PACKAGE || !process.env.PR_REVIEW_TEST_PLANNOTATOR_PACKAGE)(
 	"round-trips the production viewer host without browser/model calls",
 	async () => {
+		const plannotatorDir = await installedPlannotator(
+			plannotatorCommands(process.env.PR_REVIEW_TEST_PLANNOTATOR_PACKAGE!),
+		);
 		const repo = await fixture();
 		roots.push(repo.root);
 		await put(repo.root, "a.ts", "export const test = false;\n");
@@ -134,7 +192,7 @@ it.skipIf(!process.env.PR_REVIEW_TEST_PI_PACKAGE || !process.env.PR_REVIEW_TEST_
 		const result = await present({
 			root,
 			piPackageDir: process.env.PR_REVIEW_TEST_PI_PACKAGE!,
-			plannotatorDir: process.env.PR_REVIEW_TEST_PLANNOTATOR_PACKAGE!,
+			plannotatorDir,
 			report,
 			snapshot,
 			signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]),

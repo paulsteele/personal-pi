@@ -63,7 +63,7 @@ The default remains **four concurrent workers**. Schema-version-2 preferences co
 
 ## Browser workflow
 
-Requires an **already-loaded Plannotator Pi extension**, currently compatibility-gated to `0.27.12`. The harness never installs, updates, forks, vendors, or patches Plannotator.
+Requires an **already-loaded Plannotator Pi extension**, currently compatibility-gated to `0.27.12` and `0.27.14`. The harness never installs, updates, forks, vendors, or patches Plannotator. Unvalidated versions are refused with the installed and supported versions in the error; after loading a supported version or updating this harness, run `/reload` and retry `/pr`.
 
 The existing server and HTML renderer run in a small isolated UI helper—not another Pi agent. The parent streams the captured diff into a private viewer-owned aggregate with backpressure; only the helper materializes it for the renderer. The helper checks the owning parent and refuses symlinked/non-regular inputs. It receives only the captured diff and verified annotations. Ask AI and sharing are disabled for this helper, and its data is confined to private Pi storage. Your ordinary Plannotator settings and other open reviews are untouched.
 
@@ -94,7 +94,7 @@ bun run --cwd pr-review check
 bun run test:integration
 ```
 
-The normal tests use synthetic repositories and fake providers. The separate compatibility probe uses existing installations supplied explicitly, never downloads:
+The normal tests use synthetic repositories and fake providers. The separate compatibility probe uses existing installations supplied explicitly, never downloads. It intentionally accepts candidate Plannotator versions so they can be checked before adding them to the shared production allowlist in `plannotator-version.ts`:
 
 ```sh
 PR_REVIEW_TEST_PI_PACKAGE=/path/to/installed/pi-coding-agent \

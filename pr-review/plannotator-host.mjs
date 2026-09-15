@@ -2,6 +2,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 import { createHostLoader, openBrowserIfActive } from "./host-loader.mjs";
 import { readOwnedViewerPatch } from "./viewer-patch.mjs";
 
@@ -63,9 +64,13 @@ input.on("line", (line) => {
 		const patch = request.patchFile ? await readOwnedViewerPatch(process.cwd(), process.ppid) : request.patch;
 		if (stopped) return;
 		const manifest = JSON.parse(await readFile(join(plannotatorDir, "package.json"), "utf8"));
-		if (manifest.name !== "@plannotator/pi-extension" || manifest.version !== "0.27.12")
-			throw new Error("Unsupported installed Plannotator version");
+		if (manifest.name !== "@plannotator/pi-extension")
+			throw new Error("Expected an installed @plannotator/pi-extension package");
 		const loader = createHostLoader(piPackageDir);
+		const { assertSupportedPlannotatorVersion } = await loader.import(
+			fileURLToPath(new URL("./plannotator-version.ts", import.meta.url)),
+		);
+		assertSupportedPlannotatorVersion(manifest.version);
 		const module = await loader.import(join(plannotatorDir, "server.ts"));
 		if (typeof module.startReviewServer !== "function")
 			throw new Error("Plannotator review server export unavailable");
