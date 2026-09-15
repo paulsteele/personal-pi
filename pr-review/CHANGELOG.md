@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.1.1
+
 - Validate Plannotator `0.27.14` alongside `0.27.12`, share the production version gate between discovery and the viewer host, and report installed/supported versions on mismatch. Allow the opt-in synthetic compatibility probe to test candidate releases before enabling them.
 
 ## 1.1.0
