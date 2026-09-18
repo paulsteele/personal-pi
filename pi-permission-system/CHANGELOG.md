@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.1.2
+
+- Accept trusted extension session-file grants for exact canonical report paths at the external-directory boundary. Keep grants in memory, reject invalid/stale events, clear them on session teardown/reload, and preserve other policy and deterministic guards.
+- Preserve resolved path facts through classifier routing and scope the `/tmp` guidance to destinations within the canonical temp root. Keep ordinary external symlink targets on the original prompt, including dangling write destinations, without changing policy or human-only guards.
+- Add risk-based log guidance only to external-directory classifier reviews of `/tmp` and its descendants. Keep the original classifier instructions for all other paths and operations, including other temp directories; preserve model review (no `/tmp` allowlist), explicit user restrictions, policy denies, and deterministic safety guards. Add scope, prompt-contract, and permission-routing regressions.
+
 ## 1.0.8
 
 - Resolve dangling symlink destinations when canonicalizing paths, preserving sensitive-target guards even when the target does not yet exist; add path and permission-system regression coverage.

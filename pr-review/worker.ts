@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { emptyUsage, sumUsage, providerUsage, type UsageTotals, type RequestKind } from "./usage.js";
 import { Agent, type AgentTool, type StreamFn } from "@earendil-works/pi-agent-core";
 import {
 	createAssistantMessageEventStream,
@@ -17,11 +19,7 @@ export type Registry = Pick<
 	ExtensionContext["modelRegistry"],
 	"find" | "getProvider" | "getApiKeyAndHeaders" | "hasConfiguredAuth"
 >;
-export interface WorkerUsage {
-	input: number;
-	output: number;
-	cost: number;
-}
+export type WorkerUsage = UsageTotals;
 export type WorkerEvent = {
 	type: "turn" | "tool" | "request" | "compacting" | "continued" | "retry" | "usage" | "coverage";
 	text: string;
@@ -67,7 +65,12 @@ function failure(
 	};
 }
 /** Public registry bridge. Only an individual request has a liveness timeout, never the whole worker. */
-export function registryStream(registry: Registry, config: Config, request?: () => void): StreamFn {
+export function registryStream(
+	registry: Registry,
+	config: Config,
+	request?: () => void,
+	response?: (message: AssistantMessage) => void,
+): StreamFn {
 	return (model, context, options) => {
 		const output = createAssistantMessageEventStream();
 		const controller = new AbortController();
@@ -79,6 +82,7 @@ export function registryStream(registry: Registry, config: Config, request?: () 
 			if (closed) return;
 			closed = true;
 			const error = failure(model, Boolean(options?.signal?.aborted), overflow, reason);
+			response?.(error);
 			output.push({ type: "error", reason: error.stopReason === "aborted" ? "aborted" : "error", error });
 		};
 		const timer = setTimeout(() => {
@@ -109,6 +113,8 @@ export function registryStream(registry: Registry, config: Config, request?: () 
 				for await (const event of stream) {
 					if (closed) break;
 					timer.refresh();
+					if (event.type === "done" || event.type === "error")
+						response?.(event.type === "done" ? event.message : event.error);
 					output.push(event);
 					if (event.type === "done" || event.type === "error") {
 						closed = true;
@@ -144,6 +150,12 @@ export async function runWorker<T extends TSchema>(options: {
 	schema: T;
 	system: string;
 	input: unknown;
+	/** Stable for this logical task, including host-level recovery; never shared by concurrent workers. */
+	sessionId?: string;
+	continuing?: boolean;
+	/** Small lens instruction repeated when task metadata must be paged or context is compacted. */
+	assignment?: unknown;
+	sharedResources?: AsyncIterable<import("./worker-context.js").ContextResource>;
 	tools?: AgentTool[];
 	signal?: AbortSignal;
 	progress?: (text: string) => void;
@@ -156,7 +168,7 @@ export async function runWorker<T extends TSchema>(options: {
 	validateResult?: ((value: Static<T>) => void | Promise<void>) | undefined;
 	recover?: ((reason: string) => Promise<void>) | undefined;
 }): Promise<WorkerResult<Static<T>>> {
-	const usage: WorkerUsage = { input: 0, output: 0, cost: 0 };
+	let usage = emptyUsage();
 	const model = options.registry.find(options.config.provider, options.config.model);
 	if (!model || !options.registry.hasConfiguredAuth(model))
 		return { ok: false, error: "Independent review model unavailable; use /pr model", usage };
@@ -172,12 +184,23 @@ export async function runWorker<T extends TSchema>(options: {
 			/* Retired observers are non-authoritative. */
 		}
 	};
-	const addUsage = (value: { input: number; output: number; cost: { total: number } }) => {
-		usage.input += value.input;
-		usage.output += value.output;
-		usage.cost += value.cost.total;
-		emit({ type: "usage", text: "Usage updated", usage: { ...usage } });
-	};
+	let summarizing = false,
+		ordinaryRequests = options.continuing ? 1 : 0;
+	let requestKind: RequestKind = "first";
+	const stream = registryStream(
+		options.registry,
+		options.config,
+		() => {
+			requestKind = summarizing ? "compaction" : ordinaryRequests++ === 0 ? "first" : "continuation";
+			usage.byRequest![requestKind].requests++;
+			emit({ type: "request", text: "Model request" });
+		},
+		(message) => {
+			// Count every terminal provider response, including failed/retried summaries, exactly once.
+			usage = sumUsage(usage, providerUsage(message.usage, requestKind));
+			emit({ type: "usage", text: "Usage updated", usage: structuredClone(usage) });
+		},
+	);
 	let submitted = false,
 		invalidSubmission = false,
 		turns = 0,
@@ -315,14 +338,11 @@ export async function runWorker<T extends TSchema>(options: {
 		},
 	};
 	const tools = [...(options.tools ?? []), ...extra, submit as AgentTool];
-	const stream = registryStream(options.registry, options.config, () =>
-		emit({ type: "request", text: "Model request" }),
-	);
 	const threshold = model.contextWindow - responseReserve(model);
 	const system =
 		options.system +
 		(options.coverage
-			? "\nReview the entire assigned scope. suppliedContext contains complete captured resources already provided to you. Read remaining sources normally; context delivery is tracked automatically. No read receipts or checkpoints are required. Use record_checkpoint only if you want to preserve intermediate findings/notes. Saved profile context is advisory; current captured code and documentation take precedence."
+			? "\nReview the entire assigned scope. sharedContext and suppliedContext contain complete captured resources already provided to you. Shared documentation is background evidence; the lens assignment precedes the captured diffs. Read remaining sources normally; context delivery is tracked automatically. No read receipts or checkpoints are required. Use record_checkpoint only if you want to preserve intermediate findings/notes. Saved profile context is advisory; current captured code and documentation take precedence."
 			: "");
 	const agent: Agent = new Agent({
 		initialState: {
@@ -332,6 +352,7 @@ export async function runWorker<T extends TSchema>(options: {
 			tools,
 		},
 		streamFn: stream,
+		sessionId: options.sessionId ?? randomUUID(),
 		shouldStopAfterTurn: ({ message, toolResults }) => {
 			compact =
 				contextTokens(
@@ -379,7 +400,6 @@ export async function runWorker<T extends TSchema>(options: {
 				text: `${event.toolName}${path}${event.type === "tool_execution_end" ? (event.isError ? " failed" : " finished") : ""}`,
 			});
 		}
-		if (event.type === "message_end" && event.message.role === "assistant") addUsage(event.message.usage);
 	});
 	const abort = () => agent.abort();
 	options.signal?.addEventListener("abort", abort, { once: true });
@@ -399,7 +419,19 @@ export async function runWorker<T extends TSchema>(options: {
 			contextTokens(system, tools, [{ role: "user", timestamp: 0, content: [{ type: "text", text }] }]) <=
 			threshold * 0.75;
 		if (options.resources && fitsLength(inputText.length)) {
-			const packed = await packInlineContext(inputText, options.resources, fitsLength, options.signal);
+			const packed = await packInlineContext(
+				inputText,
+				options.resources,
+				fitsLength,
+				options.signal,
+				options.sharedResources
+					? {
+							resources: options.sharedResources,
+							// A fixed shared-prefix budget, independent of the lens/header length.
+							fitsLength: (chars) => overhead + Math.ceil(chars / 4) <= threshold * 0.25,
+						}
+					: undefined,
+			);
 			if (fits(packed.text)) {
 				inputText = packed.text;
 				for (const resource of packed.delivered)
@@ -409,9 +441,14 @@ export async function runWorker<T extends TSchema>(options: {
 		}
 		const inlineInput = fits(inputText);
 		if (inlineInput) inputDelivery.deliver("task:input", 0, inputText.length, inputText.length);
-		let prompt = inlineInput
-			? inputText
-			: "Read the complete original task context through read_task_input before working. Continue its character cursor until nextOffset is null. All referenced captured changes/documents remain available through snapshot tools.";
+		const assignment =
+			options.assignment === undefined ? "" : JSON.stringify({ assignment: options.assignment }) + "\n";
+		const pagedPrompt =
+			assignment +
+			"Read the complete original task context through read_task_input before working. Continue its character cursor until nextOffset is null. All referenced captured changes/documents remain available through snapshot tools.";
+		if (!inlineInput && !fits(pagedPrompt))
+			throw new Error("Model context cannot fit the reviewer assignment; select a larger-context model");
+		let prompt = inlineInput ? inputText : pagedPrompt;
 		let previousStop = "",
 			repeated = 0;
 		for (;;) {
@@ -431,18 +468,27 @@ export async function runWorker<T extends TSchema>(options: {
 			} else if (compact || overflow) {
 				try {
 					emit({ type: "compacting", text: "Compacting context; coverage retained" });
-					agent.state.messages = await compactWorkerContext({
+					summarizing = true;
+					const messages = await compactWorkerContext({
 						messages: agent.state.messages,
 						model,
 						stream,
 						signal: options.signal,
-						onUsage: addUsage,
+						onUsage: () => {}, // Usage is recorded at the stream boundary, including retries.
 					});
+					agent.state.messages = assignment
+						? [
+								{ role: "user", timestamp: Date.now(), content: [{ type: "text", text: assignment }] },
+								...messages,
+							]
+						: messages;
 					compact = false;
 					emit({ type: "continued", text: "Continuing same review task" });
 				} catch {
 					options.signal?.throwIfAborted();
 					await recover("Context compaction failed");
+				} finally {
+					summarizing = false;
 				}
 			} else if (agent.state.errorMessage) {
 				await recover(providerFailureReason(agent.state.errorMessage));

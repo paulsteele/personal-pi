@@ -1,3 +1,4 @@
+import { emptyUsage, type UsageTotals } from "./usage.js";
 import type { Advisory, Checkpoint, Finding } from "./types.js";
 import { awaitWithSignal } from "./work-ui.js";
 import { hash } from "./prompts.js";
@@ -31,7 +32,7 @@ export interface TaskRecord {
 	remaining?: number | undefined;
 	total?: number | undefined;
 	unreviewed?: string[] | undefined;
-	usage: { input: number; output: number; cost: number };
+	usage: UsageTotals;
 }
 export interface TaskEvent {
 	at: number;
@@ -88,7 +89,7 @@ export class TaskStore {
 			compactions: 0,
 			retries: 0,
 			activity: "Queued",
-			usage: { input: 0, output: 0, cost: 0 },
+			usage: emptyUsage(),
 		});
 		this.emit();
 	}

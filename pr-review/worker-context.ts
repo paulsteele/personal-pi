@@ -19,17 +19,48 @@ export async function packInlineContext(
 	resources: AsyncIterable<ContextResource>,
 	fitsLength: (chars: number) => boolean,
 	signal?: AbortSignal,
+	shared?: { resources: AsyncIterable<ContextResource>; fitsLength: (chars: number) => boolean },
 ) {
 	if (!input.startsWith("{") || !input.endsWith("}"))
 		throw new Error("Inline context requires an object input");
-	const prefix = input.slice(0, -1) + (input === "{}" ? "" : ",") + '"suppliedContext":[';
-	const parts: string[] = [],
-		delivered: Array<{ id: string; total: number }> = [];
+	const delivered: Array<{ id: string; total: number }> = [];
+	let base = input;
+	if (shared) {
+		const { project, ...assignment } = JSON.parse(input);
+		const background = JSON.stringify(project === undefined ? {} : { project });
+		const start = background.slice(0, -1) + (background === "{}" ? "" : ",") + '"sharedContext":[';
+		const rest = JSON.stringify(assignment);
+		const end = "]" + (rest === "{}" ? "}" : "," + rest.slice(1));
+		const docs: string[] = [];
+		let length = start.length + 2;
+		let visited = 0;
+		for await (const resource of shared.resources) {
+			signal?.throwIfAborted();
+			if (++visited % 64 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+			const { id, text, total } = resource;
+			if (text.length !== total) continue;
+			const serialized = JSON.stringify({ id, text });
+			const nextLength = length + serialized.length + (docs.length ? 1 : 0);
+			// length includes ]}; replace that framing with the serialized assignment suffix.
+			if (!shared.fitsLength(nextLength) || !fitsLength(nextLength - 2 + end.length)) continue;
+			length = nextLength;
+			docs.push(serialized);
+			delivered.push({ id, total });
+		}
+		// All task/lens fields precede suppliedContext, which may contain diffs.
+		// If no document fits, do not spend the remaining budget on an empty sharedContext.
+		if (docs.length) base = start + docs.join(",") + end;
+	}
+	const prefix = base.slice(0, -1) + (base === "{}" ? "" : ",") + '"suppliedContext":[';
+	const parts: string[] = [];
+	const supplied = new Set(delivered.map((resource) => resource.id));
 	let chars = prefix.length + 2,
 		bytes = Buffer.byteLength(prefix) + 2,
 		visited = 0;
 	for await (const resource of resources) {
 		signal?.throwIfAborted();
+		// Shared documents that missed the fixed prefix budget may still fit after the assignment.
+		if (supplied.has(resource.id)) continue;
 		if (++visited % 64 === 0) {
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			signal?.throwIfAborted();
@@ -40,13 +71,14 @@ export async function packInlineContext(
 			comma = parts.length ? 1 : 0;
 		if (!fitsLength(chars + comma + serialized.length)) continue;
 		parts.push(serialized);
+		supplied.add(id);
 		delivered.push({ id, total });
 		chars += comma + serialized.length;
 		bytes += comma + Buffer.byteLength(serialized);
 	}
 	return parts.length
 		? { text: prefix + parts.join(",") + "]}", delivered, bytes }
-		: { text: input, delivered, bytes: Buffer.byteLength(input) };
+		: { text: base, delivered, bytes: Buffer.byteLength(base) };
 }
 export function responseReserve(model: Model<Api>): number {
 	return Math.max(128, Math.min(model.maxTokens, 8192, Math.floor(model.contextWindow / 4)));

@@ -67,6 +67,26 @@ Presentation and review-log field limits are fixed in code.
 - `environment`: up to 100 trusted roots/remotes/domains of at most 200 characters, shown as hints
   only. They cannot override deterministic safety policy.
 
+### `/tmp` logs in auto mode
+
+Only `external_directory` reviews whose normalized display path is `/tmp` or a descendant and whose
+resolved destination remains within the canonical `/tmp` root receive additional risk-based log guidance.
+The platform's root alias (normally `/tmp` → `/private/tmp` on macOS) is resolved before containment is
+checked. The classifier also receives the selected path's resolved destination. For those accesses, narrow reads/searches of task-related logs and captured
+output, and ordinary scratch-log creation/appends, may be approved without the user explicitly naming
+the file. Missing proof of log creation alone is not a reason to escalate an otherwise low-risk access.
+
+Other paths receive the original classifier instructions, including `/private/tmp`, `/var/tmp`,
+macOS per-user temp directories, and project-local scratch directories. There is no general relaxation
+of diagnostic authorization. Other paths and operations in mixed commands retain their normal review.
+
+This is classifier guidance, **not a `/tmp` allowlist or an ownership guarantee**. It reviews the whole
+command and data flow for credentials, unrelated/other users' data, broad harvesting, symlink escapes,
+destructive writes, suspicious execution/persistence, and uploads. The exception does not extend to
+symlink destinations outside `/tmp`. Explicit user restrictions, policy denies, and deterministic
+human-only safety guards still apply. Manual mode and classifier failure/headless fallback behavior
+are unchanged.
+
 ## Commands and prompts
 
 - `/auto [on|off]` toggles and persists model review.
@@ -98,6 +118,18 @@ The fork preserves `permissions:ui_prompt`, `permissions:decision`, `auto-mode:s
 `auto-mode:decision` for local Atelier and desktop notifications. Every tool-call prompt and final
 decision includes `toolCallId`; request transitions retain `requestId`, so policy, auto, guard, and
 human outcomes attach to the owning tool row.
+
+Trusted extensions can emit `permissions:allow_session_files` with
+`{ version: 1, sessionId: ctx.sessionManager.getSessionId(), paths: [absoluteFilePath] }`.
+The listener accepts 1–100 existing regular files for the active session and grants only their exact
+canonical destinations at the `external_directory` boundary. It does not grant parent directories,
+descendants, or wildcard matches. A malformed batch or a different session ID is ignored. This is an
+in-process extension API, not authority inferred from model text, tool results, or persisted messages.
+
+PR review uses this event for its saved report before command/tool handoff. Grants live only in memory
+and are cleared on shutdown/session replacement and `/reload`; they are not restored from history or
+written to configuration. All tool/Bash/path rules, explicit denies, and deterministic safety guards
+still apply. This is a boundary allowance, **not a read-only sandbox or authorization to apply fixes**.
 
 A bounded/redacted review log is always written to (decision values, reasons, and matched patterns;
 and note text are retained only as metadata and SHA-256 digests):

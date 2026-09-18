@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.1.2
+
+- Register the exact saved report with Pi Permission System for current-session external-directory access before command/tool handoff. Never grant the reports directory or persist permission configuration; cancelled, retired, or unsaved results grant nothing.
+- Reserve serialized assignment and JSON framing in the overall inline budget before packing shared documents; retain smaller evidence when shared documents do not fit and avoid empty-prefix overhead for near-limit assignments.
+- Reuse deterministic shared background/document prefixes while keeping reviewer assignments ahead of diffs, including paged tasks and compaction. Remove duplicated reading lists and architecture focus without narrowing review scope.
+- Preserve cache token counts, cost components, and first/continuation/compaction usage aggregates through task diagnostics, reports, and parent-tool usage; label older missing metrics unavailable. Give logical workers stable, separate routing IDs without changing retention defaults.
+- Pack verification against model context capacity; independently verify exact duplicate claims once with unioned guidance and map verdicts back to every original ID/reviewer. Skip semantic consolidation only when the existing location rules forbid additional merges.
+
 ## 1.1.1
 
 - Validate Plannotator `0.27.14` alongside `0.27.12`, share the production version gate between discovery and the viewer host, and report installed/supported versions on mismatch. Allow the opt-in synthetic compatibility probe to test candidate releases before enabling them.

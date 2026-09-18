@@ -24,6 +24,7 @@ for (const path of [
 	"dashboard.ts",
 	"journal.ts",
 	"worker-context.ts",
+	"usage.ts",
 	"snapshot-store.ts",
 	"snapshot-diff.mjs",
 	"exact-diff.ts",

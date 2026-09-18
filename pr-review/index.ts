@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { toProviderUsage } from "./usage.js";
 import {
 	getAgentDir,
 	getPackageDir,
@@ -302,6 +303,19 @@ export default function prReview(pi: ExtensionAPI): void {
 				current.recovery,
 			);
 			if (active !== current || current.controller.signal.aborted) throw new Error("PR operation cancelled");
+			if (outcome.path) {
+				try {
+					// Optional permission-system integration: only this saved report, only
+					// this session, before either command or tool publishes its handoff.
+					pi.events.emit("permissions:allow_session_files", {
+						version: 1,
+						sessionId: ctx.sessionManager.getSessionId(),
+						paths: [outcome.path],
+					});
+				} catch {
+					/* Permission integration must not discard a completed review. */
+				}
+			}
 			current.tasks?.setPhase(`Review ${outcome.report?.status ?? "finished"}`);
 			finished = true;
 			return outcome;
@@ -483,7 +497,7 @@ export default function prReview(pi: ExtensionAPI): void {
 			} finally {
 				clearTimeout(updateTimer);
 			}
-			const usage = result.report?.usage;
+			const usage = result.report ? toProviderUsage(result.report.usage) : undefined;
 			return {
 				content: [
 					{
@@ -492,18 +506,7 @@ export default function prReview(pi: ExtensionAPI): void {
 					},
 				],
 				details: { reportId: result.report?.id, status: result.report?.status, path: result.path },
-				...(usage
-					? {
-							usage: {
-								input: usage.input,
-								output: usage.output,
-								cacheRead: 0,
-								cacheWrite: 0,
-								totalTokens: usage.input + usage.output,
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: usage.cost },
-							},
-						}
-					: {}),
+				...(usage ? { usage } : {}),
 			};
 		},
 	});

@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth, visibleWidth, type OverlayHandle } from "@earendil-works/pi-tui";
 import { redact } from "./report.js";
+import { formatUsage, formatCost, REQUEST_KINDS } from "./usage.js";
 import { TaskStore, type RecoveryGate, type TaskRecord, type TaskState } from "./tasks.js";
 import type { WorkPhase } from "./work-ui.js";
 
@@ -182,7 +183,14 @@ export class DashboardComponent {
 				`State: ${task.state} · ${task.activity}`,
 				`Assignment: ${task.reason}`,
 				`Coverage: ${task.remaining === undefined ? "not applicable" : `${(task.total ?? 0) - task.remaining}/${task.total} context resources supplied`}`,
-				`Usage: ${task.usage.input} input / ${task.usage.output} output · $${task.usage.cost.toFixed(4)}`,
+				`Usage: ${formatUsage(task.usage)}`,
+				formatCost(task.usage),
+				...(task.usage.byRequest
+					? REQUEST_KINDS.map(
+							(kind) =>
+								`${kind}: ${task.usage.byRequest![kind].requests} requests; ${formatUsage(task.usage.byRequest![kind])}`,
+						)
+					: []),
 				`${task.turns} turns · ${task.requests} requests · ${task.compactions} compactions · ${task.retries} retries`,
 				"Pending obligations:",
 				...(task.unreviewed ?? []),

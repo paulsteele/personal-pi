@@ -6,6 +6,7 @@ import {
   type ExtensionContext,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
+import type { AccessPath } from "./access-intent/access-path.ts";
 import { warmBashParser } from "./access-intent/bash/parser.ts";
 import { BashProgram } from "./access-intent/bash/program.ts";
 import { classify, type ReviewFacts } from "./auto/classifier.ts";
@@ -36,6 +37,7 @@ import {
   type PermissionDecisionEvent,
 } from "./permission-events.ts";
 import { checkPolicy, type PolicyDecision } from "./policy.ts";
+import { ALLOW_SESSION_FILES_CHANNEL, sessionFileGrants } from "./session-files.ts";
 import { presentPermissionPrompt } from "./prompt/component.ts";
 import {
   appendPermissionOutcome,
@@ -67,6 +69,7 @@ interface Runtime {
   gitRemotes: readonly string[];
   cache: Map<string, Verdict>;
   sessionExternalDirectories: Set<string>;
+  sessionExternalFiles: Set<string>;
   counts: { allowed: number; asked: number };
   publisher: ReturnType<typeof createAutoPublisher>;
   logger: ReviewLogger;
@@ -336,17 +339,25 @@ function publish(runtime: Runtime): void {
   runtime.publisher.update(current);
 }
 
+interface PolicyCheck {
+  surface: string;
+  value: string;
+  decision: PolicyDecision;
+  path?: AccessPath;
+}
+
 function policyForCall(
   config: Config,
   sessionExternalDirectories: ReadonlySet<string>,
+  sessionExternalFiles: ReadonlySet<string>,
   toolName: string,
   command: string | null,
   directPath: string | null,
   skillName: string | null,
   normalizer: PathNormalizer,
   program: BashProgram | null,
-): { surface: string; value: string; decision: PolicyDecision } {
-  const checks: Array<{ surface: string; value: string; decision: PolicyDecision }> = [];
+): PolicyCheck {
+  const checks: PolicyCheck[] = [];
   const sessionAllows = (surface: string, matchValues: readonly string[]): boolean =>
     surface === "external_directory" &&
     matchValues.some((value) =>
@@ -354,9 +365,10 @@ function policyForCall(
         (directory) => value === directory || value.startsWith(`${directory}/`),
       ),
     );
-  const add = (surface: string, displayValue: string, matchValues = [displayValue]): void => {
+  const add = (surface: string, displayValue: string, path?: AccessPath): void => {
     if ((surface === "path" || surface === "external_directory") && !(surface in config.permission))
       return;
+    const matchValues = path?.matchValues() ?? [displayValue];
     const decisions = matchValues.map((matchValue) =>
       checkPolicy(config.permission, surface, matchValue),
     );
@@ -365,25 +377,30 @@ function policyForCall(
     const explicitDeny = decisions.find((candidate) => candidate.state === "deny");
     const decision =
       explicitDeny ??
+      // File grants match only the current canonical destination, never a lexical
+      // alias that could have been retargeted since the grant was registered.
+      (surface === "external_directory" && path && sessionExternalFiles.has(path.boundaryValue())
+        ? { state: "allow" as const, matchedPattern: "<session-file>", reason: null }
+        : undefined) ??
       (sessionAllows(surface, matchValues)
         ? { state: "allow" as const, matchedPattern: "<session-directory>", reason: null }
         : undefined) ??
       decisions.find((candidate) => candidate.state === "allow") ??
       decisions[0] ??
       checkPolicy(config.permission, surface, displayValue);
-    checks.push({ surface, value: displayValue, decision });
+    checks.push({ surface, value: displayValue, decision, ...(path ? { path } : {}) });
   };
   if (skillName) add("skill", skillName);
   if (directPath) {
     const path = normalizer.forPath(directPath);
-    add("path", directPath, path.matchValues());
+    add("path", directPath, path);
     if (normalizer.isOutsideWorkingDirectory(directPath))
-      add("external_directory", directPath, path.matchValues());
+      add("external_directory", directPath, path);
   }
   for (const candidate of program?.pathRuleCandidates() ?? [])
-    add("path", candidate.path.value(), candidate.path.matchValues());
+    add("path", candidate.path.value(), candidate.path);
   for (const external of program?.externalPaths() ?? [])
-    add("external_directory", external.value(), external.matchValues());
+    add("external_directory", external.value(), external);
   if (command) {
     // Gate every executable projection as well as the full source. Compound
     // units are retained by BashProgram, so explicit inner deny/ask rules
@@ -404,7 +421,8 @@ function classifyFacts(
   toolName: string,
   input: unknown,
   command: string | null,
-  selected: { surface: string; value: string; decision: PolicyDecision },
+  selected: PolicyCheck,
+  normalizer: PathNormalizer,
 ): ReviewFacts {
   const edit =
     toolName === "edit" && input && typeof input === "object"
@@ -415,6 +433,18 @@ function classifyFacts(
     toolName,
     invokedToolName: selected.surface === "skill" ? selected.value : null,
     value: selected.value,
+    ...(selected.path
+      ? {
+          path: {
+            resolved: selected.path.boundaryValue(),
+            // Resolve the root too: macOS normally aliases /tmp to /private/tmp.
+            withinTmp: normalizer.isWithinDirectory(
+              selected.path.boundaryValue(),
+              normalizer.forPath("/tmp").boundaryValue(),
+            ),
+          },
+        }
+      : {}),
     matchedPattern: selected.decision.matchedPattern,
     commandContext: null,
     executedUnit: null,
@@ -514,9 +544,11 @@ async function modelDecision(
 export default function permissionSystem(pi: ExtensionAPI): void {
   registerPermissionEntryRenderers(pi);
   let runtime: Runtime | undefined;
+  let unsubscribeSessionFiles: (() => void) | undefined;
 
   const reload = (ctx: ExtensionContext): Runtime => {
     runtime?.publisher.dispose();
+    unsubscribeSessionFiles?.();
     const loaded = loadConfig(getAgentDir());
     const next: Runtime = {
       pi,
@@ -528,6 +560,7 @@ export default function permissionSystem(pi: ExtensionAPI): void {
       gitRemotes: [],
       cache: new Map(),
       sessionExternalDirectories: new Set(),
+      sessionExternalFiles: new Set(),
       counts: { allowed: 0, asked: 0 },
       publisher: createAutoPublisher(pi.events),
       events: pi.events,
@@ -537,6 +570,12 @@ export default function permissionSystem(pi: ExtensionAPI): void {
     };
     for (const issue of loaded.issues) next.logger.review("config.warning", { issue });
     runtime = next;
+    unsubscribeSessionFiles = pi.events.on(ALLOW_SESSION_FILES_CHANNEL, (data) => {
+      if (runtime !== next) return;
+      const files = sessionFileGrants(data, next.ctx.sessionManager.getSessionId());
+      for (const file of files) next.sessionExternalFiles.add(file);
+      if (files.length) next.cache.clear();
+    });
     publish(next);
     return next;
   };
@@ -567,6 +606,8 @@ export default function permissionSystem(pi: ExtensionAPI): void {
   pi.on("session_shutdown", () => {
     if (runtime?.ctx.hasUI) runtime.ctx.ui.setStatus(STATUS_KEY, undefined);
     runtime?.publisher.dispose();
+    unsubscribeSessionFiles?.();
+    unsubscribeSessionFiles = undefined;
     runtime = undefined;
   });
 
@@ -814,6 +855,7 @@ export default function permissionSystem(pi: ExtensionAPI): void {
     const selected = policyForCall(
       current.config,
       current.sessionExternalDirectories,
+      current.sessionExternalFiles,
       toolName,
       command,
       directPath,
@@ -938,7 +980,7 @@ export default function permissionSystem(pi: ExtensionAPI): void {
         : policy.reason,
     };
     if (current.enabled) {
-      const facts = classifyFacts(toolName, input, command, selected);
+      const facts = classifyFacts(toolName, input, command, selected, normalizer);
       const verdict = await modelDecision(
         current,
         ctx,

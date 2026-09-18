@@ -2,13 +2,22 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type, type Static, type TSchema } from "typebox";
-import { checkAdvisory, checkEvidence, exactGroups, validateGroups } from "./findings.js";
+import { emptyUsage, sumUsage } from "./usage.js";
+import {
+	checkAdvisory,
+	checkEvidence,
+	exactGroups,
+	validateGroups,
+	deduplicateCandidates,
+	needsSemanticConsolidation,
+} from "./findings.js";
 import { validateDraft } from "./profile.js";
 import { hash, systemPrompt, type Prompts } from "./prompts.js";
 import { selectLenses } from "./selection.js";
 import { contextResources, snapshotTools, type Snapshot } from "./snapshot.js";
 import {
 	ConsolidationSubmission,
+	CheckpointSchema,
 	ProposalSubmission,
 	ReviewSubmission,
 	VerificationSubmission,
@@ -133,7 +142,7 @@ export async function review(options: {
 		groups: [],
 		ledger: [],
 		elapsedMs: 0,
-		usage: { input: 0, output: 0, cost: 0 },
+		usage: emptyUsage(),
 	};
 	tasks.model = report.model;
 	const candidates: Candidate[] = [];
@@ -164,7 +173,18 @@ export async function review(options: {
 			remaining: coverage?.remaining.length,
 			unreviewed: coverage?.remaining,
 		});
-		let priorUsage = { input: 0, output: 0, cost: 0 };
+		let priorUsage = emptyUsage();
+		const sessionId = randomUUID();
+		const resourceLimit = Math.max(
+			16000,
+			(ctx.modelRegistry.find?.(config.provider, config.model)?.contextWindow ?? 32000) * 3,
+		);
+		const assignedLens =
+			stage === "reviewer" || stage === "architecture" ? (input as { lens: Partial<Lens> }).lens : undefined;
+		const sharedIds = profile.draft.requiredReading
+			.map((file) => `doc:${file}`)
+			.filter((id) => coverage?.ids.includes(id))
+			.sort();
 		for (;;) {
 			coverage?.resetDelivery();
 			const priorTurns = task.turns;
@@ -176,11 +196,12 @@ export async function review(options: {
 				}
 				yield* contextResources(
 					snapshot,
-					coverage!.ids.filter((id) => id.startsWith("diff:") || id.startsWith("doc:")),
-					Math.max(
-						16000,
-						(ctx.modelRegistry.find?.(config.provider, config.model)?.contextWindow ?? 32000) * 3,
-					),
+					coverage!.ids
+						.filter((id) => id.startsWith("diff:") || id.startsWith("doc:"))
+						.sort(
+							(a, b) => Number(b.startsWith("doc:")) - Number(a.startsWith("doc:")) || a.localeCompare(b),
+						),
+					resourceLimit,
 					signal,
 				);
 			}
@@ -190,6 +211,14 @@ export async function review(options: {
 				schema,
 				system: systemPrompt(prompts, stage),
 				input,
+				sessionId,
+				continuing: task.requests > 0,
+				assignment: assignedLens
+					? { id: assignedLens.id, name: assignedLens.name, focus: assignedLens.focus }
+					: undefined,
+				...(coverage
+					? { sharedResources: contextResources(snapshot, sharedIds, resourceLimit, signal) }
+					: {}),
 				tools,
 				signal,
 				coverage,
@@ -236,20 +265,11 @@ export async function review(options: {
 						changes.compactions = task.compactions + 1;
 					}
 					if (event.type === "continued" || event.type === "turn") changes.state = "running";
-					if (event.usage)
-						changes.usage = {
-							input: priorUsage.input + event.usage.input,
-							output: priorUsage.output + event.usage.output,
-							cost: priorUsage.cost + event.usage.cost,
-						};
+					if (event.usage) changes.usage = sumUsage(priorUsage, event.usage);
 					tasks.update(id, changes, event.text);
 				},
 			});
-			priorUsage = {
-				input: priorUsage.input + result.usage.input,
-				output: priorUsage.output + result.usage.output,
-				cost: priorUsage.cost + result.usage.cost,
-			};
+			priorUsage = sumUsage(priorUsage, result.usage);
 			if (signal.aborted) {
 				tasks.update(id, { state: "cancelled", endedAt: Date.now(), usage: priorUsage });
 				return result;
@@ -396,13 +416,15 @@ export async function review(options: {
 						...job.files.map((file) => `diff:${file}`),
 						...job.lens.reading.map((file) => `doc:${file}`),
 					]);
+					const { reading: _reading, focus, ...lens } = job.lens;
 					const result = await model(
 						job.id,
 						ReviewSubmission,
 						job.architecture ? "architecture" : "reviewer",
 						{
 							project: profile.draft.summary,
-							lens: job.lens,
+							// Reading is listed once below; architecture focus is already in the system policy.
+							lens: { ...lens, ...(job.architecture ? {} : { focus }) },
 							assignedFiles: job.files,
 							relatedContextFiles: job.contextFiles,
 							areas: areaPlan.areas,
@@ -456,13 +478,20 @@ export async function review(options: {
 			const area = (file: string) => areaPlan.areas.findIndex((item) => item.files.includes(file));
 			return area(a.file) - area(b.file) || a.file.localeCompare(b.file) || a.id.localeCompare(b.id);
 		});
+		const duplicates = deduplicateCandidates(sorted);
 		const { batches } = await packVerificationInputs({
 			project: profile.draft.summary,
-			candidates: sorted,
+			candidates: duplicates.candidates,
+			members: duplicates.members,
 			lenses,
 			snapshot,
 			system: systemPrompt(prompts, "verifier"),
-			maxBytes: 64000,
+			model: ctx.modelRegistry.find?.(config.provider, config.model),
+			tools: [
+				...snapshotTools(snapshot),
+				{ name: "submit_result", parameters: VerificationSubmission },
+				{ name: "record_checkpoint", parameters: CheckpointSchema },
+			],
 			signal,
 		});
 		for (let i = 0; i < batches.length; i++)
@@ -546,9 +575,17 @@ export async function review(options: {
 					suspend,
 				);
 				for (const candidate of batch.candidates) {
+					const verdictFor = (entry: Report["ledger"][number]) => {
+						for (const member of duplicates.members.get(candidate.id)!)
+							report.ledger.push({
+								...entry,
+								id: member.id,
+								...(member.id !== candidate.id ? { sharedWith: candidate.id } : {}),
+							});
+					};
 					const matched = result.ok ? result.value.verdicts.filter((v) => v.id === candidate.id) : [];
 					if (matched.length !== 1) {
-						report.ledger.push({
+						verdictFor({
 							id: candidate.id,
 							verdict: "inconclusive",
 							reason: result.ok ? "Missing/duplicate verdict" : result.error,
@@ -557,7 +594,7 @@ export async function review(options: {
 					}
 					const verdict = matched[0]!;
 					if (verdict.verdict === "dropped" || verdict.verdict === "inconclusive")
-						report.ledger.push({ id: candidate.id, verdict: verdict.verdict, reason: verdict.reason });
+						verdictFor({ id: candidate.id, verdict: verdict.verdict, reason: verdict.reason });
 					else
 						try {
 							const finding = verdict.verdict === "corrected" ? verdict.corrected : candidate;
@@ -565,10 +602,11 @@ export async function review(options: {
 								throw new Error("Invalid correction/severity change");
 							if (validatedEvidence.get(candidate.id) !== JSON.stringify(finding))
 								await checkEvidence(finding, snapshot);
-							report.findings.push({ ...finding, id: candidate.id, reviewer: candidate.reviewer });
-							report.ledger.push({ id: candidate.id, verdict: verdict.verdict, reason: verdict.reason });
+							for (const member of duplicates.members.get(candidate.id)!)
+								report.findings.push({ ...finding, id: member.id, reviewer: member.reviewer });
+							verdictFor({ id: candidate.id, verdict: verdict.verdict, reason: verdict.reason });
 						} catch (error) {
-							report.ledger.push({
+							verdictFor({
 								id: candidate.id,
 								verdict: "inconclusive",
 								reason: error instanceof Error ? error.message : "Invalid evidence",
@@ -582,7 +620,7 @@ export async function review(options: {
 		if (report.ledger.some((v) => v.verdict === "inconclusive"))
 			report.issues.push("Some findings remain inconclusive after verification");
 		report.groups = exactGroups(report.findings);
-		if (report.findings.length > 1) {
+		if (needsSemanticConsolidation(report.findings)) {
 			queued(
 				"consolidate",
 				"consolidation",
@@ -692,14 +730,7 @@ export async function review(options: {
 				});
 		if (!report.groups.length && report.findings.length) report.groups = exactGroups(report.findings);
 		report.tasks = tasks.snapshot();
-		report.usage = report.tasks.reduce(
-			(sum, task) => ({
-				input: sum.input + task.usage.input,
-				output: sum.output + task.usage.output,
-				cost: sum.cost + task.usage.cost,
-			}),
-			{ input: 0, output: 0, cost: 0 },
-		);
+		report.usage = report.tasks.reduce((sum, task) => sumUsage(sum, task.usage), emptyUsage());
 		report.metrics = {
 			peakActive: tasks.peakActive,
 			modelRequests: report.tasks.reduce((sum, task) => sum + task.requests, 0),

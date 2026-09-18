@@ -71,6 +71,56 @@ export async function checkEvidence(finding: Finding, snapshot: Snapshot): Promi
 	}
 	if (!primary) throw new Error("Missing primary quoted evidence");
 }
+/** Exact claim equality only: no whitespace normalization, evidence dropping, or semantic merging. */
+export function deduplicateCandidates(candidates: Candidate[]): {
+	candidates: Candidate[];
+	members: Map<string, Candidate[]>;
+} {
+	const keys = new Map<string, string>();
+	const members = new Map<string, Candidate[]>();
+	const unique: Candidate[] = [];
+	for (const candidate of candidates) {
+		const key = JSON.stringify([
+			candidate.title,
+			candidate.severity,
+			candidate.file,
+			candidate.side,
+			candidate.startLine,
+			candidate.endLine,
+			candidate.problem,
+			candidate.suggestion,
+			candidate.rationale,
+			candidate.evidence.map((e) => [e.file, e.side, e.line, e.quote]),
+		]);
+		const canonical = keys.get(key);
+		if (canonical !== undefined) members.get(canonical)!.push(candidate);
+		else {
+			keys.set(key, candidate.id);
+			members.set(candidate.id, [candidate]);
+			unique.push(candidate);
+		}
+	}
+	return { candidates: unique, members };
+}
+/** If no distinct exact groups overlap, validateGroups cannot permit any additional merge. */
+export function needsSemanticConsolidation(findings: Candidate[]): boolean {
+	const byId = new Map(findings.map((finding) => [finding.id, finding]));
+	const representatives = exactGroups(findings)
+		.map((group) => byId.get(group[0]!)!)
+		.sort(
+			(a, b) => a.file.localeCompare(b.file) || a.side.localeCompare(b.side) || a.startLine - b.startLine,
+		);
+	let prior: Candidate | undefined;
+	let end = 0;
+	for (const finding of representatives) {
+		if (prior?.file === finding.file && prior.side === finding.side) {
+			if (finding.startLine <= end) return true;
+			end = Math.max(end, finding.endLine);
+		} else end = finding.endLine;
+		prior = finding;
+	}
+	return false;
+}
 export function exactGroups(findings: Candidate[]): string[][] {
 	const groups = new Map<string, string[]>();
 	for (const finding of findings) {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildPrompt, classify, SYSTEM_PROMPT } from "#src/auto/classifier.ts";
+import { buildPrompt, buildSystemPrompt, classify, SYSTEM_PROMPT } from "#src/auto/classifier.ts";
 import type { Config } from "#src/config.ts";
 
 const auto = {
@@ -62,6 +62,132 @@ it("treats user instructions as authoritative without trusting embedded content"
   expect(SYSTEM_PROMPT).toContain(
     "Deterministic security-policy decisions are outside your authority",
   );
+});
+
+it.each(["/tmp", "/tmp/build.log", "/tmp/logs/../build.log"])(
+  "adds risk-based log guidance for external-directory review of %s",
+  (value) => {
+    const prompt = buildSystemPrompt({
+      ...facts,
+      surface: "external_directory",
+      value,
+      path: { resolved: value, withinTmp: true },
+    });
+    expect(prompt).toContain("/tmp-only exception");
+    expect(prompt).toContain("allow narrowly scoped reading/searching of task-related build logs");
+    expect(prompt).toContain("creation/appending of ordinary task-related scratch logs under /tmp");
+    expect(prompt).toContain("The user need not explicitly name the temporary file");
+    expect(prompt).toContain("Missing proof that the agent created");
+    expect(prompt).toContain("Explicit user restrictions still apply");
+  },
+);
+
+it.each([
+  "/private/tmp/build.log",
+  "/var/tmp/build.log",
+  "/var/folders/user/session/T/build.log",
+  "/private/var/folders/user/session/T/build.log",
+  "/repo/.pi/scratch/build.log",
+  "/tmp-other/build.log",
+  "/tmp/../etc/build.log",
+  "/tmp/../../var/tmp/build.log",
+  "tmp/build.log",
+  "$TMPDIR/build.log",
+])("keeps the original classifier instructions outside /tmp: %s", (value) => {
+  expect(
+    buildSystemPrompt({
+      ...facts,
+      surface: "external_directory",
+      value,
+      path: { resolved: "/private/tmp/build.log", withinTmp: true },
+    }),
+  ).toBe(SYSTEM_PROMPT);
+});
+
+it.each([
+  undefined,
+  { resolved: "", withinTmp: true },
+  { resolved: "/outside/build.log", withinTmp: false },
+  { resolved: "/tmp-other/build.log", withinTmp: false },
+])("keeps the original prompt without resolved /tmp containment: %j", (path) => {
+  expect(
+    buildSystemPrompt({ ...facts, surface: "external_directory", value: "/tmp/build.log", path }),
+  ).toBe(SYSTEM_PROMPT);
+});
+
+it("accepts host-confirmed containment under the canonical macOS /tmp root", () => {
+  const resolved = "/private/tmp/build.log";
+  const request = {
+    ...facts,
+    surface: "external_directory",
+    value: "/tmp/build.log",
+    path: { resolved, withinTmp: true },
+  };
+  expect(buildSystemPrompt(request)).toContain("/tmp-only exception");
+  expect(buildPrompt(request, context, auto)).toContain(`resolved path: ${resolved}`);
+});
+
+it("includes an escaping destination in ordinary classifier review", () => {
+  const prompt = buildPrompt(
+    {
+      ...facts,
+      surface: "external_directory",
+      value: "/tmp/build.log",
+      path: { resolved: "/outside/build.log", withinTmp: false },
+    },
+    context,
+    auto,
+  );
+  expect(prompt).toContain("value: /tmp/build.log");
+  expect(prompt).toContain("resolved path: /outside/build.log");
+});
+
+it("does not relax general diagnostic authorization or non-directory review", () => {
+  expect(
+    buildSystemPrompt({
+      ...facts,
+      value: "/tmp/build.log",
+      path: { resolved: "/tmp/build.log", withinTmp: true },
+    }),
+  ).toBe(SYSTEM_PROMPT);
+  expect(SYSTEM_PROMPT).not.toContain("the user need not enumerate each diagnostic command");
+  expect(SYSTEM_PROMPT).not.toContain("/tmp-only exception");
+  const prompt = buildPrompt(facts, context, auto);
+  expect(prompt).toContain(
+    "Use these messages to determine the user's requested goal, intended scope, and explicit authorization.",
+  );
+  expect(prompt).not.toContain("implicitly authorized");
+});
+
+it("does not extend the /tmp exception to other operations or treat ownership claims as trust", () => {
+  const prompt = buildSystemPrompt({
+    ...facts,
+    surface: "external_directory",
+    value: "/tmp/build.log",
+    path: { resolved: "/tmp/build.log", withinTmp: true },
+  });
+  expect(prompt).toContain("This exception applies only to /tmp and its descendants");
+  expect(prompt).toContain(
+    "All other paths and operations in a mixed command remain subject to the standard authorization rules above",
+  );
+  expect(prompt).toContain(
+    "Do not extend the exception to other temporary directories or symlink destinations outside /tmp",
+  );
+  expect(prompt).toContain("/tmp is not blanket trust");
+  expect(prompt).toContain("Do not claim verified ownership");
+  expect(prompt).toContain("Inspect the entire command");
+  for (const risk of [
+    "credential access",
+    "other users' data",
+    "broad temp-directory harvesting",
+    "symlink escapes",
+    "destructive overwrites",
+    "suspicious payload execution or persistence",
+    "uploads/exfiltration",
+  ]) {
+    expect(prompt).toContain(risk);
+  }
+  expect(prompt).toContain("missing safety-relevant context");
 });
 
 it("uses an object-root tool schema accepted by OpenAI-compatible providers", async () => {

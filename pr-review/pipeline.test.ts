@@ -67,7 +67,11 @@ it.each([
 							areas: [{ id: "core", name: "Core", files: ["a.ts"], reason: "Shared change", related: [] }],
 						};
 					else {
-						expect(input.suppliedContext.map((entry: { id: string }) => entry.id).sort()).toEqual(
+						expect(
+							[...input.sharedContext, ...input.suppliedContext]
+								.map((entry: { id: string }) => entry.id)
+								.sort(),
+						).toEqual(
 							kind === "verify"
 								? ["candidate:F1", "diff:a.ts", "doc:rules.md"]
 								: ["diff:a.ts", "doc:rules.md"],
@@ -106,10 +110,10 @@ it.each([
 						usage: {
 							input: 1,
 							output: 1,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 2,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							cacheRead: 100,
+							cacheWrite: 20,
+							totalTokens: 122,
+							cost: { input: 0.01, output: 0.02, cacheRead: 0.03, cacheWrite: 0.04, total: 0.1 },
 						},
 					} as AssistantMessage;
 					const stream = createAssistantMessageEventStream();
@@ -178,7 +182,14 @@ it.each([
 			expect(report.findings).toHaveLength(1);
 			expect(report.advisories).toHaveLength(1);
 			expect(report.metrics!.peakActive).toBeLessThanOrEqual(concurrency);
-			expect(report.usage.input).toBe(blockArchitecture ? 9 : 8);
+			const requests = blockArchitecture ? 9 : 8;
+			expect(report.usage.input).toBe(requests);
+			expect(report.usage.cacheRead).toBe(requests * 100);
+			expect(report.usage.cacheWrite).toBe(requests * 20);
+			expect(report.usage.totalTokens).toBe(requests * 122);
+			expect(report.usage.costBreakdown?.cacheWrite).toBeCloseTo(requests * 0.04);
+			expect(report.usage.byRequest?.first.requests).toBe(7);
+			expect(report.usage.byRequest?.continuation.requests).toBe(requests - 7);
 			if (blockArchitecture) expect(otherReviewersFinishedBeforeRetry).toBe(true);
 		} finally {
 			await snapshot.dispose?.();

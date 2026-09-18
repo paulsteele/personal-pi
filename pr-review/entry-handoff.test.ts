@@ -3,10 +3,13 @@ import { afterEach, expect, it, vi } from "vitest";
 import extension from "./index.js";
 import { uiHarness } from "./ui.test.helpers.js";
 import type { Report } from "./types.js";
+import { providerUsage } from "./usage.js";
+import { saveReport } from "./report.js";
 const state = vi.hoisted(() => ({
 	report: undefined as unknown,
 	browser: undefined as unknown,
 	failViewer: false,
+	failSave: false,
 	captureFailures: 0,
 	viewerWait: undefined as Promise<void> | undefined,
 	emitProgress: false,
@@ -56,7 +59,12 @@ vi.mock("./plannotator.js", () => ({
 		return structuredClone(state.browser);
 	},
 }));
-vi.mock("./report.js", async (original) => ({ ...(await original<object>()), saveReport: async () => {} }));
+vi.mock("./report.js", async (original) => ({
+	...(await original<object>()),
+	saveReport: vi.fn(async () => {
+		if (state.failSave) throw new Error("fixture report save failed");
+	}),
+}));
 function harness() {
 	state.report = {
 		version: 1,
@@ -118,6 +126,8 @@ function harness() {
 		],
 	} satisfies Report;
 	state.failViewer = false;
+	state.failSave = false;
+	vi.mocked(saveReport).mockClear();
 	state.captureFailures = 0;
 	state.viewerWait = undefined;
 	state.emitProgress = false;
@@ -132,12 +142,14 @@ function harness() {
 		hasUI: true,
 		isIdle: () => true,
 		isProjectTrusted: () => true,
+		sessionManager: { getSessionId: () => "review-session" },
 		ui: ui.ui,
 		modelRegistry: { find: () => ({}), hasConfiguredAuth: () => true },
 	} as unknown as ExtensionContext;
 	let command: any, tool: any;
 	const events = new Map<string, () => void>();
 	const api = {
+		events: { emit: vi.fn() },
 		on(name: string, handler: () => void) {
 			events.set(name, handler);
 		},
@@ -153,6 +165,65 @@ function harness() {
 	return { api, ctx, command, tool, ui, events };
 }
 afterEach(() => vi.useRealTimers());
+it.each(["command", "tool"])("registers only the saved report before the %s handoff", async (entry) => {
+	const h = harness();
+	state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "Explain F1" };
+	let path: string;
+	if (entry === "tool") {
+		const result = await h.tool.execute("fixture", {}, new AbortController().signal, () => {}, h.ctx);
+		path = result.details.path;
+	} else {
+		await h.command.handler("", h.ctx);
+		await vi.waitFor(() => expect(h.api.sendMessage).toHaveBeenCalledOnce());
+		path = h.api.sendMessage.mock.calls[0]![0].details.path;
+		expect(h.api.events.emit.mock.invocationCallOrder[0]).toBeLessThan(
+			h.api.sendMessage.mock.invocationCallOrder[0]!,
+		);
+	}
+	expect(h.api.events.emit).toHaveBeenCalledExactlyOnceWith("permissions:allow_session_files", {
+		version: 1,
+		sessionId: "review-session",
+		paths: [path],
+	});
+	expect(path).toBe(`/private-runtime/repos/${"a".repeat(64)}/reports/fixture.json`);
+	expect(vi.mocked(saveReport).mock.invocationCallOrder.at(-1)).toBeLessThan(
+		h.api.events.emit.mock.invocationCallOrder[0]!,
+	);
+});
+it("does not register a report when persistence fails", async () => {
+	const h = harness();
+	state.failSave = true;
+	await expect(h.tool.execute("fixture", {}, new AbortController().signal, () => {}, h.ctx)).rejects.toThrow(
+		"fixture report save failed",
+	);
+	expect(h.api.events.emit).not.toHaveBeenCalled();
+});
+it("keeps the review result if optional permission integration fails", async () => {
+	const h = harness();
+	state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "" };
+	h.api.events.emit.mockImplementation(() => {
+		throw new Error("fixture listener failure");
+	});
+	const result = await h.tool.execute("fixture", {}, new AbortController().signal, () => {}, h.ctx);
+	expect(result.details.path).toContain("/reports/fixture.json");
+	expect(result.content[0].text).toContain("NO FIXES AUTHORIZED");
+});
+it("returns complete nested usage to the parent tool without zeroing cache counters", async () => {
+	const h = harness();
+	state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "" };
+	const measured = {
+		input: 3,
+		output: 5,
+		cacheRead: 10000,
+		cacheWrite: 1000,
+		totalTokens: 11008,
+		cost: { input: 0.01, output: 0.02, cacheRead: 0.03, cacheWrite: 0.04, total: 0.1 },
+	};
+	(state.report as Report).usage = providerUsage(measured, "first");
+	const result = await h.tool.execute("fixture", {}, new AbortController().signal, () => {}, h.ctx);
+	expect(result.usage).toEqual(measured);
+	expect(result.content[0].text).toContain("10000 cache read");
+});
 it.each(["cancel", "session_shutdown", "session_tree"])(
 	"does not deliver queued progress after %s while work is still settling",
 	async (action) => {
@@ -186,6 +257,7 @@ it.each(["cancel", "session_shutdown", "session_tree"])(
 			release();
 		}
 		expect(await pending).toBe(true);
+		expect(h.api.events.emit).not.toHaveBeenCalled();
 	},
 );
 it("releases Pi's serial command loop so status opens before browser feedback", async () => {
@@ -261,6 +333,7 @@ it("does not publish a detached command result or viewer URL into a retired sess
 	release();
 	await vi.advanceTimersByTimeAsync(0);
 	expect(h.api.sendMessage).not.toHaveBeenCalled();
+	expect(h.api.events.emit).not.toHaveBeenCalled();
 	expect(h.ui.state.notifications.some((note) => note.message.includes("Late browser"))).toBe(false);
 	await h.command.handler("status", h.ctx);
 	expect(h.ui.state.notifications.at(-1)?.message).toContain("No review task history");

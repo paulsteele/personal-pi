@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { representatives } from "./findings.js";
 import { publish, readStored } from "./storage.js";
 import type { Advisory, Report } from "./types.js";
+import { emptyUsage, sumUsage, formatUsage, formatCost, REQUEST_KINDS, type UsageTotals } from "./usage.js";
 
 export function renderAdvisory(advisory: Advisory): string {
 	return redact(
@@ -97,12 +98,29 @@ export function renderReport(report: Report): string {
 		lines.push(
 			"",
 			"## Verification ledger",
-			...report.ledger.map((entry) => `- ${entry.id}: ${entry.verdict} — ${entry.reason}`),
+			...report.ledger.map(
+				(entry) =>
+					`- ${entry.id}: ${entry.verdict}${entry.sharedWith ? ` (shared verification with ${entry.sharedWith})` : ""} — ${entry.reason}`,
+			),
 		);
 	lines.push(
 		"",
-		`Reported usage: ${report.usage.input} input / ${report.usage.output} output tokens; $${report.usage.cost.toFixed(4)}. Elapsed: ${Math.round(report.elapsedMs / 1000)}s.`,
+		`Reported usage: ${formatUsage(report.usage)}. Elapsed: ${Math.round(report.elapsedMs / 1000)}s.`,
+		formatCost(report.usage),
 	);
+	if (report.usage.byRequest)
+		for (const kind of REQUEST_KINDS)
+			lines.push(
+				`- ${kind}: ${report.usage.byRequest[kind].requests} requests; ${formatUsage(report.usage.byRequest[kind])}; ${formatCost(report.usage.byRequest[kind])}`,
+			);
+	if (report.tasks) {
+		const stages = new Map<string, UsageTotals>();
+		for (const task of report.tasks)
+			stages.set(task.stage, sumUsage(stages.get(task.stage) ?? emptyUsage(), task.usage));
+		lines.push("", "## Usage by stage");
+		for (const [stage, usage] of stages)
+			lines.push(`- ${stage}: ${formatUsage(usage)}; ${formatCost(usage)}`);
+	}
 	return redact(lines.join("\n"));
 }
 export async function saveReport(root: string, report: Report, limit: number): Promise<void> {

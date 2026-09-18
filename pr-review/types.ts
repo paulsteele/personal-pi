@@ -1,3 +1,4 @@
+import type { UsageTotals } from "./usage.js";
 import { Type, type Static, type TSchema } from "typebox";
 import { Check, Errors } from "typebox/value";
 
@@ -181,6 +182,8 @@ export interface LedgerEntry {
 	id: string;
 	verdict: Verdict["verdict"];
 	reason: string;
+	/** An identical claim was verified once under this canonical candidate ID. */
+	sharedWith?: string;
 }
 export interface Report {
 	version: 1;
@@ -206,7 +209,7 @@ export interface Report {
 	groups: string[][];
 	ledger: LedgerEntry[];
 	elapsedMs: number;
-	usage: { input: number; output: number; cost: number };
+	usage: UsageTotals;
 	browser?: { decision: string; requestedIds: string[]; discussion: unknown[]; feedback: string };
 	areas?: ReviewArea[];
 	contextNotes?: string[];

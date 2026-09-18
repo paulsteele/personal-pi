@@ -1,3 +1,5 @@
+import type { Model, Api } from "@earendil-works/pi-ai";
+import { contextTokens, responseReserve } from "./worker-context.js";
 import type { Snapshot, Change } from "./snapshot.js";
 import type { Candidate, Lens } from "./types.js";
 
@@ -62,27 +64,39 @@ export interface VerificationBatch {
 export async function packVerificationInputs(options: {
 	project: string;
 	candidates: Candidate[];
+	/** Original reviewers of an exact claim contribute the union of all their required guidance. */
+	members?: Map<string, Candidate[]>;
 	lenses: Lens[];
 	snapshot: Snapshot;
 	system: string;
-	maxBytes: number;
+	maxBytes?: number;
+	model?: Model<Api> | undefined;
+	tools?: unknown;
 	maxJobs?: number;
 	signal: AbortSignal;
 }): Promise<{ batches: VerificationBatch[]; rejected: Array<{ id: string; reason: string }> }> {
 	const batches: VerificationBatch[] = [];
+	const fits = (value: VerificationInput) =>
+		options.model
+			? contextTokens(options.system, options.tools ?? [], [
+					{ role: "user", timestamp: 0, content: [{ type: "text", text: JSON.stringify(value) }] },
+				]) +
+					2048 <=
+				(options.model.contextWindow - responseReserve(options.model)) * 0.75
+			: jsonBytes(value) + Buffer.byteLength(options.system) <= (options.maxBytes ?? 64000);
+	// The margin accounts for the worker's paging/coverage tools. Actual inline delivery is checked again by runWorker.
 	const input = (candidates: Candidate[], inline = true): VerificationInput => {
 		const files = new Set(candidates.map((c) => c.file));
+		const reviewers = new Set(
+			candidates.flatMap((c) => options.members?.get(c.id) ?? [c]).map((c) => c.reviewer),
+		);
 		return {
 			project: options.project,
 			candidates: inline ? candidates : [],
 			candidateIds: candidates.map((c) => c.id),
 			requiredDocuments: {},
 			requiredReading: [
-				...new Set(
-					options.lenses
-						.filter((lens) => candidates.some((c) => c.reviewer === lens.name))
-						.flatMap((lens) => lens.reading),
-				),
+				...new Set(options.lenses.filter((lens) => reviewers.has(lens.name)).flatMap((lens) => lens.reading)),
 			],
 			changes: options.snapshot.changes
 				.filter((c) => files.has(c.file) || files.has(c.oldPath))
@@ -95,22 +109,14 @@ export async function packVerificationInputs(options: {
 			const inline = input(current);
 			batches.push({
 				candidates: current,
-				input:
-					jsonBytes(inline) + Buffer.byteLength(options.system) <= options.maxBytes
-						? inline
-						: input(current, false),
+				input: fits(inline) ? inline : input(current, false),
 			});
 			current = [];
 		}
 	};
 	for (const candidate of options.candidates) {
 		options.signal.throwIfAborted();
-		if (
-			current.length &&
-			(current.length === 10 ||
-				jsonBytes(input([...current, candidate])) + Buffer.byteLength(options.system) > options.maxBytes)
-		)
-			flush();
+		if (current.length && (current.length === 10 || !fits(input([...current, candidate])))) flush();
 		current.push(candidate);
 	}
 	flush();
