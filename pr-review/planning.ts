@@ -108,13 +108,12 @@ export function planReviewTasks(
 	}
 	if (new Set(jobs.map((job) => job.id)).size !== jobs.length)
 		throw new Error("Duplicate planned review task IDs");
-	const priority = (job: ReviewTaskPlan) =>
-		["$architecture", "correctness", "security", "performance", "style"].indexOf(job.lens.id);
-	return jobs.sort((a, b) => {
-		const pa = priority(a),
-			pb = priority(b);
-		return (
-			(pa < 0 ? 5 : pa) - (pb < 0 ? 5 : pb) || b.files.length - a.files.length || a.id.localeCompare(b.id)
-		);
-	});
+	const priorityOrder = ["$architecture", "correctness", "security", "performance", "style", "readability"];
+	const priority = (job: ReviewTaskPlan) => {
+		const index = priorityOrder.indexOf(job.lens.id);
+		return index < 0 ? priorityOrder.length : index;
+	};
+	return jobs.sort(
+		(a, b) => priority(a) - priority(b) || b.files.length - a.files.length || a.id.localeCompare(b.id),
+	);
 }

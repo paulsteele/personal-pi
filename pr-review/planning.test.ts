@@ -18,7 +18,7 @@ const changes = Array.from(
 			metadataOnly: false,
 		}) as Change,
 );
-it("plans five whole-change tasks plus only relevant specialist areas, not reviewer x files", async () => {
+it("plans six whole-change tasks plus only relevant specialist areas, not reviewer x files", async () => {
 	const lenses = await selectLenses(
 		{
 			...testDraft,
@@ -39,8 +39,23 @@ it("plans five whole-change tasks plus only relevant specialist areas, not revie
 	expect(lenses.at(-1)!.matchedFiles).toHaveLength(36);
 	const { areas } = reviewAreas(changes);
 	const jobs = planReviewTasks(lenses, areas, changes, "Cross-area contracts");
-	expect(jobs).toHaveLength(6);
+	expect(jobs).toHaveLength(7);
+	expect(jobs.map((job) => job.lens.id)).toEqual([
+		"$architecture",
+		"correctness",
+		"security",
+		"performance",
+		"style",
+		"readability",
+		"auth",
+	]);
 	expect(jobs.filter((job) => !job.lens.matchedFiles).every((job) => job.files.length === 72)).toBe(true);
+	expect(jobs.find((job) => job.lens.id === "readability")).toMatchObject({
+		id: "review:readability",
+		files: changes.map((change) => change.file),
+		areas: areas.map((area) => area.id),
+		architecture: false,
+	});
 	expect(jobs.at(-1)!.files.every((file) => file.startsWith("auth/"))).toBe(true);
 	expect(jobs[0]!.architecture).toBe(true);
 });

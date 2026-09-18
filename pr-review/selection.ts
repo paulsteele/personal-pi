@@ -4,6 +4,15 @@ import { createInterface } from "node:readline";
 import type { Change } from "./snapshot.js";
 import { BASELINES, type Draft, type Lens, type SpecialistDefinition } from "./types.js";
 import type { Prompts } from "./prompts.js";
+
+const baselineNames: Record<(typeof BASELINES)[number], string> = {
+	security: "Security",
+	performance: "Performance",
+	correctness: "Correctness",
+	style: "Style/Conventions",
+	readability: "Human Readability",
+};
+
 export function triggers(specialist: SpecialistDefinition, changes: Change[]): boolean {
 	return (
 		specialist.always ||
@@ -92,7 +101,7 @@ export async function selectLenses(
 		const extra = draft.baselineFocus.find((item) => item.id === id);
 		return {
 			id,
-			name: id === "style" ? "Style/Conventions" : `${id[0]!.toUpperCase()}${id.slice(1)}`,
+			name: baselineNames[id],
 			focus: `${prompts.text[`personas/${id}`]}\n${extra?.focus ?? ""}`,
 			reading: [...new Set([...draft.requiredReading, ...(extra?.requiredReading ?? [])])],
 			reason: "Mandatory shared baseline",

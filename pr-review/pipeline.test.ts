@@ -13,14 +13,22 @@ it.each([
 	{ failScout: true, blockArchitecture: false, concurrency: 4 },
 	{ failScout: false, blockArchitecture: true, concurrency: 4 },
 	{ failScout: false, blockArchitecture: true, concurrency: 1 },
+	{ failScout: false, blockArchitecture: false, concurrency: 4, readabilityFinding: true },
 ])(
-	"reviews directly without regeneration or acknowledgments ($failScout / $blockArchitecture / $concurrency)",
-	async ({ failScout, blockArchitecture, concurrency }) => {
+	"reviews directly without regeneration or acknowledgments ($failScout / $blockArchitecture / $concurrency / $readabilityFinding)",
+	async ({ failScout, blockArchitecture, concurrency, readabilityFinding = false }) => {
 		const repo = await fixture();
 		await put(repo.root, "rules.md", "Read the whole change.\n");
-		await put(repo.root, "a.ts", "export const enabled = false;\n");
+		const before = readabilityFinding
+			? "const retryDelayMs = 5000;\nexport const retry = (fn: () => void) => setTimeout(fn, retryDelayMs);\n"
+			: "export const enabled = false;\n";
+		const after = readabilityFinding
+			? "const retryDelaySeconds = 5000;\nexport const retry = (fn: () => void) => setTimeout(fn, retryDelaySeconds);\n"
+			: "export const enabled = true;\n";
+		await put(repo.root, "a.ts", before);
 		await commit(repo.root);
-		await put(repo.root, "a.ts", "export const enabled = true;\n");
+		await put(repo.root, "a.ts", after);
+		const prompts = await loadPrompts();
 		const signal = new AbortController().signal,
 			snapshot = await capture(repo, { kind: "local" }, testConfig);
 		const model = {
@@ -33,16 +41,20 @@ it.each([
 		};
 		const phases = new Map<string, number>();
 		const finding = {
-			title: "Changed default",
-			severity: "medium",
+			title: readabilityFinding ? "Retry delay name claims the wrong unit" : "Changed default",
+			severity: readabilityFinding ? "low" : "medium",
 			file: "a.ts",
 			side: "new",
 			startLine: 1,
 			endLine: 1,
-			problem: "Fixture defect",
-			suggestion: "Check the default",
-			rationale: "Fixture rationale",
-			evidence: [{ file: "a.ts", side: "new", line: 1, quote: "export const enabled = true;" }],
+			problem: readabilityFinding
+				? "retryDelaySeconds still holds milliseconds and is passed directly to setTimeout."
+				: "Fixture defect",
+			suggestion: readabilityFinding ? "Keep the name retryDelayMs." : "Check the default",
+			rationale: readabilityFinding
+				? "Behavior is unchanged, but the new name misleads a maintainer about the delay's unit."
+				: "Fixture rationale",
+			evidence: [{ file: "a.ts", side: "new", line: 1, quote: after.trimEnd() }],
 		};
 		const registry = {
 			find: () => model,
@@ -57,6 +69,11 @@ it.each([
 						context.messages.find((message) => message.role === "user")!.content[0]!.text!,
 					);
 					const kind = input.lens?.id ?? (input.candidateIds ? "verify" : "scout");
+					if (kind === "readability") {
+						expect(input.lens.name).toBe("Human Readability");
+						expect(input.lens.focus).toBe(`${prompts.text["personas/readability"]}\n`);
+						expect(input.assignedFiles).toEqual(["a.ts"]);
+					}
 					const phase = phases.get(kind) ?? 0;
 					phases.set(kind, phase + 1);
 					let name = "submit_result",
@@ -97,7 +114,11 @@ it.each([
 							args =
 								kind === "verify"
 									? { verdicts: [{ id: "F1", verdict: "confirmed", reason: "Captured evidence checked" }] }
-									: { complete: true, limitations: [], findings: kind === "security" ? [finding] : [] };
+									: {
+											complete: true,
+											limitations: [],
+											findings: kind === (readabilityFinding ? "readability" : "security") ? [finding] : [],
+										};
 					}
 					const message = {
 						role: "assistant",
@@ -141,7 +162,7 @@ it.each([
 				blockArchitecture &&
 				recovery.blockers.size &&
 				[...tasks.records.values()].filter((task) => task.stage === "review" && task.state === "completed")
-					.length === 4
+					.length === 5
 			) {
 				otherReviewersFinishedBeforeRetry = true;
 				recovery.retry();
@@ -161,7 +182,7 @@ it.each([
 					draft: { ...testDraft, requiredReading: ["rules.md"] },
 				},
 				snapshot,
-				prompts: await loadPrompts(),
+				prompts,
 				scope: { kind: "local" },
 				signal,
 				progress: () => {},
@@ -170,8 +191,8 @@ it.each([
 			});
 			expect(report.issues).toEqual([]);
 			expect(report.status).toBe("complete");
-			expect(report.tasks).toHaveLength(7);
-			expect(report.tasks!.filter((task) => task.stage === "review")).toHaveLength(5);
+			expect(report.tasks).toHaveLength(8);
+			expect(report.tasks!.filter((task) => task.stage === "review")).toHaveLength(6);
 			expect(
 				report.tasks!.every(
 					(task) =>
@@ -180,16 +201,21 @@ it.each([
 				),
 			).toBe(true);
 			expect(report.findings).toHaveLength(1);
+			expect(report.findings[0]).toMatchObject({
+				...finding,
+				reviewer: readabilityFinding ? "Human Readability" : "Security",
+			});
+			expect(report.ledger).toMatchObject([{ id: "F1", verdict: "confirmed" }]);
 			expect(report.advisories).toHaveLength(1);
 			expect(report.metrics!.peakActive).toBeLessThanOrEqual(concurrency);
-			const requests = blockArchitecture ? 9 : 8;
+			const requests = blockArchitecture ? 10 : 9;
 			expect(report.usage.input).toBe(requests);
 			expect(report.usage.cacheRead).toBe(requests * 100);
 			expect(report.usage.cacheWrite).toBe(requests * 20);
 			expect(report.usage.totalTokens).toBe(requests * 122);
 			expect(report.usage.costBreakdown?.cacheWrite).toBeCloseTo(requests * 0.04);
-			expect(report.usage.byRequest?.first.requests).toBe(7);
-			expect(report.usage.byRequest?.continuation.requests).toBe(requests - 7);
+			expect(report.usage.byRequest?.first.requests).toBe(8);
+			expect(report.usage.byRequest?.continuation.requests).toBe(requests - 8);
 			if (blockArchitecture) expect(otherReviewersFinishedBeforeRetry).toBe(true);
 		} finally {
 			await snapshot.dispose?.();

@@ -6,7 +6,8 @@ import { loadProfile, validateDraft } from "./profile.js";
 import { hash, loadPrompts } from "./prompts.js";
 import { initializeStorage, profilePath, publish, readStored, storageRoot } from "./storage.js";
 import { saveModel, loadConfig } from "./config.js";
-import type { Draft, Profile } from "./types.js";
+import { BASELINES, type Draft, type Profile } from "./types.js";
+import { selectLenses } from "./selection.js";
 
 export const draft: Draft = {
 	name: "Fixture",
@@ -29,7 +30,8 @@ afterEach(async () => {
 describe("private profiles and fixed methodology", () => {
 	it("loads every fixed prompt and rejects generated workflow overrides", async () => {
 		const prompts = await loadPrompts();
-		expect(Object.keys(prompts.text)).toHaveLength(14);
+		expect(Object.keys(prompts.text)).toHaveLength(15);
+		expect(prompts.hashes["personas/readability"]).toBe(hash(prompts.text["personas/readability"]));
 		expect(() => validateDraft({ ...draft, disableVerification: true })).toThrow();
 		expect(() => validateDraft({ ...draft, requiredReading: ["../auth.json"] })).toThrow();
 		expect(() =>
@@ -37,7 +39,7 @@ describe("private profiles and fixed methodology", () => {
 				...draft,
 				specialists: [
 					{
-						id: "security",
+						id: "readability",
 						name: "Override",
 						focus: "override",
 						requiredReading: [],
@@ -48,7 +50,14 @@ describe("private profiles and fixed methodology", () => {
 			}),
 		).toThrow();
 	});
-	it("loads approved legacy profiles without requiring source hashes to match current files", async () => {
+	it("accepts supplements for all five baselines but rejects duplicate baseline context", () => {
+		const baselineFocus = BASELINES.map((id) => ({ id, focus: `${id} context`, requiredReading: [] }));
+		expect(validateDraft({ ...draft, baselineFocus }).baselineFocus).toEqual(baselineFocus);
+		expect(() => validateDraft({ ...draft, baselineFocus: [baselineFocus[4], baselineFocus[4]] })).toThrow(
+			"Duplicate baseline context",
+		);
+	});
+	it("loads approved legacy profiles and adds readability without requiring regeneration", async () => {
 		const root = await temp();
 		const profile: Profile = {
 			schemaVersion: 1,
@@ -56,11 +65,21 @@ describe("private profiles and fixed methodology", () => {
 			repoId: hash("repo"),
 			generatedAt: "today",
 			generationModel: "fake/model",
-			draft,
+			draft: {
+				...draft,
+				baselineFocus: (["security", "performance", "correctness", "style"] as const).map((id) => ({
+					id,
+					focus: `${id} context`,
+					requiredReading: [],
+				})),
+			},
 			sourceHashes: {},
 		};
 		await publish(root, profilePath(root, profile.repoId), profile, undefined);
-		expect((await loadProfile(root, profile.repoId))?.profile).toEqual(profile);
+		const loaded = (await loadProfile(root, profile.repoId))!.profile;
+		expect(loaded).toEqual(profile);
+		const lenses = await selectLenses(loaded.draft, [], await loadPrompts());
+		expect(lenses.find((lens) => lens.id === "readability")?.name).toBe("Human Readability");
 	});
 	it("refuses checkout-local storage", async () => {
 		const root = await temp();

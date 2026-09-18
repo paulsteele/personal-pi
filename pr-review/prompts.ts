@@ -16,6 +16,7 @@ const names = [
 	"personas/performance",
 	"personas/correctness",
 	"personas/style",
+	"personas/readability",
 ] as const;
 export type PromptName = (typeof names)[number];
 export const hash = (value: string | Buffer): string => createHash("sha256").update(value).digest("hex");

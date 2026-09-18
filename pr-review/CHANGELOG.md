@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add Human Readability as a fifth mandatory whole-change baseline, covering high-level intent, accurate names, intent-revealing functions rather than temporal narration, and reviewable diff hunks. Require concrete, independently verified comprehension problems rather than cosmetic preferences; support optional profile supplements without requiring a new baseline entry.
+
 ## 1.1.2
 
 - Register the exact saved report with Pi Permission System for current-session external-directory access before command/tool handoff. Never grant the reports directory or persist permission configuration; cancelled, retired, or unsaved results grant nothing.

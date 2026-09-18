@@ -143,7 +143,7 @@ it.each(["confirmed", "corrected", "dropped", "inconclusive", "missing", "bad-co
 				progress: () => {},
 			});
 			expect(verifierCalls).toHaveLength(1);
-			expect(sessionIds.size).toBe(7);
+			expect(sessionIds.size).toBe(8);
 			expect(report.ledger.map((v) => v.id)).toEqual(["F1", "F2"]);
 			expect(report.ledger[1]!.sharedWith).toBe("F1");
 			expect(report.tasks?.some((t) => t.stage === "consolidation")).toBe(false);

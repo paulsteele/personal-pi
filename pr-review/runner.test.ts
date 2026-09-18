@@ -124,7 +124,14 @@ async function run(
 }
 it("runs every baseline and independently verifies before retaining a finding", async () => {
 	const { result, seen } = await run("confirmed");
-	expect(seen.sort()).toEqual(["$architecture", "correctness", "performance", "security", "style"]);
+	expect(seen.sort()).toEqual([
+		"$architecture",
+		"correctness",
+		"performance",
+		"readability",
+		"security",
+		"style",
+	]);
 	expect(result.status).toBe("complete");
 	expect(result.findings).toHaveLength(1);
 	expect(result.ledger).toEqual([{ id: "F1", verdict: "confirmed", reason: "checked" }]);
@@ -184,7 +191,7 @@ it.each(["review", "verification"])("frees exhausted capacity during %s recovery
 	tasks.onChange(() => {
 		const ready =
 			stage === "review"
-				? recovery.blockers.size === 4 && tasks.records.get("review:style")?.state === "completed"
+				? recovery.blockers.size === 5 && tasks.records.get("review:readability")?.state === "completed"
 				: recovery.blockers.has("verify:0") && tasks.records.get("verify:1")?.state === "completed";
 		if (ready) {
 			progressed = true;
@@ -197,7 +204,7 @@ it.each(["review", "verification"])("frees exhausted capacity during %s recovery
 		calls.set(id, (calls.get(id) ?? 0) + 1);
 		let value: unknown = { specialists: [] };
 		if (options.schema === ReviewSubmission) {
-			if (stage === "review" && id !== "style") await options.recover!("Fixture obstacle");
+			if (stage === "review" && id !== "readability") await options.recover!("Fixture obstacle");
 			value = {
 				complete: true,
 				limitations: [],

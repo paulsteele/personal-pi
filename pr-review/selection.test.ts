@@ -37,12 +37,38 @@ it("evaluates path/content AND predicates on the same changed file", () => {
 		]),
 	).toBe(false);
 });
-it("always includes the four shared baselines for prose-only edits", async () => {
+it("always includes the five shared baselines for prose-only edits", async () => {
 	expect(
 		(await selectLenses(testDraft, [{ ...change, file: "README.md" }], await loadPrompts())).map(
 			(lens) => lens.id,
 		),
-	).toEqual(["security", "performance", "correctness", "style"]);
+	).toEqual(["security", "performance", "correctness", "style", "readability"]);
+});
+it("supplements Human Readability without replacing its fixed focus or whole-change scope", async () => {
+	const prompts = await loadPrompts();
+	const lenses = await selectLenses(
+		{
+			...testDraft,
+			requiredReading: ["AGENTS.md"],
+			baselineFocus: [
+				{
+					id: "readability",
+					focus: "Preserve the domain vocabulary",
+					requiredReading: ["AGENTS.md", "docs/glossary.md"],
+				},
+			],
+		},
+		[change],
+		prompts,
+	);
+	const readability = lenses.find((lens) => lens.id === "readability")!;
+	expect(readability).toMatchObject({
+		name: "Human Readability",
+		focus: `${prompts.text["personas/readability"]}\nPreserve the domain vocabulary`,
+		reading: ["AGENTS.md", "docs/glossary.md"],
+		reason: "Mandatory shared baseline",
+	});
+	expect(readability.matchedFiles).toBeUndefined();
 });
 it("requires exhaustive duplicate groups and never merges unrelated locations", () => {
 	const one = {

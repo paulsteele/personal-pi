@@ -7,7 +7,7 @@ const list = <T extends TSchema>(items: T, maxItems = 64) => Type.Array(items, {
 const object = <T extends Record<string, TSchema>>(properties: T) =>
 	Type.Object(properties, { additionalProperties: false });
 const enumeration = <T extends string>(values: T[]) => Type.Unsafe<T>({ type: "string", enum: values });
-export const BASELINES = ["security", "performance", "correctness", "style"] as const;
+export const BASELINES = ["security", "performance", "correctness", "style", "readability"] as const;
 export const Severity = enumeration(["critical", "high", "medium", "low"]);
 export const Side = enumeration(["old", "new"]);
 export const Reading = list(text(1024), 32);
@@ -26,7 +26,7 @@ export const ProfileDraft = object({
 	requiredReading: Reading,
 	baselineFocus: list(
 		object({ id: enumeration([...BASELINES]), focus: text(8000), requiredReading: Reading }),
-		4,
+		BASELINES.length,
 	),
 	specialists: list(Specialist, 28),
 	exclusions: list(object({ glob: text(256), reason: text(500) }), 64),
