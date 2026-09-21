@@ -357,7 +357,6 @@ export async function capture(
 				}
 			}
 		for (const file of discovery ? [] : [...new Set([...before.keys(), ...target.keys()])].sort()) {
-			await new Promise<void>((resolve) => setImmediate(resolve));
 			signal?.throwIfAborted();
 			if (renamedOld.has(file)) continue;
 			const oldPath = renames.get(file) ?? file;
@@ -365,6 +364,10 @@ export async function capture(
 				next = target.get(file);
 			if (oldPath === file && old && next && objectId(old) === objectId(next) && old.mode === next.mode)
 				continue;
+			// Unchanged metadata must not cost an event-loop turn (and potentially a full TUI redraw)
+			// per tracked path. Cooperate only for actual changes, including excluded/denied ones.
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			signal?.throwIfAborted();
 			const exclusion = exclusions.find((item) => matchesGlob(file, item.glob));
 			if (exclusion) {
 				omitted.push({ file, reason: `excluded: ${exclusion.reason}` });

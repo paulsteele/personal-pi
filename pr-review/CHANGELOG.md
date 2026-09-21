@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.1
+
+- Skip unchanged snapshot metadata before yielding, so large repositories no longer spend an event-loop turn (and possible full UI redraw) per tracked file. Retain cooperative cancellation for actual, excluded, and denied changes.
+
 ## 1.2.0
 
 - Validate outgoing source sets under one stable permission revision, yield during bulk checks, and recheck at provider dispatch after authentication/preflight waits. Preserve the same safeguards for compaction and publication.

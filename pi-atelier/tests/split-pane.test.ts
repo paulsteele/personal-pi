@@ -64,6 +64,51 @@ const motion = (x: number, y = 1) => `\u001b[<32;${x};${y}M`;
 const release = (x: number, y = 1) => `\u001b[<0;${x};${y}m`;
 
 describe("fixed fullscreen split", () => {
+	it("settles after painting instead of requesting another frame from overlay visibility", async () => {
+		vi.useFakeTimers();
+		const terminal = {
+			columns: 120,
+			rows: 8,
+			write: vi.fn(),
+			start: vi.fn(),
+			stop: vi.fn(),
+			hideCursor: vi.fn(),
+			showCursor: vi.fn(),
+		};
+		const renderer = new TuiAltScreen(terminal as never);
+		const requestRender = vi.spyOn(renderer, "requestRender");
+		const split = createSplitPaneController();
+		try {
+			renderer.setLayoutRoot({ render: () => ["main"], invalidate() {} });
+			renderer.start();
+			split.attach(
+				stableTuiReference(() => renderer),
+				sidebarComponent,
+			);
+			split.show();
+			renderer.showOverlay(sidebarComponent, split.overlayOptions());
+			await vi.advanceTimersByTimeAsync(200);
+			expect(split.isPresented()).toBe(true);
+			requestRender.mockClear();
+			await vi.advanceTimersByTimeAsync(200);
+			expect(requestRender).not.toHaveBeenCalled();
+
+			// Real updates and responsive hiding still repaint; only visibility polling is passive.
+			terminal.columns = 91;
+			split.requestRender();
+			await vi.advanceTimersByTimeAsync(200);
+			expect(split.isPresented()).toBe(false);
+			requestRender.mockClear();
+			await vi.advanceTimersByTimeAsync(200);
+			expect(requestRender).not.toHaveBeenCalled();
+		} finally {
+			split.dispose();
+			renderer.stop();
+			requestRender.mockRestore();
+			vi.useRealTimers();
+		}
+	});
+
 	it("uses the fixed width and visibility boundary", () => {
 		expect(SIDEBAR_WIDTH).toBe(44);
 		expect(MIN_SIDEBAR_WIDTH).toBe(28);

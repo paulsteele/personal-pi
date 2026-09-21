@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.3.1
+
+- Stop the fullscreen sidebar's overlay-visibility check from requesting another frame during every paint. Idle rendering now settles instead of continuously redrawing and starving background work; real updates and responsive visibility changes still repaint.
 
 ## 1.0.6 — 2026-09-03
 

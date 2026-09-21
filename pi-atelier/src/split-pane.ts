@@ -160,7 +160,9 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 			// Fullscreen content lives in the real ScrollView pane. Regular and
 			// unknown renderers intentionally fail closed instead of using an overlay.
 			syncFullscreenLayoutAdapter();
-			requestRender();
+			// Pi polls visibility while painting. Requesting a frame here would keep the
+			// renderer permanently busy even when the sidebar and transcript are unchanged.
+			notifyPresentation();
 			return false;
 		},
 	};
