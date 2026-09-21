@@ -61,6 +61,7 @@ auto mode **141 tests**, Atelier **12 files / 222 tests**, and patch harness **4
 11. Config and auto mode are live at permission/execution boundaries. Invalid config blocks actions; stale in-flight decisions cannot override new rules. Explicit grants/counters/notes survive an ordinary config refresh.
 12. Preserve main-agent turn-local classifier allows and use separate worker-turn caches, never cross-worker or run-long grants. Human answers are not memoized. Task/operation cancellation retires their authority.
 13. Delegated classifier facts preserve actual user authority separately from assignment/source data, and identify original paths even when a generic tool rule determines the review surface. All source effects participate in deterministic checks.
+14. Edit/write classification authorizes file modification from operation, path, and user context, not code contents. File bodies are omitted from classifier input; bounded edit previews remain human-only. This is not content-safety certification and does not weaken deterministic policy/guards or remove Bash command evidence.
 
 ## Selective upstream adoption
 

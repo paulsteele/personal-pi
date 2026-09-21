@@ -50,13 +50,20 @@ This exception applies only to /tmp and its descendants. All other paths and ope
 
 /tmp is not blanket trust. Inspect the entire command, including pipelines, redirections, substitutions, and chained commands, not just the /tmp operation. Look for credential access, unrelated or other users' data, broad temp-directory harvesting, symlink escapes, destructive overwrites, suspicious payload execution or persistence, and uploads/exfiltration. A /tmp filename, .log suffix, or claim that a file is agent-owned does not make those operations safe. Require human approval for concrete risk or meaningful uncertainty about scope or effects, not merely because a low-risk task-related log is under /tmp; explain the concrete risk or missing safety-relevant context. Deterministic security-policy decisions remain outside your authority.`;
 
+const FILE_MODIFICATION_GUIDANCE =
+  "For edit and write tools, review authorization to modify the target file using the operation, requested and resolved paths, and authoritative user instructions. Replacement text and file contents are intentionally omitted. This is not a code review or certification of the resulting content's safety or correctness. Do not require human approval merely because the body is absent; require it for concrete authorization or path-scope concerns. Explicit user restrictions and deterministic security-policy decisions still apply.";
+
 export function buildSystemPrompt(facts: ReviewFacts): string {
+  const prompt =
+    facts.toolName === "edit" || facts.toolName === "write"
+      ? `${SYSTEM_PROMPT}\n\n${FILE_MODIFICATION_GUIDANCE}`
+      : SYSTEM_PROMPT;
   if (facts.surface !== "external_directory" || !facts.path?.resolved || !facts.path.withinTmp)
-    return SYSTEM_PROMPT;
+    return prompt;
   const path = posix.normalize(facts.value);
   return path === "/tmp" || path.startsWith("/tmp/")
-    ? `${SYSTEM_PROMPT}\n\n${TMP_REVIEW_GUIDANCE}`
-    : SYSTEM_PROMPT;
+    ? `${prompt}\n\n${TMP_REVIEW_GUIDANCE}`
+    : prompt;
 }
 
 const MAX_MALFORMED_RETRIES = 2;

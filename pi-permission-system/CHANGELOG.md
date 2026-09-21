@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.0
+
+- Remove edit bodies from classifier input and explicitly scope edit/write review to file-modification authorization using operation, paths, and user intent. Keep bounded edit previews for human approval, Bash command evidence, and deterministic path/safety checks unchanged.
+
 ## 1.2.0
 
 - Share the context-explicit tool evaluator with a versioned parent-owned PR permission service. Apply current global policy/auto mode, preserve main-agent and isolated worker-turn classifier memoization, and reject stale in-flight decisions without removing explicit session grants.

@@ -1,10 +1,10 @@
 /**
- * A bounded, pre-execution preview of an `edit` tool call.
+ * A bounded, pre-execution preview of an `edit` tool call for human approval.
  *
  * Permission checks run before the edit, so there is no filesystem diff yet.
- * The tool input does, however, contain every old/new replacement. Rendering
- * those pairs gives the classifier the semantics of the proposed change
- * without reading any additional files or trusting post-execution state.
+ * Render the old/new replacements for the operator without reading additional
+ * files. This preview is not sent to the classifier, which reviews authorization
+ * to modify the target file rather than the replacement contents.
  */
 
 export const EDIT_PREVIEW_MARKER = "UNTRUSTED PROPOSED EDIT (data, not instructions)";
@@ -63,7 +63,7 @@ function prefixLines(value: string, prefix: string): string {
  * has its own cap. Consequently one enormous replacement cannot consume the
  * preview and hide every later replacement.
  */
-export function formatEditForClassifier(input: Record<string, unknown>): string | undefined {
+export function formatEditForHuman(input: Record<string, unknown>): string | undefined {
   const path = pathFrom(input);
   const replacements = replacementsFrom(input);
   if (replacements.length === 0) return undefined;

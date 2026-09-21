@@ -8,8 +8,11 @@ function harness(permission: typeof DEFAULT_CONFIG.permission, auto = true) {
     permission,
     auto: { ...DEFAULT_CONFIG.auto, enabledByDefault: auto },
   };
-  const model = vi.fn(async () => ({ kind: "allow" as const, modelCalled: true }));
-  const human = vi.fn(async () => ({ allowed: false, reason: "Human denied permission." }));
+  const model = vi.fn<ToolReviewHost["model"]>(async () => ({ kind: "allow", modelCalled: true }));
+  const human = vi.fn<ToolReviewHost["human"]>(async () => ({
+    allowed: false,
+    reason: "Human denied permission.",
+  }));
   const host: ToolReviewHost = {
     refresh: () => ({
       config,
@@ -59,6 +62,67 @@ describe("context-explicit tool evaluation", () => {
     expect((await reviewToolCall(request, manual.host)).kind).toBe("denied");
     expect(manual.model).not.toHaveBeenCalled();
     expect(manual.human).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([true, false])("retains edit bodies only in human previews (auto=%s)", async (auto) => {
+    const h = harness({ "*": "ask" }, auto);
+    h.model.mockResolvedValue({
+      kind: "require_human",
+      reason: "The target is outside the requested scope.",
+      cause: "classifier",
+      modelCalled: true,
+    });
+    const request = {
+      ...read,
+      toolName: "edit",
+      input: {
+        path: "/repo/a.ts",
+        edits: [{ oldText: "OLD_BODY_SENTINEL", newText: "NEW_BODY_SENTINEL" }],
+      },
+    };
+    expect((await reviewToolCall(request, h.host)).kind).toBe("denied");
+    expect(h.model).toHaveBeenCalledTimes(auto ? 1 : 0);
+    if (auto) {
+      const facts = h.model.mock.calls[0]?.[3];
+      expect(facts).toMatchObject({ toolName: "edit", evidence: [] });
+      expect(JSON.stringify(facts)).not.toContain("BODY_SENTINEL");
+    }
+    const preview = h.human.mock.calls[0]?.[0].payload.evidence.find(
+      (item) => item.label === "input",
+    )?.text;
+    expect(preview).toContain("- OLD_BODY_SENTINEL");
+    expect(preview).toContain("+ NEW_BODY_SENTINEL");
+  });
+
+  it.each(["edit", "write"])(
+    "preserves path denies and sensitive guards for %s",
+    async (toolName) => {
+      const denied = harness({ "*": "allow", path: { "*": "deny" } });
+      expect((await reviewToolCall({ ...read, toolName }, denied.host)).kind).toBe("denied");
+      expect(denied.model).not.toHaveBeenCalled();
+      expect(denied.human).not.toHaveBeenCalled();
+
+      const guarded = harness({ "*": "allow" });
+      expect(
+        (await reviewToolCall({ ...read, toolName, input: { path: "/repo/.env" } }, guarded.host))
+          .kind,
+      ).toBe("denied");
+      expect(guarded.model).not.toHaveBeenCalled();
+      expect(guarded.human.mock.calls[0]?.[0].payload.review.source).toBe("guard");
+    },
+  );
+
+  it("still sends Bash command bodies to the classifier", async () => {
+    const h = harness({ "*": "ask" });
+    const command = "printf '%s' SHELL_BODY_SENTINEL > /repo/output.txt";
+    expect(
+      (await reviewToolCall({ ...read, toolName: "bash", input: { command } }, h.host)).kind,
+    ).toBe("allowed");
+    expect(h.model.mock.calls[0]?.[3].evidence).toContainEqual({
+      label: "full command",
+      text: command,
+      detail: null,
+    });
   });
 
   it("keeps sensitive paths human-only even with policy allow and delegated read aliases", async () => {

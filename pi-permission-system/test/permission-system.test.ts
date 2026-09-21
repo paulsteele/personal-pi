@@ -113,6 +113,66 @@ describe("integrated permission system", () => {
     rmSync(h.agentDir, { recursive: true, force: true });
   });
 
+  it.each([
+    {
+      toolName: "edit",
+      input: {
+        path: "/repo/a.ts",
+        edits: [
+          { oldText: "OLD_BODY_SENTINEL", newText: "NEW_BODY_SENTINEL".repeat(1_000) },
+          { oldText: "LATER_OLD_SENTINEL", newText: "LATER_NEW_SENTINEL" },
+        ],
+      },
+    },
+    {
+      toolName: "edit",
+      input: {
+        file_path: "/repo/a.ts",
+        oldText: "OLD_BODY_SENTINEL",
+        newText: "NEW_BODY_SENTINEL",
+      },
+    },
+    { toolName: "write", input: { path: "/repo/a.ts", content: "WRITE_BODY_SENTINEL" } },
+  ])(
+    "reviews $toolName paths and user intent without sending file bodies",
+    async ({ toolName, input }) => {
+      const h = setup({
+        permission: { "*": "ask" },
+        modelReply: {
+          content: [{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "allow" } }],
+        },
+        branch: [
+          {
+            type: "message",
+            message: { role: "user", content: "Update a.ts to support the new API." },
+          },
+        ],
+      });
+      try {
+        await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+        expect(
+          await h.handlers.get("tool_call")?.({ toolName, toolCallId: "file-body", input }, h.ctx),
+        ).toEqual({});
+        expect(h.ctx.modelRegistry.complete).toHaveBeenCalledTimes(1);
+        const request = h.ctx.modelRegistry.complete.mock.calls[0]?.[1] as {
+          systemPrompt: string;
+          messages: Array<{ content: string }>;
+        };
+        const prompt = request.messages[0]?.content;
+        expect(prompt).toContain(`tool: ${toolName}`);
+        expect(prompt).toContain("accessed path: /repo/a.ts");
+        expect(prompt).toContain("user: Update a.ts to support the new API.");
+        expect(request.systemPrompt).toContain("review authorization to modify the target file");
+        expect(JSON.stringify(request)).not.toContain("SENTINEL");
+        expect(JSON.stringify(request)).not.toContain("UNTRUSTED PROPOSED EDIT");
+        expect(h.ctx.ui.select).not.toHaveBeenCalled();
+      } finally {
+        await h.handlers.get("session_shutdown")?.({}, h.ctx);
+        rmSync(h.agentDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("correlates a policy-allowed read with the host tool row", async () => {
     const h = setup();
     const decisions: any[] = [];
@@ -490,6 +550,11 @@ describe("integrated permission system", () => {
       input: (path: string) => ({ path, content: "build ok\n" }),
     },
     {
+      name: "edit",
+      toolName: "edit",
+      input: (path: string) => ({ path, edits: [{ oldText: "build", newText: "build ok" }] }),
+    },
+    {
       name: "Bash read",
       toolName: "bash",
       input: (path: string) => ({ command: `head '${path}'` }),
@@ -549,7 +614,12 @@ describe("integrated permission system", () => {
           expect(result).toEqual({});
           expect(h.ctx.ui.select).not.toHaveBeenCalled();
         } else {
-          expect(request.systemPrompt).toBe(SYSTEM_PROMPT);
+          expect(request.systemPrompt).not.toContain("/tmp-only exception");
+          if (toolName === "edit" || toolName === "write")
+            expect(request.systemPrompt).toContain(
+              "review authorization to modify the target file",
+            );
+          else expect(request.systemPrompt).toBe(SYSTEM_PROMPT);
           expect(result).toMatchObject({ block: true });
           expect(h.ctx.ui.select).toHaveBeenCalledOnce();
         }

@@ -64,6 +64,35 @@ it("treats user instructions as authoritative without trusting embedded content"
   );
 });
 
+it.each(["edit", "write"])("scopes %s review to file-modification authorization", (toolName) => {
+  for (const surface of [toolName, "path", "external_directory"]) {
+    const prompt = buildSystemPrompt({ ...facts, toolName, surface, value: "/repo/a.ts" });
+    expect(prompt).toContain("review authorization to modify the target file");
+    expect(prompt).toContain("Replacement text and file contents are intentionally omitted");
+    expect(prompt).toContain("This is not a code review");
+    expect(prompt).toContain("Do not require human approval merely because the body is absent");
+    expect(prompt).toContain(
+      "Explicit user restrictions and deterministic security-policy decisions still apply",
+    );
+  }
+  const tmpPrompt = buildSystemPrompt({
+    ...facts,
+    toolName,
+    surface: "external_directory",
+    value: "/tmp/build.log",
+    path: { resolved: "/tmp/build.log", withinTmp: true },
+  });
+  expect(tmpPrompt).toContain("review authorization to modify the target file");
+  expect(tmpPrompt).toContain("/tmp-only exception");
+});
+
+it.each(["read", "bash", "custom_tool"])(
+  "keeps file-modification guidance out of %s review",
+  (toolName) => {
+    expect(buildSystemPrompt({ ...facts, toolName })).toBe(SYSTEM_PROMPT);
+  },
+);
+
 it.each(["/tmp", "/tmp/build.log", "/tmp/logs/../build.log"])(
   "adds risk-based log guidance for external-directory review of %s",
   (value) => {

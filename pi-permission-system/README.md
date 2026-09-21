@@ -80,6 +80,18 @@ Presentation and review-log field limits are fixed in code.
 - `environment`: up to 100 trusted roots/remotes/domains of at most 200 characters, shown as hints
   only. They cannot override deterministic safety policy.
 
+### File-modification authorization
+
+For `edit` and `write`, the classifier reviews the operation, target/resolved paths, and user task
+context—not replacement text or file contents. Bodies are intentionally omitted; their absence alone
+is not a reason to request human approval. Approval authorizes modifying the file, not the safety or
+correctness of the resulting code. A path-only review cannot distinguish legitimate and malicious
+changes to the same authorized file.
+
+Bounded edit previews remain available in human approval prompts. Explicit user restrictions, path
+policy, resolved-destination checks, and deterministic sensitive-file guards still apply. Bash commands
+continue to include command evidence; this does not turn shell review into path-only authorization.
+
 ### `/tmp` logs in auto mode
 
 Only `external_directory` reviews whose normalized display path is `/tmp` or a descendant and whose
@@ -89,7 +101,7 @@ checked. The classifier also receives the selected path's resolved destination. 
 output, and ordinary scratch-log creation/appends, may be approved without the user explicitly naming
 the file. Missing proof of log creation alone is not a reason to escalate an otherwise low-risk access.
 
-Other paths receive the original classifier instructions, including `/private/tmp`, `/var/tmp`,
+Other paths do not receive this exception, including `/private/tmp`, `/var/tmp`,
 macOS per-user temp directories, and project-local scratch directories. There is no general relaxation
 of diagnostic authorization. Other paths and operations in mixed commands retain their normal review.
 

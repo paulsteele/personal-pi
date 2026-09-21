@@ -5,12 +5,12 @@ import type { AccessPath } from "./access-intent/access-path.ts";
 import { BashProgram } from "./access-intent/bash/program.ts";
 import type { ReviewFacts } from "./auto/classifier.ts";
 import type { DecisionRecord, ModelReviewResult } from "./auto/core.ts";
-import { formatEditForClassifier } from "./auto/edit-preview.ts";
 import { evaluateSafety, type SafetyContext } from "./auto/safety-policy.ts";
 import type { Config } from "./config.ts";
 import { PathNormalizer } from "./path-normalizer.ts";
 import type { PermissionDecisionEvent, DelegatedPermissionIdentity } from "./permission-events.ts";
 import { checkPolicy, type PolicyDecision } from "./policy.ts";
+import { formatEditForHuman } from "./prompt/edit-preview.ts";
 import {
   buildPermissionPromptPayload,
   type PermissionPromptPayload,
@@ -272,10 +272,6 @@ async function prepare(request: ToolReviewRequest, state: ReviewState, id: strin
     directPath,
     skillNames,
   );
-  const edit =
-    request.toolName === "edit" && input && typeof input === "object"
-      ? formatEditForClassifier(input as Record<string, unknown>)
-      : undefined;
   const pathFacts = [
     ...new Map(
       paths.map((path) => [path.value(), { value: path.value(), resolved: path.boundaryValue() }]),
@@ -314,19 +310,18 @@ async function prepare(request: ToolReviewRequest, state: ReviewState, id: strin
           },
         }
       : {}),
-    evidence: edit
-      ? [{ label: "input", text: edit, detail: null }]
-      : command
-        ? [{ label: "full command", text: command, detail: null }]
-        : request.description
-          ? [
-              {
-                label: "delegated action (not user authority)",
-                text: request.description,
-                detail: null,
-              },
-            ]
-          : [],
+    // File bodies belong only in human previews, never classifier evidence.
+    evidence: command
+      ? [{ label: "full command", text: command, detail: null }]
+      : request.description
+        ? [
+            {
+              label: "delegated action (not user authority)",
+              text: request.description,
+              detail: null,
+            },
+          ]
+        : [],
   };
   if (request.effects?.length)
     facts = {
@@ -356,7 +351,10 @@ async function prepare(request: ToolReviewRequest, state: ReviewState, id: strin
         policyState: checkPolicy(state.config.permission, "bash", unit.text).state,
       })),
       paths: paths.map((path) => ({ value: path.value(), resolved: path.resolvedAlias() })),
-      inputPreview: edit,
+      inputPreview:
+        request.toolName === "edit" && input && typeof input === "object"
+          ? formatEditForHuman(input as Record<string, unknown>)
+          : undefined,
     });
     return request.agentName
       ? {
