@@ -12,6 +12,9 @@ const report = JSON.parse(result.stdout)[0];
 const names = report.files.map((file) => file.path);
 const required = [
   "src/index.ts",
+  "src/tool-review.ts",
+  "src/delegated-review.ts",
+  "src/approval-queue.ts",
   "README.md",
   "FORK.md",
   "CHANGELOG.md",

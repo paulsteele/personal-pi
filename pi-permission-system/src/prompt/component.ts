@@ -38,7 +38,9 @@ export async function presentPermissionPrompt(
   payload: PermissionPromptPayload,
   classifierFeedback: boolean,
   allowDirectory = false,
+  signal?: AbortSignal,
 ): Promise<HumanPromptChoice | null> {
+  if (signal?.aborted) return null;
   const baseOptions = classifierFeedback ? CLASSIFIER_OPTIONS : STANDARD_OPTIONS;
   const options = allowDirectory
     ? [baseOptions[0] ?? STANDARD_OPTIONS[0], DIRECTORY_OPTION, ...baseOptions.slice(1)]
@@ -46,15 +48,41 @@ export async function presentPermissionPrompt(
   if (ctx.mode !== "tui") {
     const rendered = renderPermissionPrompt(payload, 80);
     const labels = options.map((option) => `${option.key} ${option.label.toLowerCase()}`);
-    const selected = await ctx.ui.select(`${title}\n${rendered.lines.join("\n")}`, labels);
+    const selected = await ctx.ui.select(
+      `${title}\n${rendered.lines.join("\n")}`,
+      labels,
+      signal ? { signal } : undefined,
+    );
+    if (signal?.aborted) return null;
     return (
       options.find((option) => `${option.key} ${option.label.toLowerCase()}` === selected)?.value ??
       null
     );
   }
-  return ctx.ui.custom<HumanPromptChoice | null>((tui, theme, keybindings, done) => {
-    return new HumanDecisionComponent(theme, keybindings, options, () => tui.requestRender(), done);
-  });
+  let abort: (() => void) | undefined;
+  try {
+    return await ctx.ui.custom<HumanPromptChoice | null>((tui, theme, keybindings, done) => {
+      let settled = false;
+      const finish = (choice: HumanPromptChoice | null) => {
+        if (settled) return;
+        settled = true;
+        if (abort) signal?.removeEventListener("abort", abort);
+        done(choice);
+      };
+      abort = () => finish(null);
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) queueMicrotask(abort);
+      return new HumanDecisionComponent(
+        theme,
+        keybindings,
+        options,
+        () => tui.requestRender(),
+        finish,
+      );
+    });
+  } finally {
+    if (abort) signal?.removeEventListener("abort", abort);
+  }
 }
 
 /** Compact controls only; request details live durably in the transcript. */

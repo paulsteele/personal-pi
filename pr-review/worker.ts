@@ -13,7 +13,15 @@ import { CheckpointSchema, validate, type Config, type Checkpoint } from "./type
 import { normalizeConfig } from "./config.js";
 import { redact } from "./report.js";
 import { CoverageLedger } from "./tasks.js";
+import { commitToolResult, deferToolCommit } from "./tool-commit.js";
 import { compactWorkerContext, contextTokens, packInlineContext, responseReserve } from "./worker-context.js";
+import {
+	PermissionBlocked,
+	isPermissionBlocked,
+	type PermissionScope,
+	type SourceEffect,
+	type PermissionWait,
+} from "./permissions.js";
 
 export type Registry = Pick<
 	ExtensionContext["modelRegistry"],
@@ -27,8 +35,14 @@ export type WorkerEvent = {
 	usage?: WorkerUsage;
 };
 export type WorkerResult<T> =
-	| { ok: true; value: T; usage: WorkerUsage }
-	| { ok: false; error: string; usage: WorkerUsage };
+	| { ok: true; value: T; usage: WorkerUsage; dependencies?: SourceEffect[] }
+	| {
+			ok: false;
+			error: string;
+			usage: WorkerUsage;
+			permissionFailure?: boolean;
+			dependencies?: SourceEffect[];
+	  };
 function providerFailureReason(error: unknown): string {
 	const text = typeof error === "string" ? error : error instanceof Error ? error.message : "";
 	if (/context[_ ](?:length|window)|too many tokens|token.*limit/i.test(text))
@@ -70,6 +84,7 @@ export function registryStream(
 	config: Config,
 	request?: () => void,
 	response?: (message: AssistantMessage) => void,
+	permission?: { scope: PermissionScope; wait: PermissionWait; denied(error: PermissionBlocked): void },
 ): StreamFn {
 	return (model, context, options) => {
 		const output = createAssistantMessageEventStream();
@@ -85,22 +100,31 @@ export function registryStream(
 			response?.(error);
 			output.push({ type: "error", reason: error.stopReason === "aborted" ? "aborted" : "error", error });
 		};
-		const timer = setTimeout(() => {
-			reason = "Provider request timed out";
-			controller.abort();
-			fail();
-		}, normalizeConfig(config).requestTimeoutMs);
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const armTimer = () => {
+			clearTimeout(timer);
+			timer = setTimeout(() => {
+				reason = "Provider request timed out";
+				controller.abort();
+				fail();
+			}, normalizeConfig(config).requestTimeoutMs);
+		};
 		signal.addEventListener("abort", fail, { once: true });
 		void (async () => {
 			try {
 				if (signal.aborted) return fail();
+				let revision = permission
+					? await permission.wait(() => permission.scope.beforeDispatch(signal))
+					: undefined;
+				if (closed || signal.aborted) return fail();
+				armTimer();
 				request?.();
 				const auth = await registry.getApiKeyAndHeaders(model);
 				if (closed || signal.aborted) return fail();
 				const provider = registry.getProvider(model.provider);
 				if (!auth.ok || !provider) return fail();
 				const effective = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
-				const stream = provider.streamSimple(effective, context, {
+				const requestOptions = {
 					...options,
 					signal,
 					...(auth.apiKey ? { apiKey: auth.apiKey } : {}),
@@ -109,10 +133,20 @@ export function registryStream(
 					timeoutMs: normalizeConfig(config).requestTimeoutMs,
 					maxRetries: 1,
 					maxRetryDelayMs: 10000,
-				});
+				};
+				// Authentication and permit reacquisition may both outlive a permission revision.
+				// Human approval is not provider liveness time. Check again with no await before dispatch.
+				clearTimeout(timer);
+				while (permission && revision !== permission.scope.revision()) {
+					revision = await permission.wait(() => permission.scope.beforeDispatch(signal));
+					if (closed || signal.aborted) return fail();
+				}
+				if (closed || signal.aborted) return fail();
+				armTimer();
+				const stream = provider.streamSimple(effective, context, requestOptions);
 				for await (const event of stream) {
 					if (closed) break;
-					timer.refresh();
+					timer?.refresh();
 					if (event.type === "done" || event.type === "error")
 						response?.(event.type === "done" ? event.message : event.error);
 					output.push(event);
@@ -123,7 +157,8 @@ export function registryStream(
 				}
 				if (!closed) fail();
 			} catch (error) {
-				reason = providerFailureReason(error);
+				if (isPermissionBlocked(error)) permission?.denied(error);
+				reason = isPermissionBlocked(error) ? error.message : providerFailureReason(error);
 				overflow =
 					error instanceof Error &&
 					/context[_ ](?:length|window)|too many tokens|token.*limit/i.test(error.message);
@@ -157,6 +192,11 @@ export async function runWorker<T extends TSchema>(options: {
 	assignment?: unknown;
 	sharedResources?: AsyncIterable<import("./worker-context.js").ContextResource>;
 	tools?: AgentTool[];
+	permissions?: PermissionScope;
+	/** Only used at input/provider boundaries where no sibling tools are executing. */
+	suspendPermissions?: PermissionWait;
+	/** Host-owned provenance for source-derived input from another worker. */
+	dependencies?: readonly SourceEffect[];
 	signal?: AbortSignal;
 	progress?: (text: string) => void;
 	event?: (event: WorkerEvent) => void;
@@ -169,6 +209,12 @@ export async function runWorker<T extends TSchema>(options: {
 	recover?: ((reason: string) => Promise<void>) | undefined;
 }): Promise<WorkerResult<Static<T>>> {
 	let usage = emptyUsage();
+	const permission = options.permissions;
+	if (!permission)
+		return { ok: false, error: "Worker requires the permission service", usage, permissionFailure: true };
+	permission.endTurn();
+	const wait: PermissionWait = options.suspendPermissions ?? ((operation) => operation());
+	let permissionFailure: PermissionBlocked | undefined;
 	const model = options.registry.find(options.config.provider, options.config.model);
 	if (!model || !options.registry.hasConfiguredAuth(model))
 		return { ok: false, error: "Independent review model unavailable; use /pr model", usage };
@@ -196,9 +242,15 @@ export async function runWorker<T extends TSchema>(options: {
 			emit({ type: "request", text: "Model request" });
 		},
 		(message) => {
-			// Count every terminal provider response, including failed/retried summaries, exactly once.
 			usage = sumUsage(usage, providerUsage(message.usage, requestKind));
 			emit({ type: "usage", text: "Usage updated", usage: structuredClone(usage) });
+		},
+		{
+			scope: permission,
+			wait,
+			denied: (error) => {
+				permissionFailure = error;
+			},
 		},
 	);
 	let submitted = false,
@@ -207,7 +259,7 @@ export async function runWorker<T extends TSchema>(options: {
 		compact = false,
 		stalled = false;
 	const recentSignatures: string[] = [];
-	let inputText = JSON.stringify(options.input);
+	let inputText = "";
 	const inputDelivery = new CoverageLedger(["task:input"]);
 	let result: Static<T> | undefined;
 	const textResult = (value: unknown) => ({
@@ -249,10 +301,12 @@ export async function runWorker<T extends TSchema>(options: {
 					throw new Error("Only architecture may submit advisories");
 				await options.validateCheckpoint?.(value);
 				ledger.checkpoint(value);
-				emit({
-					type: "coverage",
-					text: `${ledger.total - ledger.remaining.length}/${ledger.total} obligations reviewed`,
-				});
+				deferToolCommit(() =>
+					emit({
+						type: "coverage",
+						text: `${ledger.total - ledger.remaining.length}/${ledger.total} obligations reviewed`,
+					}),
+				);
 				return textResult({ accepted: value.key, remaining: ledger.remaining.length });
 			},
 		} as AgentTool);
@@ -332,12 +386,36 @@ export async function runWorker<T extends TSchema>(options: {
 			inputDelivery.assertComplete();
 			options.coverage?.assertComplete();
 			await options.validateResult?.(value);
-			result = value;
-			submitted = true;
+			deferToolCommit(() => {
+				result = value;
+				submitted = true;
+			});
 			return { ...textResult({ accepted: true }), terminate: true };
 		},
 	};
-	const tools = [...(options.tools ?? []), ...extra, submit as AgentTool];
+	const tools: AgentTool[] = [...(options.tools ?? []), ...extra, submit as AgentTool].map((tool) => ({
+		...tool,
+		async execute(id, args, signal, onUpdate) {
+			try {
+				return await commitToolResult(() =>
+					permission.guard(
+						{
+							toolName: tool.name,
+							input: args,
+							callId: id,
+							description: `Invoke ${tool.name}: ${tool.description}`.slice(0, 4000),
+							...(signal ? { signal } : {}),
+						},
+						() => tool.execute(id, args, signal, onUpdate),
+					),
+				);
+			} catch (error) {
+				if (isPermissionBlocked(error) && (tool.name === "submit_result" || error.kind !== "denied"))
+					permissionFailure = error;
+				throw error;
+			}
+		},
+	}));
 	const threshold = model.contextWindow - responseReserve(model);
 	const system =
 		options.system +
@@ -376,7 +454,7 @@ export async function runWorker<T extends TSchema>(options: {
 			recentSignatures.push(signature);
 			if (recentSignatures.length > 24) recentSignatures.shift();
 			stalled = recentSignatures.filter((value) => value === signature).length >= 4;
-			return submitted || compact || stalled;
+			return submitted || compact || stalled || Boolean(permissionFailure);
 		},
 		beforeToolCall: async () => {
 			if (!submitted) return undefined;
@@ -385,7 +463,17 @@ export async function runWorker<T extends TSchema>(options: {
 		},
 	});
 	const unsubscribe = agent.subscribe((event) => {
-		if (event.type === "turn_start") emit({ type: "turn", text: `turn ${++turns}`, turns });
+		if (event.type === "turn_start") {
+			try {
+				permission.nextTurn();
+			} catch (error) {
+				permissionFailure = isPermissionBlocked(error)
+					? error
+					: new PermissionBlocked("unavailable", "Permission service unavailable");
+			}
+			emit({ type: "turn", text: `turn ${++turns}`, turns });
+		}
+		if (event.type === "turn_end") permission.endTurn();
 		if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
 			const path =
 				event.type === "tool_execution_start" &&
@@ -410,6 +498,14 @@ export async function runWorker<T extends TSchema>(options: {
 		options.signal?.throwIfAborted();
 	};
 	try {
+		await wait(() =>
+			permission.authorizeSources(
+				options.dependencies ?? [],
+				"Receive source-derived results from another review worker",
+				options.signal,
+			),
+		);
+		inputText = JSON.stringify(options.input);
 		if (contextTokens(system, tools, []) >= threshold)
 			throw new Error("Model context cannot fit the review policy/tools; select a larger-context model");
 		const overhead = contextTokens(system, tools, []);
@@ -419,9 +515,10 @@ export async function runWorker<T extends TSchema>(options: {
 			contextTokens(system, tools, [{ role: "user", timestamp: 0, content: [{ type: "text", text }] }]) <=
 			threshold * 0.75;
 		if (options.resources && fitsLength(inputText.length)) {
+			const resources = options.resources;
 			const packed = await packInlineContext(
 				inputText,
-				options.resources,
+				resources,
 				fitsLength,
 				options.signal,
 				options.sharedResources
@@ -455,10 +552,11 @@ export async function runWorker<T extends TSchema>(options: {
 			options.signal?.throwIfAborted();
 			await agent.prompt(prompt);
 			options.signal?.throwIfAborted();
+			if (permissionFailure) throw permissionFailure;
 			if (submitted && result !== undefined) {
 				if (invalidSubmission || agent.state.errorMessage)
 					throw new Error("Worker violated final submission protocol");
-				return { ok: true, value: result, usage };
+				return { ok: true, value: result, usage, dependencies: permission.dependencies };
 			}
 			const overflow = /context|token.*limit|too (?:long|large)/i.test(agent.state.errorMessage ?? "");
 			if (stalled) {
@@ -486,6 +584,7 @@ export async function runWorker<T extends TSchema>(options: {
 					emit({ type: "continued", text: "Continuing same review task" });
 				} catch {
 					options.signal?.throwIfAborted();
+					if (permissionFailure) throw permissionFailure;
 					await recover("Context compaction failed");
 				} finally {
 					summarizing = false;
@@ -514,8 +613,11 @@ export async function runWorker<T extends TSchema>(options: {
 			ok: false,
 			error: options.signal?.aborted ? "Cancelled" : error instanceof Error ? error.message : "Worker failed",
 			usage,
+			...(isPermissionBlocked(error) ? { permissionFailure: true } : {}),
+			dependencies: permission.dependencies,
 		};
 	} finally {
+		permission.endTurn();
 		unsubscribe();
 		options.signal?.removeEventListener("abort", abort);
 		agent.clearAllQueues();

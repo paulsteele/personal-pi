@@ -1,4 +1,4 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth, visibleWidth, type OverlayHandle } from "@earendil-works/pi-tui";
 import { redact } from "./report.js";
 import { formatUsage, formatCost, REQUEST_KINDS } from "./usage.js";
@@ -18,6 +18,9 @@ const taskStyles: Record<TaskState, { symbol: string; color: Parameters<ThemeLik
 	compacting: { symbol: "↻", color: "accent" },
 	retrying: { symbol: "↻", color: "warning" },
 	blocked: { symbol: "!", color: "warning" },
+	permission: { symbol: "?", color: "warning" },
+	checking: { symbol: "◇", color: "accent" },
+	waiting_slot: { symbol: "○", color: "muted" },
 	completed: { symbol: "✓", color: "success" },
 	cancelled: { symbol: "×", color: "muted" },
 	failed: { symbol: "×", color: "error" },
@@ -31,7 +34,7 @@ interface Keys {
 export function taskSummary(store: TaskStore): string {
 	const rows = [...store.records.values()];
 	const count = (states: string[]) => rows.filter((row) => states.includes(row.state)).length;
-	return `${count(["running", "retrying", "compacting"])} running · ${count(["queued"])} queued · ${count(["completed"])} done · ${count(["blocked"])} blocked`;
+	return `${count(["running", "retrying", "compacting"])} running · ${count(["queued"])} queued · ${count(["completed"])} done · ${count(["blocked"])} blocked${count(["checking"]) ? ` · ${count(["checking"])} checking permissions` : ""}${count(["waiting_slot"]) ? ` · ${count(["waiting_slot"])} waiting for slot` : ""}${count(["permission"]) ? ` · ${count(["permission"])} awaiting human approval` : ""}`;
 }
 export class DashboardComponent {
 	private selected = 0;
@@ -228,8 +231,37 @@ export class DashboardComponent {
 		this.detailCache = undefined;
 	}
 }
+/** Listen to actual prompt spans, not coalesced ui_prompt events (the dashboard itself is custom UI). */
+export function trackPermissionPrompts(events: ExtensionAPI["events"], changed: (active: boolean) => void) {
+	const pending = new Set<string>();
+	let disposed = false;
+	const update = (raw: unknown, showing: boolean) => {
+		if (disposed || !raw || typeof raw !== "object") return;
+		const id = (raw as { requestId?: unknown }).requestId;
+		if (typeof id !== "string" || !id || id.length > 256) return;
+		const active = pending.size > 0;
+		if (showing) pending.add(id);
+		else pending.delete(id);
+		if (active !== pending.size > 0) changed(pending.size > 0);
+	};
+	const unsubscribePrompt = events.on("permissions:ui_prompt", (raw) => update(raw, true));
+	const unsubscribeDecision = events.on("permissions:decision", (raw) => update(raw, false));
+	return {
+		get active() {
+			return pending.size > 0;
+		},
+		dispose() {
+			disposed = true;
+			unsubscribePrompt();
+			unsubscribeDecision();
+			pending.clear();
+		},
+	};
+}
+
 export interface ReviewDashboard {
 	work: WorkPhase;
+	setPermissionPromptActive(active: boolean): void;
 	show(): void;
 	hide(): void;
 	update(message: string): void;
@@ -241,6 +273,7 @@ export function createReviewDashboard(
 	options: { cancel: () => void; recovery?: RecoveryGate; readonly?: boolean },
 ): ReviewDashboard {
 	let disposed = false,
+		permissionPromptActive = false,
 		visible = false,
 		dismissed = false,
 		inWork = false,
@@ -276,6 +309,10 @@ export function createReviewDashboard(
 	};
 	const show = () => {
 		if (disposed || visible || ctx.mode !== "tui") return;
+		if (permissionPromptActive) {
+			safely(() => ctx.ui.notify("Finish the permission prompt before reopening PR status.", "info"));
+			return;
+		}
 		if (!inWork && !options.readonly) {
 			safely(() => ctx.ui.notify("Review dashboard is suspended while approval UI is active.", "info"));
 			return;
@@ -291,7 +328,8 @@ export function createReviewDashboard(
 			closeRequested = true;
 			// done() on older Pi pops the front overlay. Never call it before ours mounts.
 			if (!mounted || !finish) return;
-			mounted.focus();
+			// A permission is non-overlay UI. Never steal its focus during a deferred dashboard close.
+			if (!permissionPromptActive) mounted.focus();
 			finish();
 		};
 		close = closeOwned;
@@ -321,9 +359,11 @@ export function createReviewDashboard(
 							() => options.recovery?.retry(),
 						);
 						return {
-							render: (width: number) => component.render(width),
+							render: (width: number) => (permissionPromptActive ? [] : component.render(width)),
 							invalidate: () => component.invalidate(),
-							handleInput: (data: string) => component.handleInput(data),
+							handleInput: (data: string) => {
+								if (!permissionPromptActive) component.handleInput(data);
+							},
 							dispose: () => {
 								if (owner === generation) {
 									stopTimers();
@@ -336,7 +376,14 @@ export function createReviewDashboard(
 					},
 					{
 						overlay: true,
-						overlayOptions: { anchor: "center", width: 120, maxHeight: "100%", margin: 1 },
+						overlayOptions: {
+							anchor: "center",
+							width: 120,
+							maxHeight: "100%",
+							margin: 1,
+							// Also suppress visibility before a deferred overlay has delivered its handle.
+							visible: () => !permissionPromptActive,
+						},
 						onHandle: (value) => {
 							mounted = value;
 							if (disposed || owner !== generation || closeRequested) safely(closeOwned);
@@ -403,6 +450,15 @@ export function createReviewDashboard(
 	const unsubscribe = store.onChange(updateSummary);
 	return {
 		show,
+		setPermissionPromptActive(active) {
+			if (disposed || permissionPromptActive === active) return;
+			permissionPromptActive = active;
+			if (active) {
+				// Stay minimized across subsequent work phases; reopening is an explicit user action.
+				hide(true);
+				updateSummary();
+			}
+		},
 		hide: () => {
 			hide(true);
 			updateSummary();

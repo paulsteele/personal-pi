@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.2.0
+
+- Share the context-explicit tool evaluator with a versioned parent-owned PR permission service. Apply current global policy/auto mode, preserve main-agent and isolated worker-turn classifier memoization, and reject stale in-flight decisions without removing explicit session grants.
+- Serialize main/child human prompts with cancellation and delegated provenance. Keep guards human-only, validate all declared source effects/skill paths, and show paths even when a tool-level ask wins policy selection.
 
 ## 1.1.2
 

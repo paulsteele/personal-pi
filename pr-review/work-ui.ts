@@ -1,11 +1,9 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Container, Loader, Text } from "@earendil-works/pi-tui";
 
-/** Work phases must not open select/input/editor/custom dialogs themselves. */
+/** Ordinary dialogs stay between phases; signalled permission prompts can temporarily own the editor. */
 export type WorkPhase = <T>(label: string, task: () => Promise<T>) => Promise<T>;
 export const directWork: WorkPhase = (_label, task) => task();
-
-type PhaseResult<T> = { ok: true; value: T } | { ok: false; error: unknown };
 const cancelled = (signal: AbortSignal): unknown => signal.reason ?? new Error("PR operation cancelled");
 
 /** Race an abort without leaving an unhandled late rejection (not all UI APIs accept a signal). */
@@ -30,104 +28,136 @@ export function awaitWithSignal<T>(pending: Promise<T>, signal: AbortSignal): Pr
 	});
 }
 
-/** One visible, cancellable spinner per non-interactive phase, never around the entire command. */
-export function createWorkUI(
-	ctx: ExtensionContext,
-	signal: AbortSignal,
-	onCancel: () => void,
-): {
+export interface WorkUI {
 	run: WorkPhase;
 	update(message: string): void;
-} {
-	let update: ((message: string) => void) | undefined;
-	let busy = false;
+	setPermissionPromptActive(active: boolean): void;
+	dispose(): void;
+}
+
+/** Presentation can be replaced; the logical phase runs exactly once independently of its spinner. */
+export function createWorkUI(ctx: ExtensionContext, signal: AbortSignal, onCancel: () => void): WorkUI {
+	let phase: { label: string; started: number; detail: string } | undefined;
+	let permissionActive = false,
+		disposed = false;
+	let close: (() => void) | undefined, render: (() => void) | undefined;
+	let resume: ReturnType<typeof setImmediate> | undefined;
+	const hide = () => {
+		clearImmediate(resume);
+		resume = undefined;
+		const owned = close;
+		close = undefined;
+		render = undefined;
+		owned?.();
+	};
+	const show = () => {
+		if (!phase || disposed || signal.aborted || permissionActive || close) return;
+		const owner = phase;
+		try {
+			void ctx.ui
+				.custom<void>((tui, theme, keys, done) => {
+					const body = new Container();
+					const spinner = new Loader(
+						tui,
+						(text) => theme.fg("accent", text),
+						(text) => theme.fg("text", text),
+						owner.label,
+					);
+					body.addChild(spinner);
+					body.addChild(
+						new Text(theme.fg("dim", `${keys.getKeys("tui.select.cancel").join(" / ")} to cancel`), 1, 0),
+					);
+					let closed = false;
+					const refresh = () => {
+						if (!closed)
+							spinner.setMessage(
+								`${owner.label} · ${Math.floor((Date.now() - owner.started) / 1000)}s${owner.detail ? `\n${owner.detail}` : ""}`,
+							);
+					};
+					const heartbeat = setInterval(refresh, 1000);
+					const cleanup = () => {
+						closed = true;
+						clearInterval(heartbeat);
+						spinner.stop();
+						if (close === finish) {
+							close = undefined;
+							render = undefined;
+						}
+					};
+					const finish = () => {
+						if (closed) return;
+						cleanup();
+						done(undefined);
+					};
+					close = finish;
+					render = refresh;
+					refresh();
+					return {
+						render: (width: number) => (closed || permissionActive ? [] : body.render(width)),
+						invalidate: () => body.invalidate(),
+						handleInput: (data: string) => {
+							if (!closed && !permissionActive && keys.matches(data, "tui.select.cancel")) onCancel();
+						},
+						dispose: cleanup,
+					};
+				})
+				.catch(() => {
+					if (phase === owner) {
+						hide();
+						ctx.ui.notify("PR phase display unavailable; work continues.", "warning");
+					}
+				});
+		} catch {
+			hide();
+		}
+	};
 	return {
 		update(message) {
-			update?.(message);
+			if (phase) phase.detail = message;
+			render?.();
+		},
+		setPermissionPromptActive(active) {
+			if (disposed || permissionActive === active) return;
+			permissionActive = active;
+			if (active) hide();
+			else if (phase && !signal.aborted) {
+				// Let permission/note UI close fully; a following queued prompt cancels this restore.
+				resume = setImmediate(() => {
+					resume = undefined;
+					show();
+				});
+			}
+		},
+		dispose() {
+			disposed = true;
+			hide();
 		},
 		async run<T>(label: string, task: () => Promise<T>): Promise<T> {
 			signal.throwIfAborted();
-			if (busy) throw new Error("Cannot nest PR work phases");
-			busy = true;
-			let dispose: (() => void) | undefined;
+			if (disposed) throw new Error("PR phase UI is disposed");
+			if (phase) throw new Error("Cannot nest PR work phases");
+			phase = { label, started: Date.now(), detail: "" };
+			let launch: ReturnType<typeof setImmediate> | undefined;
 			try {
-				const result = await awaitWithSignal(
-					ctx.ui.custom<PhaseResult<T>>((tui, theme, keys, done) => {
-						const body = new Container();
-						const spinner = new Loader(
-							tui,
-							(text) => theme.fg("accent", text),
-							(text) => theme.fg("text", text),
-							label,
-						);
-						body.addChild(spinner);
-						body.addChild(
-							new Text(theme.fg("dim", `${keys.getKeys("tui.select.cancel").join(" / ")} to cancel`), 1, 0),
-						);
-						const started = Date.now();
-						let detail = "";
-						let closed = false;
-						let launch: ReturnType<typeof setImmediate> | undefined;
-						const render = () => {
-							if (!closed)
-								spinner.setMessage(
-									`${label} · ${Math.floor((Date.now() - started) / 1000)}s${detail ? `\n${detail}` : ""}`,
-								);
-						};
-						const heartbeat = setInterval(render, 1000);
-						const cleanup = () => {
-							closed = true;
-							clearInterval(heartbeat);
-							if (launch) clearImmediate(launch);
-							spinner.stop();
-							signal.removeEventListener("abort", abort);
-						};
-						const finish = (value: PhaseResult<T>) => {
-							if (closed) return;
-							cleanup();
-							done(value);
-						};
-						const abort = () => finish({ ok: false, error: cancelled(signal) });
-						dispose = cleanup;
-						update = (message) => {
-							detail = message;
-							render();
-						};
-						signal.addEventListener("abort", abort, { once: true });
-						// Let Pi mount the component first. Synchronous failures must not orphan its spinner.
-						launch = setImmediate(() => {
-							if (signal.aborted) {
-								abort();
-								return;
-							}
-							void Promise.resolve()
-								.then(task)
-								.then(
-									(value) => finish({ ok: true, value }),
-									(error) => finish({ ok: false, error }),
-								)
-								.catch(() => {
-									/* A retired session can reject its UI close; the abort race still settles. */
-								});
-						});
-						return {
-							render: (width: number) => body.render(width),
-							invalidate: () => body.invalidate(),
-							handleInput: (data: string) => {
-								if (keys.matches(data, "tui.select.cancel")) onCancel();
-							},
-							dispose: cleanup,
-						};
-					}),
-					signal,
-				);
+				show();
+				const work = new Promise<T>((resolve, reject) => {
+					// Mount the initial presenter before launching, even for synchronous task failures.
+					launch = setImmediate(() => {
+						launch = undefined;
+						if (signal.aborted) {
+							reject(cancelled(signal));
+							return;
+						}
+						Promise.resolve().then(task).then(resolve, reject);
+					});
+				});
+				const value = await awaitWithSignal(work, signal);
 				signal.throwIfAborted();
-				if (!result.ok) throw result.error;
-				return result.value;
+				return value;
 			} finally {
-				dispose?.();
-				update = undefined;
-				busy = false;
+				if (launch) clearImmediate(launch);
+				phase = undefined;
+				hide();
 			}
 		},
 	};

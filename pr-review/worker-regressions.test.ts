@@ -6,11 +6,11 @@ import {
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import { expect, it, vi } from "vitest";
-import { runWorker, type Registry } from "./worker.js";
+import type { Registry } from "./worker.js";
 import { packInlineContext } from "./worker-context.js";
 import { CoverageLedger } from "./tasks.js";
 import { FindingSchema, ReviewSubmission, VerificationSubmission, validate } from "./types.js";
-import { testConfig } from "./test-fixtures.js";
+import { runWorker, testConfig } from "./test-fixtures.js";
 
 function scriptedRegistry(
 	actions: Array<{ name: string; args: unknown }>,

@@ -18,17 +18,19 @@ import { review } from "./runner.js";
 import { approveSetup, chooseModel, setup } from "./setup.js";
 import { assertCurrent, capture, type Snapshot } from "./snapshot.js";
 import { TaskStore, RecoveryGate } from "./tasks.js";
-import { createReviewDashboard, type ReviewDashboard } from "./dashboard.js";
+import { createReviewDashboard, trackPermissionPrompts, type ReviewDashboard } from "./dashboard.js";
 import { createRunJournal } from "./journal.js";
 import { storageRoot } from "./storage.js";
-import type { Report } from "./types.js";
-import { createWorkUI, directWork, type WorkPhase } from "./work-ui.js";
+import type { Report, Repo } from "./types.js";
+import { openReviewPermissions, isPermissionBlocked, type ReviewPermissions } from "./permissions.js";
+import { createWorkUI, directWork, type WorkPhase, type WorkUI } from "./work-ui.js";
 
 interface Outcome {
 	text: string;
 	report?: Report;
 	path?: string;
 	handoff?: boolean;
+	validate?: () => Promise<{ text: string; handoff: boolean } | void>;
 }
 interface ActiveOperation {
 	controller: AbortController;
@@ -37,11 +39,22 @@ interface ActiveOperation {
 	tasks?: TaskStore;
 	recovery?: RecoveryGate;
 	dashboard?: ReviewDashboard;
+	permissions?: ReviewPermissions;
+	phaseUI?: WorkUI;
 }
 export default function prReview(pi: ExtensionAPI): void {
 	let active: ActiveOperation | undefined;
 	let lastTasks: TaskStore | undefined;
 	let lastDashboard: ReviewDashboard | undefined;
+	let permissionPrompts: ReturnType<typeof trackPermissionPrompts> | undefined;
+	const observePermissionPrompts = () => {
+		permissionPrompts ??= trackPermissionPrompts(pi.events, (showing) => {
+			// Main-agent prompts matter too: a background PR must not obscure them.
+			active?.dashboard?.setPermissionPromptActive(showing);
+			active?.phaseUI?.setPermissionPromptActive(showing);
+			lastDashboard?.setPermissionPromptActive(showing);
+		});
+	};
 	let generation = 0;
 	const cancel = () => {
 		generation++;
@@ -52,7 +65,12 @@ export default function prReview(pi: ExtensionAPI): void {
 		lastTasks = undefined;
 		active = undefined;
 	};
-	pi.on("session_shutdown", cancel);
+	pi.on("session_start", observePermissionPrompts);
+	pi.on("session_shutdown", () => {
+		cancel();
+		permissionPrompts?.dispose();
+		permissionPrompts = undefined;
+	});
 	pi.on("session_tree", cancel);
 
 	async function perform(
@@ -62,6 +80,7 @@ export default function prReview(pi: ExtensionAPI): void {
 		signal: AbortSignal,
 		progress: (message: string, taskActivity?: boolean) => void,
 		work: WorkPhase,
+		getPermissions: (repo: Repo, scope: string) => ReviewPermissions,
 		tasks?: TaskStore,
 		recovery?: RecoveryGate,
 	): Promise<Outcome> {
@@ -96,6 +115,7 @@ export default function prReview(pi: ExtensionAPI): void {
 					progress,
 					work,
 					mode === "edit" ? "edit" : mode === "regenerate" ? "regenerate" : "normal",
+					() => getPermissions(repo, "Discover repository context for PR setup"),
 				),
 			};
 		}
@@ -120,6 +140,44 @@ export default function prReview(pi: ExtensionAPI): void {
 				};
 			},
 		);
+		const permissions = getPermissions(repo, JSON.stringify(scope));
+		const captureAccess = permissions.host("Capture source for PR review", "capture");
+		const outputAccess = permissions.host("Authorize PR output", "output");
+		const authorizeOutput = async () => {
+			for (;;) {
+				try {
+					const revision = await outputAccess.authorizeSources(
+						permissions.dependencies,
+						"Publish captured/derived source in the PR report and local viewer",
+						signal,
+					);
+					if (tasks?.records.has("output"))
+						tasks.update("output", { state: "completed", endedAt: Date.now() }, "Output authorized");
+					if (revision !== outputAccess.revision()) continue;
+					return revision;
+				} catch (error) {
+					signal.throwIfAborted();
+					if (!isPermissionBlocked(error) || !recovery) throw error;
+					if (tasks && !tasks.records.has("output"))
+						tasks.add({
+							id: "output",
+							stage: "permission",
+							name: "Authorize output",
+							files: [],
+							reason: "Live permission check before disclosure",
+						});
+					await recovery.block("output", error.message);
+				}
+			}
+		};
+		const persistReport = async (report: Report) => {
+			for (;;) {
+				const revision = await authorizeOutput();
+				if (revision !== outputAccess.revision()) continue;
+				await saveReport(root, report, config.historyLimit);
+				return;
+			}
+		};
 		const journal = tasks
 			? await createRunJournal(root, repo.id, tasks, () =>
 					ctx.ui.notify("PR progress journal unavailable; review continues with live status.", "warning"),
@@ -140,7 +198,14 @@ export default function prReview(pi: ExtensionAPI): void {
 					signal.throwIfAborted();
 					tasks?.update("capture", { state: "running", startedAt: Date.now() });
 					try {
-						snapshot = await capture(repo, scope!, config, loaded.profile.draft.exclusions, signal);
+						snapshot = await capture(
+							repo,
+							scope!,
+							config,
+							captureAccess,
+							loaded.profile.draft.exclusions,
+							signal,
+						);
 						const blocked = snapshot.omitted.filter((item) => !item.reason.startsWith("excluded:"));
 						if (blocked.length) {
 							tasks?.update("capture", { files: blocked.map((item) => item.file) });
@@ -166,6 +231,7 @@ export default function prReview(pi: ExtensionAPI): void {
 				const report = await review({
 					ctx,
 					config,
+					permissions,
 					profile: loaded.profile,
 					snapshot: captured,
 					prompts,
@@ -176,11 +242,20 @@ export default function prReview(pi: ExtensionAPI): void {
 					...(tasks ? { tasks } : {}),
 					...(recovery ? { recovery } : {}),
 				});
-				await saveReport(root, report, config.historyLimit);
+				if (tasks && !tasks.records.has("output"))
+					tasks.add({
+						id: "output",
+						stage: "permission",
+						name: "Authorize output",
+						files: [],
+						reason: "Live permission check before disclosure",
+					});
+				await work("Authorizing and saving review report", () => persistReport(report));
 				const path = join(root, "repos", repo.id, "reports", `${report.id}.json`);
 				if (
 					report.status !== "cancelled" &&
 					report.status !== "no-changes" &&
+					!report.issues.some((issue) => issue.startsWith("Permission blocked:")) &&
 					captured.changes.length &&
 					!signal.aborted &&
 					report.tasks?.some((task) => task.stage === "review") &&
@@ -193,6 +268,8 @@ export default function prReview(pi: ExtensionAPI): void {
 								piPackageDir: getPackageDir(),
 								plannotatorDir,
 								report,
+								authorize: authorizeOutput,
+								permissionRevision: () => outputAccess.revision(),
 								snapshot: captured,
 								signal,
 								progress: (message) => {
@@ -223,11 +300,33 @@ export default function prReview(pi: ExtensionAPI): void {
 							error instanceof Error ? error.message : "Browser review failed; no fixes authorized",
 						);
 					}
-					await saveReport(root, report, config.historyLimit);
+					await work("Authorizing and saving browser feedback", () => persistReport(report));
 				}
 				signal.throwIfAborted();
 				tasks?.setPhase(`Review ${report.status}`);
-				return { ...reviewOutcome(report, path, prompts.text["fix-handoff"]), report, path };
+				return {
+					...reviewOutcome(report, path, prompts.text["fix-handoff"]),
+					report,
+					path,
+					...(report.browser?.requestedIds.length
+						? {
+								validate: async () => {
+									try {
+										await assertCurrent(captured, config, signal);
+									} catch (error) {
+										signal.throwIfAborted();
+										if (isPermissionBlocked(error)) throw error;
+										report.browser!.requestedIds = [];
+										report.status = "incomplete";
+										const issue = `Final source validation failed; requested fixes were withheld. ${error instanceof Error ? error.message : "Rerun /pr."}`;
+										if (!report.issues.includes(issue)) report.issues.push(issue);
+										await persistReport(report);
+										return reviewOutcome(report, path, prompts.text["fix-handoff"]);
+									}
+								},
+							}
+						: {}),
+				};
 			} finally {
 				await captured.dispose?.();
 			}
@@ -247,22 +346,28 @@ export default function prReview(pi: ExtensionAPI): void {
 		progress: (message: string, isCurrent: () => boolean) => void,
 		work: WorkPhase = directWork,
 		cancelUI?: () => void,
+		parentToolCallId?: string,
+		phaseUI?: WorkUI,
 	): Promise<Outcome> {
 		if (active)
 			throw new Error(
 				`A PR ${active.action} operation is already active in this session; cancel it before starting another.`,
 			);
+		observePermissionPrompts();
 		lastDashboard?.dispose();
 		lastDashboard = undefined;
 		const current: ActiveOperation = {
 			controller: new AbortController(),
 			action,
+			...(phaseUI ? { phaseUI } : {}),
 			cancel() {
 				this.controller.abort();
+				this.permissions?.close();
 				cancelUI?.();
 			},
 		};
 		active = current;
+		phaseUI?.setPermissionPromptActive(permissionPrompts?.active ?? false);
 		if (action === "review" && ctx.mode === "tui") {
 			current.tasks = new TaskStore();
 			current.recovery = new RecoveryGate(current.tasks, current.controller.signal);
@@ -270,6 +375,7 @@ export default function prReview(pi: ExtensionAPI): void {
 				cancel: () => current.cancel(),
 				recovery: current.recovery,
 			});
+			current.dashboard.setPermissionPromptActive(permissionPrompts?.active ?? false);
 		}
 		const abort = () => current.cancel();
 		outer?.addEventListener("abort", abort, { once: true });
@@ -299,10 +405,53 @@ export default function prReview(pi: ExtensionAPI): void {
 					}
 				},
 				current.dashboard?.work ?? work,
+				(repo, scope) =>
+					(current.permissions ??= openReviewPermissions(
+						pi,
+						ctx,
+						repo,
+						scope,
+						current.controller.signal,
+						parentToolCallId ? { parentToolCallId } : { command: `/pr${args ? ` ${args}` : ""}` },
+						(event) => current.tasks?.permission(event),
+					)),
 				current.tasks,
 				current.recovery,
 			);
 			if (active !== current || current.controller.signal.aborted) throw new Error("PR operation cancelled");
+			if (current.permissions) {
+				const permissionOwner = current.permissions;
+				const access = permissionOwner.host("Return PR output to the parent");
+				await (current.dashboard?.work ?? work)("Authorizing parent handoff", async () => {
+					for (;;) {
+						try {
+							const revision = await access.authorizeSources(
+								permissionOwner.dependencies,
+								"Return the authorized review result to the parent",
+								current.controller.signal,
+							);
+							const corrected = await outcome.validate?.();
+							if (corrected) Object.assign(outcome, corrected);
+							if (revision !== access.revision()) continue;
+							break;
+						} catch (error) {
+							current.controller.signal.throwIfAborted();
+							if (!isPermissionBlocked(error) || !current.recovery) throw error;
+							if (!current.tasks?.records.has("output"))
+								current.tasks?.add({
+									id: "output",
+									stage: "permission",
+									name: "Authorize output",
+									files: [],
+									reason: "Live permission check before parent handoff",
+								});
+							await current.recovery.block("output", error.message);
+						}
+					}
+				});
+				if (current.tasks?.records.has("output"))
+					current.tasks.update("output", { state: "completed", endedAt: Date.now() }, "Output authorized");
+			}
 			if (outcome.path) {
 				try {
 					// Optional permission-system integration: only this saved report, only
@@ -321,6 +470,8 @@ export default function prReview(pi: ExtensionAPI): void {
 			return outcome;
 		} finally {
 			outer?.removeEventListener("abort", abort);
+			current.permissions?.close();
+			current.phaseUI?.dispose();
 			current.dashboard?.dispose();
 			if (current.controller.signal.aborted) {
 				current.tasks?.cancel();
@@ -366,6 +517,7 @@ export default function prReview(pi: ExtensionAPI): void {
 						readonly: true,
 						cancel: () => lastDashboard?.dispose(),
 					});
+					lastDashboard.setPermissionPromptActive(permissionPrompts?.active ?? false);
 					lastDashboard.show();
 				} else ctx.ui.notify("No review task history in this session.", "info");
 				return;
@@ -401,6 +553,8 @@ export default function prReview(pi: ExtensionAPI): void {
 						ui?.update ?? (() => {}),
 						ui?.run ?? directWork,
 						() => controller.abort(),
+						undefined,
+						ui,
 					);
 					if (owner !== generation) return;
 					pi.sendMessage(
@@ -493,6 +647,7 @@ export default function prReview(pi: ExtensionAPI): void {
 						clearTimeout(updateTimer);
 						updateTimer = undefined;
 					},
+					_id,
 				);
 			} finally {
 				clearTimeout(updateTimer);

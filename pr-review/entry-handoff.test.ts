@@ -5,11 +5,16 @@ import { uiHarness } from "./ui.test.helpers.js";
 import type { Report } from "./types.js";
 import { providerUsage } from "./usage.js";
 import { saveReport } from "./report.js";
+import { testPermissionEvents } from "./test-fixtures.js";
+import { PermissionBlocked, PermissionScope } from "./permissions.js";
 const state = vi.hoisted(() => ({
 	report: undefined as unknown,
 	browser: undefined as unknown,
 	failViewer: false,
 	failSave: false,
+	savedReports: [] as Report[],
+	validations: 0,
+	driftAfter: Infinity,
 	captureFailures: 0,
 	viewerWait: undefined as Promise<void> | undefined,
 	emitProgress: false,
@@ -39,7 +44,9 @@ vi.mock("./snapshot.js", () => ({
 		if (state.captureFailures-- > 0) throw new Error("Fixture source temporarily unavailable");
 		return { changes: [{ file: "a.ts", patch: "fixture" }], omitted: [], dispose: async () => {} };
 	},
-	assertCurrent: async () => {},
+	assertCurrent: async () => {
+		if (++state.validations >= state.driftAfter) throw new Error("fixture source drift");
+	},
 }));
 vi.mock("./runner.js", () => ({ review: async () => structuredClone(state.report) }));
 vi.mock("./journal.js", () => ({
@@ -61,8 +68,9 @@ vi.mock("./plannotator.js", () => ({
 }));
 vi.mock("./report.js", async (original) => ({
 	...(await original<object>()),
-	saveReport: vi.fn(async () => {
+	saveReport: vi.fn(async (_root, report) => {
 		if (state.failSave) throw new Error("fixture report save failed");
+		state.savedReports.push(structuredClone(report));
 	}),
 }));
 function harness() {
@@ -127,6 +135,9 @@ function harness() {
 	} satisfies Report;
 	state.failViewer = false;
 	state.failSave = false;
+	state.savedReports = [];
+	state.validations = 0;
+	state.driftAfter = Infinity;
 	vi.mocked(saveReport).mockClear();
 	state.captureFailures = 0;
 	state.viewerWait = undefined;
@@ -149,7 +160,7 @@ function harness() {
 	let command: any, tool: any;
 	const events = new Map<string, () => void>();
 	const api = {
-		events: { emit: vi.fn() },
+		events: { ...testPermissionEvents(), emit: vi.fn(testPermissionEvents().emit) },
 		on(name: string, handler: () => void) {
 			events.set(name, handler);
 		},
@@ -164,7 +175,107 @@ function harness() {
 	extension(api as unknown as ExtensionAPI);
 	return { api, ctx, command, tool, ui, events };
 }
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+	vi.useRealTimers();
+	vi.restoreAllMocks();
+});
+it.each(["command", "tool"])(
+	"revokes persisted fix IDs after late drift during the final %s permission wait",
+	async (entry) => {
+		const h = harness();
+		state.browser = { decision: "feedback", requestedIds: ["F1"], discussion: [], feedback: "Fix F1" };
+		let blocked = true,
+			waiting = false;
+		const original = PermissionScope.prototype.authorizeSources;
+		vi.spyOn(PermissionScope.prototype, "authorizeSources").mockImplementation(async function (
+			this: PermissionScope,
+			sources,
+			description,
+			signal,
+		) {
+			if (description === "Return the authorized review result to the parent" && blocked) {
+				waiting = true;
+				throw new PermissionBlocked("denied", "Output permission denied");
+			}
+			return original.call(this, sources, description, signal);
+		});
+		let toolResult: any;
+		const pending =
+			entry === "tool"
+				? h.tool
+						.execute("fixture", {}, new AbortController().signal, () => {}, h.ctx)
+						.then((result: unknown) => {
+							toolResult = result;
+						})
+				: h.command.handler("", h.ctx);
+		await vi.waitFor(() => expect(waiting).toBe(true));
+		expect(state.validations).toBe(1);
+		expect(state.savedReports.at(-1)?.browser?.requestedIds).toEqual(["F1"]);
+		state.driftAfter = 2;
+		blocked = false;
+		await h.command.handler("retry", h.ctx);
+		await pending;
+		if (entry === "command") await vi.waitFor(() => expect(h.api.sendMessage).toHaveBeenCalledOnce());
+		const text = entry === "tool" ? toolResult.content[0].text : h.api.sendMessage.mock.calls[0]![0].content;
+		expect(text).toContain("NO FIXES AUTHORIZED");
+		expect(text).toContain("Requested verified finding IDs: []");
+		expect(text).toContain("Full structured report:");
+		expect(state.savedReports.at(-1)).toMatchObject({
+			status: "incomplete",
+			browser: { decision: "feedback", requestedIds: [] },
+		});
+		expect(state.savedReports.at(-1)?.issues.join(" ")).toContain("fixture source drift");
+	},
+);
+
+it.each(
+	["command", "tool"].flatMap((entry) =>
+		["publication", "handoff"].flatMap((stage) =>
+			["retry", "cancel"].map((control) => ({ entry, stage, control })),
+		),
+	),
+)("keeps status usable for $entry $stage output recovery ($control)", async ({ entry, stage, control }) => {
+	const h = harness();
+	state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "" };
+	let blocked = true,
+		waiting = false;
+	const original = PermissionScope.prototype.authorizeSources;
+	vi.spyOn(PermissionScope.prototype, "authorizeSources").mockImplementation(async function (
+		this: PermissionScope,
+		sources,
+		description,
+		signal,
+	) {
+		const matches =
+			stage === "handoff"
+				? description === "Return the authorized review result to the parent"
+				: description.startsWith("Publish captured/");
+		if (matches && blocked) {
+			waiting = true;
+			throw new PermissionBlocked("denied", "Output permission denied");
+		}
+		return original.call(this, sources, description, signal);
+	});
+	const pending =
+		entry === "tool"
+			? h.tool
+					.execute("fixture", {}, new AbortController().signal, () => {}, h.ctx)
+					.catch((error: unknown) => error)
+			: h.command.handler("", h.ctx);
+	await vi.waitFor(() => expect(waiting).toBe(true));
+	h.ui.state.active?.handleInput?.("cancel-key");
+	await h.command.handler("status", h.ctx);
+	await vi.waitFor(() => expect(h.ui.state.active).toBeDefined());
+	expect(h.ui.state.active!.render(120).join("\n")).toContain("Authorize output");
+	expect(h.ui.state.notifications.some((note) => note.message.includes("suspended while approval"))).toBe(
+		false,
+	);
+	blocked = false;
+	await h.command.handler(control, h.ctx);
+	await pending;
+	if (entry === "command") await vi.waitFor(() => expect(h.api.sendMessage).toHaveBeenCalledOnce());
+});
+
 it.each(["command", "tool"])("registers only the saved report before the %s handoff", async (entry) => {
 	const h = harness();
 	state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "Explain F1" };
@@ -180,14 +291,17 @@ it.each(["command", "tool"])("registers only the saved report before the %s hand
 			h.api.sendMessage.mock.invocationCallOrder[0]!,
 		);
 	}
-	expect(h.api.events.emit).toHaveBeenCalledExactlyOnceWith("permissions:allow_session_files", {
+	expect(
+		h.api.events.emit.mock.calls.filter(([name]) => name === "permissions:allow_session_files"),
+	).toHaveLength(1);
+	expect(h.api.events.emit).toHaveBeenCalledWith("permissions:allow_session_files", {
 		version: 1,
 		sessionId: "review-session",
 		paths: [path],
 	});
 	expect(path).toBe(`/private-runtime/repos/${"a".repeat(64)}/reports/fixture.json`);
 	expect(vi.mocked(saveReport).mock.invocationCallOrder.at(-1)).toBeLessThan(
-		h.api.events.emit.mock.invocationCallOrder[0]!,
+		h.api.events.emit.mock.invocationCallOrder.at(-1)!,
 	);
 });
 it("does not register a report when persistence fails", async () => {
@@ -196,13 +310,16 @@ it("does not register a report when persistence fails", async () => {
 	await expect(h.tool.execute("fixture", {}, new AbortController().signal, () => {}, h.ctx)).rejects.toThrow(
 		"fixture report save failed",
 	);
-	expect(h.api.events.emit).not.toHaveBeenCalled();
+	expect(
+		h.api.events.emit.mock.calls.filter(([name]) => name === "permissions:allow_session_files"),
+	).toHaveLength(0);
 });
 it("keeps the review result if optional permission integration fails", async () => {
 	const h = harness();
 	state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "" };
-	h.api.events.emit.mockImplementation(() => {
-		throw new Error("fixture listener failure");
+	h.api.events.emit.mockImplementation((name, data) => {
+		if (name === "permissions:allow_session_files") throw new Error("fixture listener failure");
+		testPermissionEvents().emit(name, data);
 	});
 	const result = await h.tool.execute("fixture", {}, new AbortController().signal, () => {}, h.ctx);
 	expect(result.details.path).toContain("/reports/fixture.json");
@@ -257,7 +374,9 @@ it.each(["cancel", "session_shutdown", "session_tree"])(
 			release();
 		}
 		expect(await pending).toBe(true);
-		expect(h.api.events.emit).not.toHaveBeenCalled();
+		expect(
+			h.api.events.emit.mock.calls.filter(([name]) => name === "permissions:allow_session_files"),
+		).toHaveLength(0);
 	},
 );
 it("releases Pi's serial command loop so status opens before browser feedback", async () => {
@@ -333,7 +452,9 @@ it("does not publish a detached command result or viewer URL into a retired sess
 	release();
 	await vi.advanceTimersByTimeAsync(0);
 	expect(h.api.sendMessage).not.toHaveBeenCalled();
-	expect(h.api.events.emit).not.toHaveBeenCalled();
+	expect(
+		h.api.events.emit.mock.calls.filter(([name]) => name === "permissions:allow_session_files"),
+	).toHaveLength(0);
 	expect(h.ui.state.notifications.some((note) => note.message.includes("Late browser"))).toBe(false);
 	await h.command.handler("status", h.ctx);
 	expect(h.ui.state.notifications.at(-1)?.message).toContain("No review task history");

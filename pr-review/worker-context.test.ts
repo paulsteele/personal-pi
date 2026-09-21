@@ -1,9 +1,9 @@
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import { expect, it } from "vitest";
-import { runWorker, type Registry } from "./worker.js";
+import type { Registry } from "./worker.js";
 import { CoverageLedger } from "./tasks.js";
 import { ReviewSubmission } from "./types.js";
-import { testConfig } from "./test-fixtures.js";
+import { runWorker, testConfig } from "./test-fixtures.js";
 
 it("continues beyond old turn quotas through repeated compaction without losing coverage", async () => {
 	let turns = 0,

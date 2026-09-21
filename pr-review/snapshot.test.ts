@@ -2,8 +2,8 @@ import { chmod, mkdir, rename, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { parseScope, resolveRepo } from "./git.js";
-import { assertCurrent, capture } from "./snapshot.js";
-import { commit, fixture, put, testConfig, testGit } from "./test-fixtures.js";
+import { assertCurrent } from "./snapshot.js";
+import { capture, commit, fixture, put, testConfig, testGit } from "./test-fixtures.js";
 const roots: string[] = [];
 async function repo() {
 	const r = await fixture();

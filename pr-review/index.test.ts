@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, it, vi } from "vitest";
 import extension from "./index.js";
-import { fixture, put, testDraft } from "./test-fixtures.js";
+import { fixture, put, testDraft, testPermissionEvents } from "./test-fixtures.js";
 import { uiHarness } from "./ui.test.helpers.js";
 import { DiscoverySubmission } from "./types.js";
 import { runWorker } from "./worker.js";
@@ -23,6 +23,7 @@ function harness() {
 	const tools: Array<{ name: string }> = [];
 	const events = new Map<string, (...args: any[]) => unknown>();
 	const pi = {
+		events: testPermissionEvents(),
 		registerCommand: (name: string, command: unknown) => commands.set(name, command as never),
 		registerTool: (tool: { name: string }) => tools.push(tool),
 		on: (name: string, handler: (...args: any[]) => unknown) => events.set(name, handler),
@@ -45,6 +46,7 @@ async function interactive() {
 		hasUI: true,
 		isIdle: () => true,
 		isProjectTrusted: () => true,
+		sessionManager: { getSessionId: () => "fixture-session" },
 		ui: ui.ui,
 		modelRegistry: { getAvailable: () => [{ provider: "fake", id: "independent", reasoning: false }] },
 	} as unknown as ExtensionContext;
@@ -59,7 +61,7 @@ it("registers only the unified command and review tool, without startup work", a
 	const h = harness();
 	expect([...h.commands.keys()]).toEqual(["pr"]);
 	expect(h.tools.map((tool) => tool.name)).toEqual(["pr_review"]);
-	expect([...h.events.keys()]).toEqual(["session_shutdown", "session_tree"]);
+	expect([...h.events.keys()]).toEqual(["session_start", "session_shutdown", "session_tree"]);
 	const ctx = { mode: "rpc", hasUI: true, ui: { notify: vi.fn() } } as unknown as ExtensionContext;
 	await h.commands.get("pr")!.handler("setup", ctx);
 	expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("interactive"), "warning");

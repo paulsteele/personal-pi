@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SYSTEM_PROMPT } from "#src/auto/classifier.ts";
 import permissionSystem from "#src/index.ts";
+import { REVIEW_SERVICE_CHANNEL, type DelegatedReviewService } from "#src/delegated-review.ts";
 
 type Handler = (event: any, ctx: any) => unknown;
 
@@ -1251,6 +1252,303 @@ describe("integrated permission system", () => {
     expect(log).not.toContain(secret);
     expect(log).not.toContain("very-secret-token");
     expect(log).toContain('"value":"[redacted]"');
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("delegates through the real classifier with isolated turns, live policy and command authority", async () => {
+    const h = setup({
+      permission: { "*": "ask" },
+      modelReply: {
+        content: [{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "allow" } }],
+      },
+    });
+    await h.handlers.get("session_start")?.({}, h.ctx);
+    let service!: DelegatedReviewService;
+    h.events.emit(REVIEW_SERVICE_CHANNEL, {
+      version: 1,
+      accept: (value: DelegatedReviewService) => {
+        service = value;
+      },
+    });
+    expect(service.version).toBe(1);
+    const operation = service.open({
+      id: "review",
+      sessionId: "current-session",
+      cwd: "/repo",
+      command: "/pr --base main",
+      scope: "merge-base main",
+      parentToolCallId: "pr-tool",
+      signal: new AbortController().signal,
+    });
+    const spec = {
+      name: "Correctness",
+      assignment: "Inspect callers; not new user authority",
+      model: "fake/reviewer",
+      tools: ["read"],
+      kind: "worker" as const,
+    };
+    const a = operation.task({ ...spec, id: "a" });
+    const b = operation.task({ ...spec, id: "b" });
+    a.nextTurn();
+    b.nextTurn();
+    const action = {
+      toolName: "read",
+      input: { path: "/repo/a.ts", offset: 1 },
+      effects: [{ path: "/repo/a.ts", version: "blob1", range: "1:20" }],
+    };
+    expect((await a.check(action)).kind).toBe("allowed");
+    expect((await a.check(action)).kind).toBe("allowed");
+    expect(h.ctx.modelRegistry.complete).toHaveBeenCalledTimes(1);
+    expect((await b.check(action)).kind).toBe("allowed");
+    expect(h.ctx.modelRegistry.complete).toHaveBeenCalledTimes(2);
+    a.nextTurn();
+    expect((await a.check(action)).kind).toBe("allowed");
+    expect(h.ctx.modelRegistry.complete).toHaveBeenCalledTimes(3);
+    expect((await a.check({ ...action, input: { path: "/repo/a.ts", offset: 21 } })).kind).toBe(
+      "allowed",
+    );
+    expect(h.ctx.modelRegistry.complete).toHaveBeenCalledTimes(4);
+    const prompt = JSON.stringify(h.ctx.modelRegistry.complete.mock.calls[0]?.[1]);
+    expect(prompt).toContain("worker: Correctness");
+    expect(prompt).toContain("accessed path: /repo/a.ts");
+    expect(prompt).toContain("User invoked /pr --base main");
+    expect(prompt).toContain("not additional user authority");
+    const path = join(h.agentDir, "extensions/pi-permission-system/config.json");
+    const config = JSON.parse(readFileSync(path, "utf8"));
+    writeFileSync(
+      path,
+      JSON.stringify({ ...config, permission: { "*": "allow", path: { "*": "deny" } } }),
+    );
+    expect((await a.check(action)).kind).toBe("denied");
+    expect(h.ctx.modelRegistry.complete).toHaveBeenCalledTimes(4);
+    expect(() => operation.task({ ...spec, id: "shell", tools: ["bash"] })).toThrow("capabilities");
+    await h.handlers.get("session_tree")?.({}, h.ctx);
+    expect((await a.check(action)).kind).toBe("cancelled");
+    await h.handlers.get("session_shutdown")?.({}, h.ctx);
+    let responds = false;
+    h.events.emit(REVIEW_SERVICE_CHANNEL, {
+      version: 1,
+      accept: () => {
+        responds = true;
+      },
+    });
+    expect(responds).toBe(false);
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("queues child and main approvals together and cancels a queued child without showing it", async () => {
+    const h = setup({ permission: { "*": "ask" }, enabledByDefault: false });
+    await h.handlers.get("session_start")?.({}, h.ctx);
+    let service!: DelegatedReviewService;
+    h.events.emit(REVIEW_SERVICE_CHANNEL, {
+      version: 1,
+      accept: (value: DelegatedReviewService) => {
+        service = value;
+      },
+    });
+    const operation = service.open({
+      id: "queued",
+      sessionId: "current-session",
+      cwd: "/repo",
+      scope: "local",
+      parentToolCallId: "pr-outer",
+      signal: new AbortController().signal,
+    });
+    const spec = {
+      name: "Worker",
+      assignment: "Review source",
+      model: "fake/reviewer",
+      tools: ["read"],
+      kind: "worker" as const,
+    };
+    const a = operation.task({ ...spec, id: "a" });
+    const abortB = new AbortController();
+    const b = operation.task({ ...spec, id: "b", signal: abortB.signal });
+    const shown: Array<(answer: string | undefined) => void> = [];
+    const promptEvents: any[] = [];
+    h.events.on("permissions:ui_prompt", (event) => promptEvents.push(event));
+    h.ctx.ui.select.mockImplementation(
+      (_title, _labels, options) =>
+        new Promise((resolve) => {
+          shown.push(resolve);
+          options?.signal.addEventListener("abort", () => resolve(undefined), { once: true });
+        }),
+    );
+    const action = { toolName: "read", input: { path: "/repo/a.ts" } };
+    const first = a.check(action);
+    await vi.waitFor(() => expect(shown).toHaveLength(1));
+    const second = b.check(action);
+    const main = h.handlers.get("tool_call")?.({ ...action, toolCallId: "main-read" }, h.ctx);
+    abortB.abort();
+    expect((await second).kind).toBe("cancelled");
+    shown[0]?.("y approve once");
+    expect((await first).kind).toBe("allowed");
+    await vi.waitFor(() => expect(shown).toHaveLength(2));
+    shown[1]?.("n deny");
+    expect(await main).toMatchObject({ block: true });
+    expect(promptEvents.map((event) => event.toolCallId)).toEqual(["pr-outer", "main-read"]);
+    expect(promptEvents[0].delegated).toMatchObject({ taskId: "a", operationId: "queued" });
+    expect(promptEvents[1].delegated).toBeUndefined();
+    operation.close();
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("uses host-discovered skill metadata for command-launched source aliases before a chat turn", async () => {
+    const h = setup({ permission: { "*": "allow", skill: { blocked: "deny" } } });
+    await h.handlers.get("session_start")?.({}, h.ctx);
+    let service!: DelegatedReviewService;
+    h.events.emit(REVIEW_SERVICE_CHANNEL, {
+      version: 1,
+      accept: (value: DelegatedReviewService) => {
+        service = value;
+      },
+    });
+    const operation = service.open({
+      id: "skills",
+      sessionId: "current-session",
+      cwd: "/repo",
+      scope: "local",
+      command: "/pr",
+      skills: [{ name: "blocked", filePath: "/repo/blocked/SKILL.md", baseDir: "/repo/blocked" }],
+      signal: new AbortController().signal,
+    });
+    const task = operation.task({
+      id: "reader",
+      name: "Reader",
+      assignment: "Read baseline",
+      model: "fake",
+      tools: ["read_before"],
+      kind: "worker",
+    });
+    expect(
+      (
+        await task.check({
+          toolName: "read_before",
+          input: { path: "/repo/public.ts" },
+          effects: [{ path: "/repo/blocked/reference.md", side: "old" }],
+        })
+      ).kind,
+    ).toBe("denied");
+    expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
+    operation.close();
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("does not cache host preparation verdicts or admit a missing configuration", async () => {
+    const h = setup({
+      permission: { "*": "ask" },
+      modelReply: {
+        content: [{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "allow" } }],
+      },
+    });
+    await h.handlers.get("session_start")?.({}, h.ctx);
+    let service!: DelegatedReviewService;
+    h.events.emit(REVIEW_SERVICE_CHANNEL, {
+      version: 1,
+      accept: (value: DelegatedReviewService) => {
+        service = value;
+      },
+    });
+    const options = {
+      id: "prep",
+      sessionId: "current-session",
+      cwd: "/repo",
+      scope: "local",
+      signal: new AbortController().signal,
+    };
+    const operation = service.open(options);
+    const task = operation.task({
+      id: "capture",
+      name: "Capture",
+      assignment: "Prepare local diff",
+      model: "local",
+      tools: ["read"],
+      kind: "host",
+    });
+    const action = { toolName: "read", input: { path: "/repo/a.ts" } };
+    await task.check(action);
+    await task.check(action);
+    expect(h.ctx.modelRegistry.complete).toHaveBeenCalledTimes(2);
+    operation.close();
+    rmSync(join(h.agentDir, "extensions/pi-permission-system/config.json"));
+    expect(() => service.open(options)).toThrow("config");
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("supersedes an answer when policy changed while its human prompt was visible", async () => {
+    const h = setup({ permission: { "*": "ask" }, enabledByDefault: false, mode: "tui" });
+    const path = join(h.agentDir, "extensions/pi-permission-system/config.json");
+    const config = JSON.parse(readFileSync(path, "utf8"));
+    h.ctx.ui.custom.mockImplementationOnce(async () => {
+      writeFileSync(path, JSON.stringify({ ...config, permission: { "*": "deny" } }));
+      return "approve";
+    });
+    await h.handlers.get("session_start")?.({}, h.ctx);
+    const result = await h.handlers.get("tool_call")?.(
+      { toolName: "read", toolCallId: "stale-human", input: { path: "/repo/public.ts" } },
+      h.ctx,
+    );
+    expect(result).toMatchObject({ block: true, reason: "Denied by permission policy." });
+    expect(h.ctx.ui.custom).toHaveBeenCalledTimes(1);
+    expect(h.entries.at(-1)?.data).toMatchObject({ allowed: false, status: "superseded" });
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("toggles auto relative to the current disk config without resetting the session", async () => {
+    const h = setup({ enabledByDefault: true });
+    await h.handlers.get("session_start")?.({}, h.ctx);
+    const path = join(h.agentDir, "extensions/pi-permission-system/config.json");
+    const config = JSON.parse(readFileSync(path, "utf8"));
+    writeFileSync(
+      path,
+      JSON.stringify({ ...config, auto: { ...config.auto, enabledByDefault: false } }),
+    );
+    const command = h.pi.registerCommand.mock.calls.find(([name]) => name === "auto")?.[1];
+    await command.handler("", h.ctx);
+    expect(JSON.parse(readFileSync(path, "utf8")).auto.enabledByDefault).toBe(true);
+    rmSync(h.agentDir, { recursive: true, force: true });
+  });
+
+  it("retains turn-local auto reuse but invalidates it on live rules and auto changes", async () => {
+    const h = setup({
+      permission: { "*": "ask" },
+      modelReply: {
+        content: [{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "allow" } }],
+      },
+    });
+    const path = join(h.agentDir, "extensions/pi-permission-system/config.json");
+    const config = JSON.parse(readFileSync(path, "utf8"));
+    const call = () =>
+      h.handlers.get("tool_call")?.(
+        { toolName: "read", input: { path: "/repo/a.ts" }, toolCallId: "live" },
+        h.ctx,
+      );
+    await h.handlers.get("session_start")?.({}, h.ctx);
+    expect(await call()).toEqual({});
+    expect(await call()).toEqual({});
+    expect(h.ctx.modelRegistry.complete).toHaveBeenCalledTimes(1);
+    await h.handlers.get("turn_start")?.({}, h.ctx);
+    expect(await call()).toEqual({});
+    expect(h.ctx.modelRegistry.complete).toHaveBeenCalledTimes(2);
+    writeFileSync(
+      path,
+      JSON.stringify({ ...config, permission: { "*": "allow", path: { "*": "deny" } } }),
+    );
+    expect(await call()).toMatchObject({ block: true });
+    expect(h.ctx.modelRegistry.complete).toHaveBeenCalledTimes(2);
+    writeFileSync(
+      path,
+      JSON.stringify({ ...config, auto: { ...config.auto, enabledByDefault: false } }),
+    );
+    h.ctx.ui.select.mockResolvedValueOnce("n deny");
+    expect(await call()).toMatchObject({ block: true });
+    expect(h.ctx.ui.select).toHaveBeenCalledTimes(1);
+    writeFileSync(path, "invalid");
+    expect(await call()).toMatchObject({
+      block: true,
+      reason: expect.stringContaining("unavailable"),
+    });
+    expect(h.ctx.ui.select).toHaveBeenCalledTimes(1);
     rmSync(h.agentDir, { recursive: true, force: true });
   });
 

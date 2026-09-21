@@ -10,8 +10,7 @@ import {
 	viewerDiffType,
 	type Seed,
 } from "./plannotator.js";
-import { capture } from "./snapshot.js";
-import { commit, fixture, put, testConfig } from "./test-fixtures.js";
+import { capture, commit, fixture, put, testConfig } from "./test-fixtures.js";
 import type { Report } from "./types.js";
 const roots: string[] = [];
 afterEach(async () => {
@@ -37,25 +36,24 @@ async function plannotatorFixture(version: unknown): Promise<string> {
 	await put(root, "review-editor.html", "");
 	return root;
 }
-it.each(["0.27.12", "0.27.14"])(
-	"discovers supported Plannotator %s from loaded commands",
-	async (version) => {
-		const root = await plannotatorFixture(version);
-		await expect(installedPlannotator(plannotatorCommands(root))).resolves.toBe(root);
-		await expect(
-			installedPlannotator(plannotatorCommands(join(root, "index.ts"), "plannotator-review:1")),
-		).resolves.toBe(root);
-	},
-);
-it.each(["0.27.11", "0.27.13", "0.27.15", "0.27.14-beta.1", "0.28.0", undefined, null, 27])(
-	"refuses unvalidated Plannotator version %s with actionable diagnostics",
-	async (version) => {
-		const root = await plannotatorFixture(version);
-		await expect(installedPlannotator(plannotatorCommands(root))).rejects.toThrow(
-			`Installed Plannotator version ${typeof version === "string" ? version : "(missing or invalid)"} is not yet validated for PR review. Supported versions: 0.27.12, 0.27.14. Load a supported version, then run /reload.`,
-		);
-	},
-);
+it.each([
+	"0.27.11",
+	"0.27.12",
+	"0.27.14",
+	"0.27.16",
+	"0.27.14-beta.1",
+	"0.28.0",
+	"99.0.0",
+	undefined,
+	null,
+	27,
+])("discovers loaded Plannotator without gating version metadata %s", async (version) => {
+	const root = await plannotatorFixture(version);
+	await expect(installedPlannotator(plannotatorCommands(root))).resolves.toBe(root);
+	await expect(
+		installedPlannotator(plannotatorCommands(join(root, "index.ts"), "plannotator-review:1")),
+	).resolves.toBe(root);
+});
 it("requires a loaded Plannotator package and its viewer assets", async () => {
 	await expect(installedPlannotator({ getCommands: () => [] })).rejects.toThrow("already-loaded");
 	const root = await plannotatorFixture("0.27.14");
@@ -189,6 +187,8 @@ it.skipIf(!process.env.PR_REVIEW_TEST_PI_PACKAGE || !process.env.PR_REVIEW_TEST_
 		let submission: Promise<void> | undefined;
 		let probeFailure: unknown;
 		const controller = new AbortController();
+		let permissionRevision = "old",
+			authorizationCalls = 0;
 		const result = await present({
 			root,
 			piPackageDir: process.env.PR_REVIEW_TEST_PI_PACKAGE!,
@@ -197,6 +197,15 @@ it.skipIf(!process.env.PR_REVIEW_TEST_PI_PACKAGE || !process.env.PR_REVIEW_TEST_
 			snapshot,
 			signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]),
 			openBrowser: false,
+			authorize: async () => {
+				authorizationCalls++;
+				if (authorizationCalls === 2) {
+					permissionRevision = "new";
+					return "old";
+				}
+				return permissionRevision;
+			},
+			permissionRevision: () => permissionRevision,
 			progress(message) {
 				const url = message.match(/http:\/\/\S+/)?.[0];
 				if (url)
@@ -222,6 +231,7 @@ it.skipIf(!process.env.PR_REVIEW_TEST_PI_PACKAGE || !process.env.PR_REVIEW_TEST_
 			throw probeFailure ?? error;
 		});
 		await submission;
+		expect(authorizationCalls).toBe(3);
 		expect(result.decision).toBe("lgtm");
 		expect(result.requestedIds).toEqual([]);
 		expect(await readdir(join(root, "viewer-sessions"))).toEqual([]);

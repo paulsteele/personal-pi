@@ -17,7 +17,7 @@ A code-owned review pipeline with versioned Markdown methodology, private genera
 - `/pr --base REF` — merge-base through the working tree.
 - Add `--committed-only` to an explicit commit/base scope to use HEAD.
 
-For local development in another checkout, start Pi there with `pi -e /absolute/path/to/pi-extensions/pr-review/index.ts`; this loads the existing local entry without installing a package. This repository's development settings load it automatically here after `/reload`. Global release deployment is a separate action, not performed by this feature.
+For local development in another checkout, start Pi there with `pi -e /absolute/path/to/pi-extensions/pr-review/index.ts` and the compatible Permission System extension loaded; this loads the existing local PR entry without installing a package. This repository's development settings load it automatically here after `/reload`. Global release deployment is a separate action, not performed by this feature.
 
 Setup is complete after `/pr setup approve` activates the saved draft. Edit `profile-draft.json` in your preferred editor; the full path is printed in the transcript. No terminal editor is needed. Choosing a model alone does not activate a profile. Subsequent code, README, manifest, lockfile, or convention changes **do not require setup again**. Old profiles stay compatible; captured current code/docs take precedence over historical profile descriptions.
 
@@ -36,6 +36,59 @@ There are **no work-total job, reviewer, turn, token-spend or worker-duration qu
 A reviewer can explicitly report a blocker for Retry/Cancel; unrelated workers continue instead of waiting behind a global recovery gate. Optional scout failures fall back to the saved roster and deterministic areas, and optional consolidation failures retain exact grouping. Genuine failures do not silently skip mandatory review work. Unsupported content blocks completion rather than being silently skipped. Explicitly approved profile exclusions remain outside scope. If repair requires changing captured source, cancel and start a new review—retry never mixes live edits into an existing snapshot.
 
 `pr_review` exposes the same pipeline to the main agent. Interactive Pi TUI and project trust are required. There is no implicit setup, automatic refresh, separate profile command, or hosted-PR fetching. Existing `/skill:pr` remains unchanged.
+
+## Permission integration
+
+Source-consuming setup and reviews require the **already-loaded local Permission System extension** and
+its existing global config. There is no bundled fallback, PR-specific policy file, or general subagent
+runtime. Status/model selection and source-free setup edit/approve remain available without the service.
+
+The normal pipeline applies: configured deny blocks, deterministic guards require a human, configured
+allow proceeds, and ordinary ask uses the classifier with `/auto` on or a human with auto off. Classifier
+failure escalates to a human or blocks without UI. Worker tool capabilities remain snapshot-only/read-only.
+A tool-level allow cannot bypass the paths/read effects underneath it.
+
+Policy and auto mode are **live at action boundaries**, including after pending decisions and before
+outgoing context. Editing filepath rules or toggling `/auto` needs no restart. Invalid/unreadable config
+fails closed. Existing main-agent automatic-allow memoization is preserved and used separately within
+each worker turn; changes to relevant policy/context, a new turn, or retry invalidate it. There are no
+run-long file grants, shared worker approvals, or cached human answers. Parent session grants are not
+implicitly inherited by workers.
+
+Human prompts run in a shared parent queue and identify the worker/action. The PR dashboard automatically
+minimizes before any permission prompt—including a main-agent prompt during background review—and cannot
+reopen while that decision is pending. It stays minimized afterward until you use `/pr status`, so later
+work phases cannot unexpectedly steal focus. Minimizing the dashboard makes no permission decision; Esc
+on the visible permission controls still means deny. Setup's separate phase spinner also yields to permission
+and note controls, then restores its progress/cancel UI without restarting the worker. Automatic checks,
+execution-slot waits, and queued/visible human approvals have distinct task statuses. Source preparation,
+context packing, and provider preflight keep their bounded execution slot; explicit recovery can release
+it, and slot reacquisition is labeled separately from permission checking.
+Cancellation removes queued requests and dismisses active approval UI. Denied mandatory inputs prevent
+completion; `/pr retry` explicitly rechecks under current rules against the same valid snapshot.
+
+Checks cover preparation, changed/unchanged/baseline source, read/search/diff tools, inline resources,
+source-derived candidate transfers, report publication and viewer/handoff. Each recipient worker must
+be authorized; a capture approval or another worker's finding is not a grant. Current-run outputs carry
+a conservative host-owned source dependency set, so text quotes cannot bypass a recipient's restrictions.
+Source paths and metadata—not protected file contents—are supplied when requesting permission. Each
+outgoing dependency set must finish authorization under one stable revision; a change restarts the complete
+pass. Bulk checks yield to terminal input/cancellation, and provider dispatch rechecks freshness after
+authentication and other awaited preflight work, including compaction. Tool coverage/checkpoint updates
+commit only after the outer permission guard accepts the result.
+
+Approved profile exclusions control review scope, **not file access**. Excluded/unneeded dirty files are
+kept as metadata until requested; a later read requires permission and matching captured identity. If
+that deferred source has changed, start a fresh review instead of mixing newer bytes into the snapshot.
+Denied mandatory guidance is not treated as a stale missing document. Search reports denied/unavailable
+coverage rather than silently returning a complete negative result.
+
+Snapshot and provider prompt caches remain performance mechanisms, not permission grants. New denials
+also apply to cached source and outgoing worker history/summary dependencies. Already sent context,
+older approved profiles, and historical reports cannot be retroactively recalled or scrubbed. Git may
+internally inspect files/attributes during metadata discovery; this integration is not an OS sandbox or
+a content-based secret scanner. Infrastructure storage/authentication and trusted extension code retain
+their ordinary authority.
 
 ## Fixed rules versus generated context
 
@@ -67,13 +120,14 @@ result. Reading/searching that report no longer needs a separate external-direct
 This does not allow the reports directory, other runs/repositories, profiles, snapshots, or viewer data.
 The grant is memory-only, ends on session shutdown/replacement or `/reload`, and never changes permission
 configuration. Normal tool/Bash/path rules and safety guards still apply; the allowance is not read-only
-enforcement and does not authorize fixes. Without the permission extension, review works as before.
+enforcement and does not authorize fixes. Source-consuming review now requires the permission extension;
+this exact-file allowance is still a separate, optional convenience for the parent report read.
 
 The default remains **four concurrent workers**. Schema-version-2 preferences contain model/reasoning, concurrency, report retention, and `requestTimeoutMs` (default five minutes **per provider request**, not per reviewer). A request timeout causes recovery or a pause, never quota-based scope removal. Existing v1 preferences are normalized on read with a visible notice: old job/reviewer/turn/input/file/diff quotas are ignored. Loading does not rewrite config; a later explicit model save writes v2. Invalid/unknown settings are still refused. Full-scope reviews can take longer and incur more cost than capped partial runs; use the task metrics rather than assuming fewer tasks always means lower latency.
 
 ## Browser workflow
 
-Requires an **already-loaded Plannotator Pi extension**, currently compatibility-gated to `0.27.12` and `0.27.14`. The harness never installs, updates, forks, vendors, or patches Plannotator. Unvalidated versions are refused with the installed and supported versions in the error; after loading a supported version or updating this harness, run `/reload` and retry `/pr`.
+Requires an **already-loaded Plannotator Pi extension**, with no version allowlist. The installed package must provide the review server, viewer assets, and APIs used by the isolated helper. Missing APIs or invalid viewer responses still fail closed without authorizing fixes. The harness never installs, updates, forks, vendors, or patches Plannotator. After loading or changing the extension, run `/reload` and retry `/pr`.
 
 The existing server and HTML renderer run in a small isolated UI helper—not another Pi agent. The parent streams the captured diff into a private viewer-owned aggregate with backpressure; only the helper materializes it for the renderer. The helper checks the owning parent and refuses symlinked/non-regular inputs. It receives only the captured diff and verified annotations. Ask AI and sharing are disabled for this helper, and its data is confined to private Pi storage. Your ordinary Plannotator settings and other open reviews are untouched.
 
@@ -84,6 +138,10 @@ The browser is a snapshot-only diff view with surrounding context, not a live re
 - **Approve/LGTM or Close** requests no automatic fixes. Approval notes may still be discussed.
 
 Every returned command/tool report explicitly states its browser outcome and authorized IDs—even when none are authorized or the viewer fails. Approval notes are handed back for discussion, and truncated output retains a full-report locator. No second Pi selection screen is shown. Source drift, malformed/stale IDs, a failed viewer, or incomplete seeding cannot authorize fixes. The main agent reads the full report/feedback before implementing requested changes under its normal permissions and test workflow. This harness does not apply patches or run project tests itself.
+
+Output-permission recovery remains inside an inspectable work phase. A failure of the final source check
+clears persisted requested fix IDs, marks the report incomplete, and returns an updated no-fix handoff with
+the full report locator.
 
 ## Review guarantees and limits
 
@@ -106,7 +164,7 @@ bun run --cwd pr-review check
 bun run test:integration
 ```
 
-The normal tests use synthetic repositories and fake providers. The separate compatibility probe uses existing installations supplied explicitly, never downloads. It intentionally accepts candidate Plannotator versions so they can be checked before adding them to the shared production allowlist in `plannotator-version.ts`:
+The normal tests use synthetic repositories and fake providers. The separate compatibility probe uses existing installations supplied explicitly, never downloads. It checks the installed review server and captured-annotation workflow rather than a version allowlist; use it after upgrades to detect API incompatibilities:
 
 ```sh
 PR_REVIEW_TEST_PI_PACKAGE=/path/to/installed/pi-coding-agent \

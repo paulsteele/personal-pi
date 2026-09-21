@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## 1.2.0
+
+- Validate outgoing source sets under one stable permission revision, yield during bulk checks, and recheck at provider dispatch after authentication/preflight waits. Preserve the same safeguards for compaction and publication.
+- Commit coverage and checkpoint bookkeeping only after the outer tool guard accepts the result; keep context preparation/residency within the configured worker concurrency.
+- Yield and restore setup's phase spinner around human permissions, keep output recovery inspectable, and retry permission-blocked optional stages explicitly rather than permanently skipping them.
+- Correct persisted and returned fix authorization after final source drift, preserving browser feedback and the report locator. Distinguish automatic checks, slot waits, and actual human approvals in task status.
+
+- Minimize PR status before permission controls appear, including main-agent prompts during background reviews. Prevent reopening or deferred dashboard mounting from obscuring permission input, retain explicit `/pr status` reopening afterward, and cover real installed-Pi overlay/input behavior.
+
+- Remove Plannotator version restrictions from discovery and the isolated viewer host. Accept any loaded release while retaining package identity, required assets/server API, isolation, and browser-response validation.
+
+- Require the loaded Permission System for source-consuming reviews/setup and route capture, worker tools, inline source and derived-result transfers through the normal live policy/classifier/human pipeline. Keep PR read-only and retain its current worker engine; no generic runtime or bundled permission copy.
+- Isolate turn-local classifier reuse, queue parent approvals, expose permission wait/retry states, and recheck report/viewer/parent output. Deferred excluded source retains snapshot identity; denied searches and required context are explicit, and source/body caches never grant access.
 
 - Add Human Readability as a fifth mandatory whole-change baseline, covering high-level intent, accurate names, intent-revealing functions rather than temporal narration, and reviewable diff hunks. Require concrete, independently verified comprehension problems rather than cosmetic preferences; support optional profile supplements without requiring a new baseline entry.
 

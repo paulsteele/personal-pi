@@ -30,11 +30,19 @@ import {
 } from "./types.js";
 import { chooseMany, ReviewCancelled } from "./ui.js";
 import { runWorker, type WorkerResult } from "./worker.js";
+import {
+	PermissionBlocked,
+	isPermissionBlocked,
+	WORKER_CONTROL_TOOLS,
+	type ReviewPermissions,
+	type SourceEffect,
+} from "./permissions.js";
 import { directWork, type WorkPhase } from "./work-ui.js";
 import { packVerificationInputs } from "./batching.js";
 import { planReviewTasks, reviewAreas } from "./planning.js";
 import { redact } from "./report.js";
 import { CoverageLedger, RecoveryGate, TaskStore } from "./tasks.js";
+import { deferToolCommit } from "./tool-commit.js";
 
 export type SuspendWork = <T>(wait: () => Promise<T>) => Promise<T>;
 
@@ -44,6 +52,7 @@ export async function boundedMap<T, U>(
 	concurrency: number,
 	signal: AbortSignal,
 	run: (item: T, index: number, suspend: SuspendWork) => Promise<U>,
+	onPermitWait?: (item: T, waiting: boolean, index: number) => void,
 ): Promise<U[]> {
 	if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error("Invalid concurrency");
 	type Release = () => void;
@@ -75,7 +84,16 @@ export async function boundedMap<T, U>(
 	try {
 		const workers = await Promise.allSettled(
 			items.map(async (item, index) => {
+				const notify = (waiting: boolean) => {
+					try {
+						onPermitWait?.(item, waiting, index);
+					} catch {
+						/* presentation only */
+					}
+				};
+				notify(true);
 				let release: Release | undefined = await acquire();
+				notify(false);
 				const suspend: SuspendWork = async (wait) => {
 					if (!release) throw new Error("Task is already suspended");
 					release();
@@ -83,7 +101,9 @@ export async function boundedMap<T, U>(
 					try {
 						return await wait();
 					} finally {
+						notify(true);
 						release = await acquire();
+						notify(false);
 					}
 				};
 				try {
@@ -113,8 +133,12 @@ export async function review(options: {
 	work?: WorkPhase;
 	tasks?: TaskStore;
 	recovery?: RecoveryGate;
+	permissions?: ReviewPermissions;
 }): Promise<Report> {
 	const { ctx, config, profile, snapshot, prompts, signal, progress } = options;
+	const permissions = options.permissions;
+	if (!permissions || !snapshot.withPermissions)
+		throw new PermissionBlocked("unavailable", "PR workers require task-bound permissions");
 	const work = options.work ?? directWork,
 		tasks = options.tasks ?? new TaskStore();
 	const started = Date.now();
@@ -146,6 +170,7 @@ export async function review(options: {
 	};
 	tasks.model = report.model;
 	const candidates: Candidate[] = [];
+	const candidateSources = new Map<string, SourceEffect[]>();
 	const queued = (id: string, stage: string, name: string, files: string[], reason: string) => {
 		tasks.add({ id, stage, name, files, reason });
 	};
@@ -154,11 +179,12 @@ export async function review(options: {
 		schema: T,
 		stage: Parameters<typeof systemPrompt>[1],
 		input: unknown,
-		tools: AgentTool[],
+		tools: AgentTool[] | ((view: Snapshot) => AgentTool[]),
 		coverage?: CoverageLedger,
-		validateResult?: (value: Static<T>) => Promise<void> | void,
+		validateResult?: (value: Static<T>, view: Snapshot) => Promise<void> | void,
 		candidateResources: Candidate[] = [],
 		suspend: SuspendWork = (wait) => wait(),
+		dependencies: readonly SourceEffect[] = [],
 	): Promise<WorkerResult<Static<T>>> {
 		const optional = stage === "propose" || stage === "consolidate";
 		const recover = async (reason: string) => {
@@ -166,6 +192,28 @@ export async function review(options: {
 			tasks.update(id, { state: "running" }, "Execution resumed");
 		};
 		const task = tasks.records.get(id)!;
+		const declaredTools = typeof tools === "function" ? tools(snapshot) : tools;
+		const access = permissions!.task({
+			id,
+			name: task.name,
+			assignment: `PR ${stage} task for ${task.files.length} captured files; read-only repository context as needed.`,
+			model: `${config.provider}/${config.model}`,
+			tools: [...new Set(["read", ...declaredTools.map((tool) => tool.name), ...WORKER_CONTROL_TOOLS])],
+			kind: "worker",
+			signal,
+		});
+		const workerSnapshot = snapshot.withPermissions!(access);
+		const workerTools = typeof tools === "function" ? tools(workerSnapshot) : tools;
+		const checkPermissions: SuspendWork = async (check) => {
+			const prior = task.state;
+			tasks.update(id, { state: "checking" }, "Checking permissions");
+			try {
+				// Retain the execution slot: this worker may already own a full packed context.
+				return await check();
+			} finally {
+				if (task.state === "checking") tasks.update(id, { state: prior });
+			}
+		};
 		tasks.update(id, {
 			state: "running",
 			startedAt: task.startedAt ?? Date.now(),
@@ -185,121 +233,149 @@ export async function review(options: {
 			.map((file) => `doc:${file}`)
 			.filter((id) => coverage?.ids.includes(id))
 			.sort();
-		for (;;) {
-			coverage?.resetDelivery();
-			const priorTurns = task.turns;
-			async function* resources() {
-				for (const candidate of candidateResources) {
-					signal.throwIfAborted();
-					const text = JSON.stringify(candidate);
-					yield { id: `candidate:${candidate.id}`, text, total: text.length };
+		try {
+			for (;;) {
+				access.endTurn();
+				coverage?.resetDelivery();
+				const priorTurns = task.turns;
+				async function* resources() {
+					for (const candidate of candidateResources) {
+						signal.throwIfAborted();
+						const text = JSON.stringify(candidate);
+						yield { id: `candidate:${candidate.id}`, text, total: text.length };
+					}
+					yield* contextResources(
+						workerSnapshot,
+						coverage!.ids
+							.filter((id) => id.startsWith("diff:") || id.startsWith("doc:"))
+							.sort(
+								(a, b) => Number(b.startsWith("doc:")) - Number(a.startsWith("doc:")) || a.localeCompare(b),
+							),
+						resourceLimit,
+						signal,
+					);
 				}
-				yield* contextResources(
-					snapshot,
-					coverage!.ids
-						.filter((id) => id.startsWith("diff:") || id.startsWith("doc:"))
-						.sort(
-							(a, b) => Number(b.startsWith("doc:")) - Number(a.startsWith("doc:")) || a.localeCompare(b),
+				let result: WorkerResult<Static<T>>;
+				try {
+					await checkPermissions(() =>
+						access.authorizeSources(
+							dependencies,
+							"Receive source-derived input from previous review stages",
+							signal,
 						),
-					resourceLimit,
-					signal,
-				);
-			}
-			const result = await runWorker({
-				registry: ctx.modelRegistry,
-				config,
-				schema,
-				system: systemPrompt(prompts, stage),
-				input,
-				sessionId,
-				continuing: task.requests > 0,
-				assignment: assignedLens
-					? { id: assignedLens.id, name: assignedLens.name, focus: assignedLens.focus }
-					: undefined,
-				...(coverage
-					? { sharedResources: contextResources(snapshot, sharedIds, resourceLimit, signal) }
-					: {}),
-				tools,
-				signal,
-				coverage,
-				resources: coverage ? resources() : undefined,
-				allowAdvisories: stage === "architecture",
-				allowFindings: stage === "architecture" || stage === "reviewer",
-				validateResult: async (value) => {
-					if (stage === "reviewer" || stage === "architecture") {
-						const submission = value as Static<typeof ReviewSubmission>;
-						for (const finding of submission.findings)
-							if (
-								!task.files.some(
-									(file) =>
-										file === finding.file ||
-										snapshot.changes.find((change) => change.file === file)?.oldPath === finding.file,
+					);
+					result = await runWorker({
+						registry: ctx.modelRegistry,
+						config,
+						schema,
+						system: systemPrompt(prompts, stage),
+						input,
+						sessionId,
+						continuing: task.requests > 0,
+						assignment: assignedLens
+							? { id: assignedLens.id, name: assignedLens.name, focus: assignedLens.focus }
+							: undefined,
+						...(coverage
+							? { sharedResources: contextResources(workerSnapshot, sharedIds, resourceLimit, signal) }
+							: {}),
+						tools: workerTools,
+						permissions: access,
+						suspendPermissions: checkPermissions,
+						signal,
+						coverage,
+						resources: coverage ? resources() : undefined,
+						allowAdvisories: stage === "architecture",
+						allowFindings: stage === "architecture" || stage === "reviewer",
+						validateResult: async (value) => {
+							if (stage === "reviewer" || stage === "architecture") {
+								const submission = value as Static<typeof ReviewSubmission>;
+								for (const finding of submission.findings)
+									if (
+										!task.files.some(
+											(file) =>
+												file === finding.file ||
+												snapshot.changes.find((change) => change.file === file)?.oldPath === finding.file,
+										)
+									)
+										throw new Error("Finding outside assigned scope");
+							}
+							await validateResult?.(value, workerSnapshot);
+						},
+						validateCheckpoint: async (value) => {
+							for (const finding of value.findings ?? [])
+								if (
+									!task.files.some(
+										(file) =>
+											file === finding.file ||
+											snapshot.changes.find((c) => c.file === file)?.oldPath === finding.file,
+									)
 								)
-							)
-								throw new Error("Finding outside assigned scope");
-					}
-					await validateResult?.(value);
-				},
-				validateCheckpoint: async (value) => {
-					for (const finding of value.findings ?? [])
-						if (
-							!task.files.some(
-								(file) =>
-									file === finding.file ||
-									snapshot.changes.find((c) => c.file === file)?.oldPath === finding.file,
-							)
-						)
-							throw new Error("Finding outside assigned scope");
-					for (const advisory of value.advisories ?? []) await checkAdvisory(advisory, snapshot);
-				},
-				recover: options.recovery && !optional ? recover : undefined,
-				progress: (note) => progress(redact(`${task.name}: ${note}`)),
-				event: (event) => {
-					if (signal.aborted) return;
-					const changes: Partial<typeof task> = { remaining: coverage?.remaining.length };
-					if (event.type === "coverage") changes.unreviewed = coverage?.remaining;
-					if (event.type === "request") changes.requests = task.requests + 1;
-					if (event.type === "turn") changes.turns = priorTurns + (event.turns ?? 0);
-					if (event.type === "compacting") {
-						changes.state = "compacting";
-						changes.compactions = task.compactions + 1;
-					}
-					if (event.type === "continued" || event.type === "turn") changes.state = "running";
-					if (event.usage) changes.usage = sumUsage(priorUsage, event.usage);
-					tasks.update(id, changes, event.text);
-				},
-			});
-			priorUsage = sumUsage(priorUsage, result.usage);
-			if (signal.aborted) {
-				tasks.update(id, { state: "cancelled", endedAt: Date.now(), usage: priorUsage });
-				return result;
+									throw new Error("Finding outside assigned scope");
+							for (const advisory of value.advisories ?? []) await checkAdvisory(advisory, workerSnapshot);
+						},
+						recover: options.recovery && !optional ? recover : undefined,
+						progress: (note) => progress(redact(`${task.name}: ${note}`)),
+						event: (event) => {
+							if (signal.aborted) return;
+							const changes: Partial<typeof task> = { remaining: coverage?.remaining.length };
+							if (event.type === "coverage") changes.unreviewed = coverage?.remaining;
+							if (event.type === "request") changes.requests = task.requests + 1;
+							if (event.type === "turn") changes.turns = priorTurns + (event.turns ?? 0);
+							if (event.type === "compacting") {
+								changes.state = "compacting";
+								changes.compactions = task.compactions + 1;
+							}
+							if (event.type === "continued" || event.type === "turn") changes.state = "running";
+							if (event.usage) changes.usage = sumUsage(priorUsage, event.usage);
+							tasks.update(id, changes, event.text);
+						},
+					});
+				} catch (error) {
+					if (!isPermissionBlocked(error)) throw error;
+					result = { ok: false, error: error.message, usage: emptyUsage(), permissionFailure: true };
+				}
+				result = { ...result, dependencies: access.dependencies };
+				priorUsage = sumUsage(priorUsage, result.usage);
+				if (signal.aborted) {
+					tasks.update(id, { state: "cancelled", endedAt: Date.now(), usage: priorUsage });
+					return result;
+				}
+				if (result.ok) {
+					tasks.update(
+						id,
+						{
+							state: "completed",
+							endedAt: Date.now(),
+							remaining: coverage?.remaining.length,
+							unreviewed: coverage?.remaining,
+							usage: priorUsage,
+						},
+						"Completed",
+					);
+					return result;
+				}
+				if (!options.recovery || (optional && !result.permissionFailure)) {
+					if (result.permissionFailure)
+						report.issues.push(`Permission blocked: ${task.name}: ${result.error}`);
+					tasks.update(
+						id,
+						{
+							state: optional && !result.permissionFailure ? "skipped" : "failed",
+							endedAt: Date.now(),
+							usage: priorUsage,
+						},
+						result.error,
+					);
+					return result;
+				}
+				await recover(result.error);
 			}
-			if (result.ok) {
-				tasks.update(
-					id,
-					{
-						state: "completed",
-						endedAt: Date.now(),
-						remaining: coverage?.remaining.length,
-						unreviewed: coverage?.remaining,
-						usage: priorUsage,
-					},
-					"Completed",
-				);
-				return result;
-			}
-			if (!options.recovery || optional) {
-				tasks.update(
-					id,
-					{ state: optional ? "skipped" : "failed", endedAt: Date.now(), usage: priorUsage },
-					result.error,
-				);
-				return result;
-			}
-			await recover(result.error);
+		} finally {
+			access.close();
 		}
 	}
 	try {
+		await snapshot.permissions?.beforeDispatch(signal);
 		const blockers = snapshot.omitted.filter((item) => !item.reason.startsWith("excluded:"));
 		if (blockers.length)
 			throw new Error(
@@ -338,9 +414,10 @@ export async function review(options: {
 					manifestIncomplete: snapshot.changes.length > 100,
 					manifestTool: "list_changes",
 				},
-				snapshotTools(snapshot),
+				(view) => snapshotTools(view),
 			),
 		);
+		const planningSources = proposals.ok ? (proposals.dependencies ?? []) : [];
 		let proposedAreas: Static<typeof ProposalSubmission>["areas"];
 		if (proposals.ok) {
 			proposedAreas = proposals.value.areas;
@@ -411,35 +488,47 @@ export async function review(options: {
 		>();
 		try {
 			await work(`Reviewing changes (${jobs.length} tasks, ${config.concurrency} concurrent)`, () =>
-				boundedMap(jobs, config.concurrency, signal, async (job, _index, suspend) => {
-					const coverage = new CoverageLedger([
-						...job.files.map((file) => `diff:${file}`),
-						...job.lens.reading.map((file) => `doc:${file}`),
-					]);
-					const { reading: _reading, focus, ...lens } = job.lens;
-					const result = await model(
-						job.id,
-						ReviewSubmission,
-						job.architecture ? "architecture" : "reviewer",
-						{
-							project: profile.draft.summary,
-							// Reading is listed once below; architecture focus is already in the system policy.
-							lens: { ...lens, ...(job.architecture ? {} : { focus }) },
-							assignedFiles: job.files,
-							relatedContextFiles: job.contextFiles,
-							areas: areaPlan.areas,
-							requiredReading: job.lens.reading,
-							coverageTool: "coverage_state",
-						},
-						snapshotTools(snapshot, (...args) => coverage.deliver(...args)),
-						coverage,
-						undefined,
-						[],
-						suspend,
-					);
-					settled.set(job.id, { result, coverage });
-					return result;
-				}),
+				boundedMap(
+					jobs,
+					config.concurrency,
+					signal,
+					async (job, _index, suspend) => {
+						const coverage = new CoverageLedger([
+							...job.files.map((file) => `diff:${file}`),
+							...job.lens.reading.map((file) => `doc:${file}`),
+						]);
+						const { reading: _reading, focus, ...lens } = job.lens;
+						const result = await model(
+							job.id,
+							ReviewSubmission,
+							job.architecture ? "architecture" : "reviewer",
+							{
+								project: profile.draft.summary,
+								// Reading is listed once below; architecture focus is already in the system policy.
+								lens: { ...lens, ...(job.architecture ? {} : { focus }) },
+								assignedFiles: job.files,
+								relatedContextFiles: job.contextFiles,
+								areas: areaPlan.areas,
+								requiredReading: job.lens.reading,
+								coverageTool: "coverage_state",
+							},
+							(view) => snapshotTools(view, (...args) => coverage.deliver(...args)),
+							coverage,
+							undefined,
+							[],
+							suspend,
+							planningSources,
+						);
+						settled.set(job.id, { result, coverage });
+						return result;
+					},
+					(job, waiting) =>
+						tasks.update(
+							job.id,
+							{ state: waiting ? "waiting_slot" : "running" },
+							waiting ? "Waiting for execution slot" : "Execution slot acquired",
+						),
+				),
 			);
 		} finally {
 			for (const job of jobs) {
@@ -447,8 +536,11 @@ export async function review(options: {
 				if (!item) continue;
 				const { result, coverage } = item;
 				const findings = [...coverage.findings, ...(result.ok ? result.value.findings : [])];
-				for (const finding of new Map(findings.map((f) => [JSON.stringify(f), f])).values())
-					candidates.push({ ...finding, id: `F${candidates.length + 1}`, reviewer: job.lens.name });
+				for (const finding of new Map(findings.map((f) => [JSON.stringify(f), f])).values()) {
+					const candidate = { ...finding, id: `F${candidates.length + 1}`, reviewer: job.lens.name };
+					candidates.push(candidate);
+					candidateSources.set(candidate.id, result.dependencies ?? []);
+				}
 				if (job.architecture)
 					report.advisories = coverage.advisories.map((advisory, i) => ({ ...advisory, id: `A${i + 1}` }));
 				if (!result.ok) report.issues.push(`${job.lens.name}: ${result.error}`);
@@ -503,117 +595,141 @@ export async function review(options: {
 				`${batches[i]!.candidates.length} independent verdicts`,
 			);
 		await work(`Verifying findings (${batches.length} batches)`, () =>
-			boundedMap(batches, config.concurrency, signal, async (batch, index, suspend) => {
-				const ids = new Set(batch.candidates.map((c) => c.id));
-				const coverage = new CoverageLedger([
-					...batch.candidates.map((candidate) => `candidate:${candidate.id}`),
-					...batch.input.requiredReading.map((path) => `doc:${path}`),
-					...batch.input.changes.map((c) => `diff:${c.file}`),
-				]);
-				const validatedEvidence = new Map<string, string>();
-				const validateVerdicts = async (value: Static<typeof VerificationSubmission>) => {
-					if (
-						value.verdicts.length !== ids.size ||
-						new Set(value.verdicts.map((v) => v.id)).size !== ids.size ||
-						value.verdicts.some((v) => !ids.has(v.id))
-					)
-						throw new Error("Missing, duplicate, or unknown verification IDs");
-					for (const verdict of value.verdicts)
-						if (verdict.verdict === "confirmed" || verdict.verdict === "corrected") {
-							const candidate = batch.candidates.find((c) => c.id === verdict.id)!;
-							const finding = verdict.verdict === "corrected" ? verdict.corrected : candidate;
-							if (!finding || finding.severity !== candidate.severity)
-								throw new Error("Invalid correction/severity change");
-							await checkEvidence(finding, snapshot);
-							validatedEvidence.set(candidate.id, JSON.stringify(finding));
-						}
-				};
-				const candidateTool: AgentTool = {
-					name: "read_candidate",
-					label: "Read candidate evidence",
-					description:
-						"Page the exact original candidate JSON by ID and character cursor, including oversized evidence.",
-					parameters: Type.Object({ id: Type.String(), cursor: Type.Optional(Type.Integer({ minimum: 0 })) }),
-					async execute(_id, args, toolSignal) {
-						toolSignal?.throwIfAborted();
-						signal.throwIfAborted();
-						const input = args as { id: string; cursor?: number },
-							candidate = batch.candidates.find((c) => c.id === input.id);
-						if (!candidate) throw new Error("Unknown candidate ID");
-						const text = JSON.stringify(candidate),
-							cursor = input.cursor ?? 0;
-						coverage.deliver(
-							`candidate:${candidate.id}`,
-							cursor,
-							Math.min(text.length, cursor + 8000),
-							text.length,
-						);
-						return {
-							content: [
-								{
-									type: "text",
-									text: JSON.stringify({
-										text: text.slice(cursor, cursor + 8000),
-										nextOffset: cursor + 8000 < text.length ? cursor + 8000 : null,
-									}),
-								},
-							],
-							details: {},
-						};
-					},
-				};
-				const result = await model(
-					`verify:${index}`,
-					VerificationSubmission,
-					"verifier",
-					// Bodies are tracked resources, not untracked nested fields in paged task input.
-					{ ...batch.input, candidates: [] },
-					[...snapshotTools(snapshot, (...args) => coverage.deliver(...args)), candidateTool],
-					coverage,
-					validateVerdicts,
-					batch.candidates,
-					suspend,
-				);
-				for (const candidate of batch.candidates) {
-					const verdictFor = (entry: Report["ledger"][number]) => {
-						for (const member of duplicates.members.get(candidate.id)!)
-							report.ledger.push({
-								...entry,
-								id: member.id,
-								...(member.id !== candidate.id ? { sharedWith: candidate.id } : {}),
-							});
+			boundedMap(
+				batches,
+				config.concurrency,
+				signal,
+				async (batch, index, suspend) => {
+					const ids = new Set(batch.candidates.map((c) => c.id));
+					const coverage = new CoverageLedger([
+						...batch.candidates.map((candidate) => `candidate:${candidate.id}`),
+						...batch.input.requiredReading.map((path) => `doc:${path}`),
+						...batch.input.changes.map((c) => `diff:${c.file}`),
+					]);
+					const validatedEvidence = new Map<string, string>();
+					const validateVerdicts = async (value: Static<typeof VerificationSubmission>, view: Snapshot) => {
+						if (
+							value.verdicts.length !== ids.size ||
+							new Set(value.verdicts.map((v) => v.id)).size !== ids.size ||
+							value.verdicts.some((v) => !ids.has(v.id))
+						)
+							throw new Error("Missing, duplicate, or unknown verification IDs");
+						for (const verdict of value.verdicts)
+							if (verdict.verdict === "confirmed" || verdict.verdict === "corrected") {
+								const candidate = batch.candidates.find((c) => c.id === verdict.id)!;
+								const finding = verdict.verdict === "corrected" ? verdict.corrected : candidate;
+								if (!finding || finding.severity !== candidate.severity)
+									throw new Error("Invalid correction/severity change");
+								await checkEvidence(finding, view);
+								validatedEvidence.set(candidate.id, JSON.stringify(finding));
+							}
 					};
-					const matched = result.ok ? result.value.verdicts.filter((v) => v.id === candidate.id) : [];
-					if (matched.length !== 1) {
-						verdictFor({
-							id: candidate.id,
-							verdict: "inconclusive",
-							reason: result.ok ? "Missing/duplicate verdict" : result.error,
-						});
-						continue;
-					}
-					const verdict = matched[0]!;
-					if (verdict.verdict === "dropped" || verdict.verdict === "inconclusive")
-						verdictFor({ id: candidate.id, verdict: verdict.verdict, reason: verdict.reason });
-					else
-						try {
-							const finding = verdict.verdict === "corrected" ? verdict.corrected : candidate;
-							if (!finding || finding.severity !== candidate.severity)
-								throw new Error("Invalid correction/severity change");
-							if (validatedEvidence.get(candidate.id) !== JSON.stringify(finding))
-								await checkEvidence(finding, snapshot);
+					const candidateTool: AgentTool = {
+						name: "read_candidate",
+						label: "Read candidate evidence",
+						description:
+							"Page the exact original candidate JSON by ID and character cursor, including oversized evidence.",
+						parameters: Type.Object({
+							id: Type.String(),
+							cursor: Type.Optional(Type.Integer({ minimum: 0 })),
+						}),
+						async execute(_id, args, toolSignal) {
+							toolSignal?.throwIfAborted();
+							signal.throwIfAborted();
+							const input = args as { id: string; cursor?: number },
+								candidate = batch.candidates.find((c) => c.id === input.id);
+							if (!candidate) throw new Error("Unknown candidate ID");
+							const text = JSON.stringify(candidate),
+								cursor = input.cursor ?? 0;
+							coverage.deliver(
+								`candidate:${candidate.id}`,
+								cursor,
+								Math.min(text.length, cursor + 8000),
+								text.length,
+							);
+							return {
+								content: [
+									{
+										type: "text",
+										text: JSON.stringify({
+											text: text.slice(cursor, cursor + 8000),
+											nextOffset: cursor + 8000 < text.length ? cursor + 8000 : null,
+										}),
+									},
+								],
+								details: {},
+							};
+						},
+					};
+					const result = await model(
+						`verify:${index}`,
+						VerificationSubmission,
+						"verifier",
+						// Bodies are tracked resources, not untracked nested fields in paged task input.
+						{ ...batch.input, candidates: [] },
+						(view) => [...snapshotTools(view, (...args) => coverage.deliver(...args)), candidateTool],
+						coverage,
+						validateVerdicts,
+						batch.candidates,
+						suspend,
+						batch.candidates.flatMap((candidate) =>
+							duplicates.members
+								.get(candidate.id)!
+								.flatMap((member) => candidateSources.get(member.id) ?? []),
+						),
+					);
+					for (const candidate of batch.candidates) {
+						for (const member of duplicates.members.get(candidate.id)!)
+							candidateSources.set(member.id, [
+								...(candidateSources.get(member.id) ?? []),
+								...(result.dependencies ?? []),
+							]);
+						const verdictFor = (entry: Report["ledger"][number]) => {
 							for (const member of duplicates.members.get(candidate.id)!)
-								report.findings.push({ ...finding, id: member.id, reviewer: member.reviewer });
-							verdictFor({ id: candidate.id, verdict: verdict.verdict, reason: verdict.reason });
-						} catch (error) {
+								report.ledger.push({
+									...entry,
+									id: member.id,
+									...(member.id !== candidate.id ? { sharedWith: candidate.id } : {}),
+								});
+						};
+						const matched = result.ok ? result.value.verdicts.filter((v) => v.id === candidate.id) : [];
+						if (matched.length !== 1) {
 							verdictFor({
 								id: candidate.id,
 								verdict: "inconclusive",
-								reason: error instanceof Error ? error.message : "Invalid evidence",
+								reason: result.ok ? "Missing/duplicate verdict" : result.error,
 							});
+							continue;
 						}
-				}
-			}),
+						const verdict = matched[0]!;
+						if (verdict.verdict === "dropped" || verdict.verdict === "inconclusive")
+							verdictFor({ id: candidate.id, verdict: verdict.verdict, reason: verdict.reason });
+						else
+							try {
+								const finding = verdict.verdict === "corrected" ? verdict.corrected : candidate;
+								if (!finding || finding.severity !== candidate.severity)
+									throw new Error("Invalid correction/severity change");
+								if (validatedEvidence.get(candidate.id) !== JSON.stringify(finding))
+									await checkEvidence(finding, snapshot);
+								for (const member of duplicates.members.get(candidate.id)!)
+									report.findings.push({ ...finding, id: member.id, reviewer: member.reviewer });
+								verdictFor({ id: candidate.id, verdict: verdict.verdict, reason: verdict.reason });
+							} catch (error) {
+								verdictFor({
+									id: candidate.id,
+									verdict: "inconclusive",
+									reason: error instanceof Error ? error.message : "Invalid evidence",
+								});
+							}
+					}
+				},
+				(_batch, waiting, index) =>
+					tasks.update(
+						`verify:${index}`,
+						{ state: waiting ? "waiting_slot" : "running" },
+						waiting ? "Waiting for execution slot" : "Execution slot acquired",
+					),
+			),
 		);
 		report.findings.sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1)));
 		report.ledger.sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1)));
@@ -635,6 +751,7 @@ export async function review(options: {
 				description:
 					"Record a page of disjoint finding-ID groups under an idempotent key. Cover every finding across pages, then submit_result with empty groups.",
 				parameters: Type.Object({ key: Type.String(), groups: ConsolidationSubmission.properties.groups }),
+				executionMode: "sequential",
 				async execute(_id, args) {
 					const input = args as { key: string; groups: string[][] };
 					const prior = groups.get(input.key);
@@ -649,14 +766,15 @@ export async function review(options: {
 						proposed,
 						report.findings.filter((finding) => included.has(finding.id)),
 					);
-					groups.set(input.key, input.groups);
+					const commit = () => groups.set(input.key, input.groups);
+					if (!deferToolCommit(commit)) commit();
 					return {
 						content: [
 							{
 								type: "text",
 								text: JSON.stringify({
 									acceptedKey: input.key,
-									groupedIds: new Set([...groups.values()].flat(2)).size,
+									groupedIds: included.size,
 								}),
 							},
 						],
@@ -702,6 +820,9 @@ export async function review(options: {
 					(value) => {
 						validateGroups([...groups.values()].flat().concat(value.groups), report.findings);
 					},
+					[],
+					undefined,
+					report.findings.flatMap((finding) => candidateSources.get(finding.id) ?? []),
 				),
 			);
 			if (result.ok)
@@ -719,7 +840,14 @@ export async function review(options: {
 			report.status = "cancelled";
 			report.clean = [];
 			tasks.cancel();
-		} else report.issues.push(error instanceof Error ? error.message : "Review failed");
+		} else
+			report.issues.push(
+				isPermissionBlocked(error)
+					? `Permission blocked: ${error.message}`
+					: error instanceof Error
+						? error.message
+						: "Review failed",
+			);
 	} finally {
 		for (const candidate of candidates)
 			if (!report.ledger.some((entry) => entry.id === candidate.id))

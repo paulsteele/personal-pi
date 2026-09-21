@@ -1,9 +1,9 @@
 import { rm, stat } from "node:fs/promises";
 import { expect, it } from "vitest";
-import { capture, snapshotTools, type Snapshot } from "./snapshot.js";
+import { snapshotTools, type Snapshot } from "./snapshot.js";
 import { CoverageLedger } from "./tasks.js";
 import { SnapshotStore, textPage } from "./snapshot-store.js";
-import { fixture, put, testConfig } from "./test-fixtures.js";
+import { capture, fixture, put, testConfig } from "./test-fixtures.js";
 
 it("counts normal reads and legacy diff offsets automatically without checkpoint acknowledgments", async () => {
 	const ledger = new CoverageLedger(["doc:rules.md", "diff:a.ts"]);

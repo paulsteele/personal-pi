@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, it, vi } from "vitest";
 import { resolveRepo } from "./git.js";
-import { capture, assertCurrent, snapshotTools, type Snapshot } from "./snapshot.js";
-import { commit, fixture, put, testConfig, testGit } from "./test-fixtures.js";
+import { assertCurrent, snapshotTools, type Snapshot } from "./snapshot.js";
+import { capture, commit, fixture, put, testConfig, testGit } from "./test-fixtures.js";
 const roots: string[] = [];
 async function repo() {
 	const result = await fixture();

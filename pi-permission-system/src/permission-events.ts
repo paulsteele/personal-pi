@@ -1,5 +1,13 @@
 export const PERMISSIONS_UI_PROMPT_CHANNEL = "permissions:ui_prompt";
 export const PERMISSIONS_DECISION_CHANNEL = "permissions:decision";
+export const PERMISSIONS_REVIEW_STATE_CHANNEL = "permissions:review_state";
+
+export interface DelegatedPermissionIdentity {
+  operationId: string;
+  taskId: string;
+  taskName: string;
+  childToolCallId: string;
+}
 
 export type DecisionSource =
   | { kind: "policy"; pattern: string | null }
@@ -10,6 +18,7 @@ export type DecisionSource =
   | { kind: "gate_error" };
 
 export interface PermissionUiPromptEvent {
+  delegated?: DelegatedPermissionIdentity;
   requestId: string;
   toolCallId: string | null;
   source: "tool_call" | "skill_input" | "skill_read";
@@ -18,6 +27,7 @@ export interface PermissionUiPromptEvent {
 }
 
 export interface PermissionDecisionEvent {
+  delegated?: DelegatedPermissionIdentity;
   requestId: string;
   toolCallId: string | null;
   surface: string;

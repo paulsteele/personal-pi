@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, it, vi } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { DashboardComponent, createReviewDashboard } from "./dashboard.js";
+import { DashboardComponent, createReviewDashboard, trackPermissionPrompts } from "./dashboard.js";
 import { TaskStore, type TaskState } from "./tasks.js";
 import { uiHarness } from "./ui.test.helpers.js";
 const keys = { getKeys: () => ["escape"], matches: (data: string, action: string) => data === action };
@@ -268,7 +268,7 @@ it("mounts a centered 120-column panel with matching height and margin budgets",
 	});
 	dashboard.show();
 	await vi.advanceTimersByTimeAsync(0);
-	expect(custom.mock.calls[0]?.[1]?.overlayOptions).toEqual({
+	expect(custom.mock.calls[0]?.[1]?.overlayOptions).toMatchObject({
 		anchor: "center",
 		width: 120,
 		maxHeight: "100%",
@@ -280,6 +280,121 @@ it("mounts a centered 120-column panel with matching height and margin budgets",
 	dashboard.dispose();
 	expect(vi.getTimerCount()).toBe(0);
 });
+it("minimizes for a permission prompt and cannot reopen or auto-restore over it", async () => {
+	vi.useFakeTimers();
+	const h = uiHarness();
+	const dashboard = createReviewDashboard({ mode: "tui", ui: h.ui } as ExtensionContext, store(), {
+		cancel: vi.fn(),
+	});
+	let finish!: () => void;
+	const work = dashboard.work(
+		"Reviewing",
+		() =>
+			new Promise<void>((resolve) => {
+				finish = resolve;
+			}),
+	);
+	await vi.advanceTimersByTimeAsync(0);
+	const oldDashboard = h.state.active!;
+	dashboard.setPermissionPromptActive(true);
+	expect(h.state.active).toBeUndefined();
+	let answer: string | undefined;
+	const permission = h.ui.custom<string>((_tui, _theme, _keys, done) => ({
+		render: () => ["Permission: y approve, n deny"],
+		invalidate() {},
+		handleInput: (key) => {
+			answer = key;
+			done(key);
+		},
+	}));
+	await vi.advanceTimersByTimeAsync(0);
+	const permissionPanel = h.state.active;
+	dashboard.show();
+	expect(h.state.active).toBe(permissionPanel);
+	expect(h.state.notifications.at(-1)?.message).toContain("Finish the permission prompt");
+	expect(oldDashboard.render(120)).toEqual([]);
+	oldDashboard.handleInput?.("cancel-key");
+	expect(answer).toBeUndefined();
+	h.state.active!.handleInput!("y");
+	expect(await permission).toBe("y");
+	dashboard.setPermissionPromptActive(false);
+	expect(h.state.active).toBeUndefined();
+	finish();
+	await work;
+	const next = dashboard.work(
+		"Next stage",
+		() =>
+			new Promise<void>((resolve) => {
+				finish = resolve;
+			}),
+	);
+	await vi.advanceTimersByTimeAsync(0);
+	expect(h.state.active).toBeUndefined();
+	dashboard.show();
+	await vi.advanceTimersByTimeAsync(0);
+	expect(h.state.active!.render(120).join("\n")).toContain("PR REVIEW");
+	finish();
+	await next;
+	dashboard.dispose();
+	expect(vi.getTimerCount()).toBe(0);
+});
+
+it("does not steal permission focus if the dashboard mounts after the prompt starts", async () => {
+	vi.useFakeTimers();
+	const h = uiHarness();
+	const dashboard = createReviewDashboard({ mode: "tui", ui: h.ui } as ExtensionContext, store(), {
+		cancel() {},
+		readonly: true,
+	});
+	dashboard.show(); // Its custom component has not mounted yet.
+	dashboard.setPermissionPromptActive(true);
+	const permission = h.ui.custom<string>((_tui, _theme, _keys, done) => ({
+		render: () => ["PERMISSION"],
+		invalidate() {},
+		handleInput: (key) => done(key),
+	}));
+	await vi.advanceTimersByTimeAsync(0);
+	expect(h.state.active!.render(80)).toEqual(["PERMISSION"]);
+	expect(h.state.closes).toBe(1); // Only the stale dashboard closed.
+	h.state.active!.handleInput!("approve");
+	expect(await permission).toBe("approve");
+	dashboard.dispose();
+	expect(h.state.closes).toBe(h.state.factories);
+	expect(vi.getTimerCount()).toBe(0);
+});
+
+it("tracks all actual permission prompts until their matching terminal decisions and unsubscribes", () => {
+	const listeners = new Map<string, Set<(value: unknown) => void>>();
+	const events = {
+		on(name: string, callback: (value: unknown) => void) {
+			const set = listeners.get(name) ?? new Set();
+			set.add(callback);
+			listeners.set(name, set);
+			return () => {
+				set.delete(callback);
+			};
+		},
+		emit(name: string, value: unknown) {
+			for (const callback of listeners.get(name) ?? []) callback(value);
+		},
+	};
+	const changed = vi.fn();
+	const tracker = trackPermissionPrompts(events, changed);
+	events.emit("permissions:ui_prompt", { requestId: "main" });
+	events.emit("permissions:ui_prompt", { requestId: "child", delegated: { taskId: "reviewer" } });
+	events.emit("permissions:decision", { requestId: "unrelated" });
+	events.emit("permissions:decision", { requestId: "main" });
+	expect(tracker.active).toBe(true);
+	expect(changed.mock.calls).toEqual([[true]]);
+	events.emit("permissions:decision", { requestId: "child" });
+	expect(tracker.active).toBe(false);
+	expect(changed.mock.calls).toEqual([[true], [false]]);
+	tracker.dispose();
+	events.emit("permissions:ui_prompt", { requestId: "retired" });
+	expect(tracker.active).toBe(false);
+	expect([...listeners.values()].every((set) => set.size === 0)).toBe(true);
+});
+
 it("coalesces actual host widget/status updates and avoids replacing unchanged summaries", async () => {
 	vi.useFakeTimers();
 	const tasks = store(),

@@ -1,21 +1,22 @@
 import { rm } from "node:fs/promises";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, it, vi } from "vitest";
-import { capture } from "./snapshot.js";
-import { boundedMap, review } from "./runner.js";
+import { boundedMap } from "./runner.js";
 import { loadPrompts } from "./prompts.js";
 import { runWorker } from "./worker.js";
+import { ReviewPermissions } from "./permissions.js";
 import {
 	ReviewSubmission,
 	VerificationSubmission,
 	ProposalSubmission,
+	ConsolidationSubmission,
 	type Profile,
 	type Finding,
 } from "./types.js";
 import { awaitWithSignal, createWorkUI } from "./work-ui.js";
 import { TaskStore, RecoveryGate } from "./tasks.js";
 import { uiHarness } from "./ui.test.helpers.js";
-import { commit, fixture, put, testConfig, testDraft } from "./test-fixtures.js";
+import { review, capture, commit, fixture, put, testConfig, testDraft } from "./test-fixtures.js";
 vi.mock("./worker.js", () => ({ runWorker: vi.fn() }));
 const roots: string[] = [];
 afterEach(async () => {
@@ -122,6 +123,303 @@ async function run(
 	await snapshot.dispose?.();
 	return { result, seen, ui: h.state };
 }
+it("bounds resident preparation and reports automatic checks separately from slot waits", async () => {
+	const repo = await fixture();
+	roots.push(repo.root);
+	await put(repo.root, "a.ts", "before\n");
+	await commit(repo.root);
+	await put(repo.root, "a.ts", "after\n");
+	const snapshot = await capture(repo, { kind: "local" }, testConfig);
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	let prepared = 0,
+		peak = 0;
+	vi.mocked(runWorker).mockImplementation((async (options: Parameters<typeof runWorker>[0]) => {
+		if (options.schema === ProposalSubmission)
+			return { ok: true, value: { specialists: [] }, usage: { input: 0, output: 0, cost: 0 } };
+		prepared++;
+		peak = Math.max(peak, prepared);
+		await options.suspendPermissions!(async () => gate);
+		prepared--;
+		return {
+			ok: true,
+			value: { complete: true, limitations: [], findings: [] },
+			usage: { input: 0, output: 0, cost: 0 },
+		};
+	}) as typeof runWorker);
+	const tasks = new TaskStore();
+	const pending = review({
+		ctx: { modelRegistry: {} } as ExtensionContext,
+		config: { ...testConfig, concurrency: 2 },
+		profile: {
+			schemaVersion: 1,
+			contextVersion: 1,
+			repoId: repo.id,
+			generatedAt: "now",
+			generationModel: "fake",
+			sourceHashes: {},
+			draft: testDraft,
+		},
+		snapshot,
+		prompts: await loadPrompts(),
+		scope: { kind: "local" },
+		signal: new AbortController().signal,
+		progress() {},
+		tasks,
+	});
+	try {
+		await vi.waitFor(() => expect(prepared).toBe(2));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(peak).toBe(2);
+		expect(tasks.snapshot().filter((task) => task.state === "waiting_slot")).toHaveLength(4);
+		expect(tasks.snapshot().filter((task) => task.state === "checking")).toHaveLength(2);
+		expect(tasks.snapshot().filter((task) => task.state === "permission")).toHaveLength(0);
+	} finally {
+		release();
+		await pending;
+		await snapshot.dispose?.();
+	}
+});
+
+it.each(["scout", "consolidate"])(
+	"retries a permission-blocked optional %s without rerunning completed reviewers",
+	async (stage) => {
+		const repo = await fixture();
+		roots.push(repo.root);
+		await put(repo.root, "a.ts", "export const enabled = false;\n");
+		await commit(repo.root);
+		await put(repo.root, "a.ts", "export const enabled = true;\n");
+		const snapshot = await capture(repo, { kind: "local" }, testConfig);
+		let retries = 0,
+			reviewers = 0,
+			optionalCalls = 0;
+		const signal = new AbortController().signal,
+			tasks = new TaskStore(),
+			recovery = new RecoveryGate(tasks, signal);
+		tasks.onChange(() => {
+			if (!retries && recovery.blockers.has(stage)) {
+				retries++;
+				if (stage === "consolidate") expect(reviewers).toBe(6);
+				queueMicrotask(() => recovery.retry());
+			}
+		});
+		vi.mocked(runWorker).mockImplementation((async (options: Parameters<typeof runWorker>[0]) => {
+			const target = stage === "scout" ? ProposalSubmission : ConsolidationSubmission;
+			if (options.schema === target && ++optionalCalls === 1)
+				return {
+					ok: false,
+					permissionFailure: true,
+					error: "Submission denied",
+					usage: { input: 0, output: 0, cost: 0 },
+				};
+			let value: unknown = { specialists: [] };
+			if (options.schema === ReviewSubmission) {
+				reviewers++;
+				value = {
+					complete: true,
+					limitations: [],
+					findings:
+						stage === "consolidate" && (options.input as { lens: { id: string } }).lens.id === "security"
+							? [
+									finding,
+									{
+										...finding,
+										title: "Another overlapping claim",
+										problem: "A different overlapping problem",
+									},
+								]
+							: [],
+				};
+			} else if (options.schema === VerificationSubmission)
+				value = {
+					verdicts: (options.input as { candidateIds: string[] }).candidateIds.map((id) => ({
+						id,
+						verdict: "confirmed",
+						reason: "Fixture",
+					})),
+				};
+			else if (options.schema === ConsolidationSubmission) value = { groups: [["F1", "F2"]] };
+			return { ok: true, value, usage: { input: 0, output: 0, cost: 0 } };
+		}) as typeof runWorker);
+		try {
+			const report = await review({
+				ctx: { modelRegistry: {} } as ExtensionContext,
+				config: testConfig,
+				profile: {
+					schemaVersion: 1,
+					contextVersion: 1,
+					repoId: repo.id,
+					generatedAt: "now",
+					generationModel: "fake",
+					sourceHashes: {},
+					draft: testDraft,
+				},
+				snapshot,
+				prompts: await loadPrompts(),
+				scope: { kind: "local" },
+				signal,
+				progress() {},
+				tasks,
+				recovery,
+			});
+			expect(retries).toBe(1);
+			expect(optionalCalls).toBe(2);
+			expect(reviewers).toBe(6);
+			expect(report.status).toBe("complete");
+			expect(report.issues).toEqual([]);
+		} finally {
+			await snapshot.dispose?.();
+		}
+	},
+);
+
+it("rechecks permission on explicit retry without replacing the source snapshot", async () => {
+	const repo = await fixture();
+	roots.push(repo.root);
+	await put(repo.root, "a.ts", "before\n");
+	await commit(repo.root);
+	await put(repo.root, "a.ts", "after\n");
+	const snapshot = await capture(repo, { kind: "local" }, testConfig);
+	let allowed = false,
+		attempts = 0;
+	const permissions = new ReviewPermissions("retry", {
+		close() {},
+		task: (spec) => ({
+			revision: () => (allowed ? "new" : "old"),
+			nextTurn() {},
+			endTurn() {},
+			close() {},
+			check: async (action) =>
+				spec.id === "review:security" && action.effects?.length && !allowed
+					? { kind: "denied", reason: "Change policy then Retry" }
+					: { kind: "allowed", revision: allowed ? "new" : "old" },
+		}),
+	});
+	vi.mocked(runWorker).mockImplementation((async (options: Parameters<typeof runWorker>[0]) => {
+		if (options.schema === ProposalSubmission)
+			return { ok: true, value: { specialists: [] }, usage: { input: 0, output: 0, cost: 0 } };
+		if ((options.input as { lens?: { id: string } }).lens?.id === "security") {
+			attempts++;
+			await options
+				.tools!.find((tool) => tool.name === "read")!
+				.execute("source", { path: "a.ts" }, new AbortController().signal);
+		}
+		return {
+			ok: true,
+			value: { complete: true, limitations: [], findings: [] },
+			usage: { input: 0, output: 0, cost: 0 },
+		};
+	}) as typeof runWorker);
+	const tasks = new TaskStore(),
+		signal = new AbortController().signal,
+		recovery = new RecoveryGate(tasks, signal);
+	tasks.onChange(() => {
+		if (!allowed && recovery.blockers.has("review:security")) {
+			allowed = true;
+			queueMicrotask(() => recovery.retry());
+		}
+	});
+	try {
+		const report = await review({
+			ctx: { modelRegistry: {} } as ExtensionContext,
+			permissions,
+			config: testConfig,
+			profile: {
+				schemaVersion: 1,
+				contextVersion: 1,
+				repoId: repo.id,
+				generatedAt: "now",
+				generationModel: "fake/test",
+				sourceHashes: {},
+				draft: testDraft,
+			},
+			snapshot,
+			prompts: await loadPrompts(),
+			scope: { kind: "local" },
+			signal,
+			progress() {},
+			tasks,
+			recovery,
+		});
+		expect(attempts).toBe(2);
+		expect(report.status).toBe("complete");
+		expect(report.fingerprint).toBe(snapshot.fingerprint);
+	} finally {
+		permissions.close();
+		await snapshot.dispose?.();
+	}
+});
+
+it("checks the verifier's source rights before transferring another worker's candidate", async () => {
+	const repo = await fixture();
+	roots.push(repo.root);
+	await put(repo.root, "a.ts", "export const enabled = false;\n");
+	await commit(repo.root);
+	await put(repo.root, "a.ts", "export const enabled = true;\n");
+	const snapshot = await capture(repo, { kind: "local" }, testConfig);
+	const permissions = new ReviewPermissions("scoped", {
+		close() {},
+		task: (spec) => ({
+			revision: () => "fixture",
+			nextTurn() {},
+			endTurn() {},
+			close() {},
+			check: async (action) =>
+				spec.id.startsWith("verify:") && action.effects?.length
+					? { kind: "denied", reason: "verifier source denied" }
+					: { kind: "allowed", revision: "fixture" },
+		}),
+	});
+	vi.mocked(runWorker).mockImplementation((async (options: Parameters<typeof runWorker>[0]) => {
+		if (options.schema === ProposalSubmission)
+			return { ok: true, value: { specialists: [] }, usage: { input: 0, output: 0, cost: 0 } };
+		const security = (options.input as { lens?: { id: string } }).lens?.id === "security";
+		if (security)
+			await options
+				.tools!.find((tool) => tool.name === "read")!
+				.execute("source", { path: "a.ts" }, new AbortController().signal);
+		return {
+			ok: true,
+			value: { complete: true, limitations: [], findings: security ? [finding] : [] },
+			usage: { input: 0, output: 0, cost: 0 },
+		};
+	}) as typeof runWorker);
+	try {
+		const report = await review({
+			ctx: { modelRegistry: {} } as ExtensionContext,
+			permissions,
+			config: testConfig,
+			profile: {
+				schemaVersion: 1,
+				contextVersion: 1,
+				repoId: repo.id,
+				generatedAt: "now",
+				generationModel: "fake/test",
+				sourceHashes: {},
+				draft: testDraft,
+			},
+			snapshot,
+			prompts: await loadPrompts(),
+			scope: { kind: "local" },
+			signal: new AbortController().signal,
+			progress() {},
+		});
+		expect(report.status).toBe("incomplete");
+		expect(report.findings).toEqual([]);
+		expect(report.ledger).toContainEqual(
+			expect.objectContaining({ verdict: "inconclusive", reason: "verifier source denied" }),
+		);
+		expect(
+			vi.mocked(runWorker).mock.calls.some(([options]) => options.schema === VerificationSubmission),
+		).toBe(false);
+	} finally {
+		permissions.close();
+		await snapshot.dispose?.();
+	}
+});
+
 it("runs every baseline and independently verifies before retaining a finding", async () => {
 	const { result, seen } = await run("confirmed");
 	expect(seen.sort()).toEqual([

@@ -2,10 +2,10 @@ import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
-import { capture, snapshotTools } from "./snapshot.js";
+import { snapshotTools } from "./snapshot.js";
 import { checkEvidence } from "./findings.js";
 import { prepareViewerPatch } from "./plannotator.js";
-import { commit, fixture, put, testConfig } from "./test-fixtures.js";
+import { capture, commit, fixture, put, testConfig } from "./test-fixtures.js";
 import type { Finding } from "./types.js";
 
 it("uses indexed source/anchor ranges and streamed viewer export without eager getters", async () => {

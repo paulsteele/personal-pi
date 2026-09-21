@@ -2,7 +2,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
 import { createHostLoader, openBrowserIfActive } from "./host-loader.mjs";
 import { readOwnedViewerPatch } from "./viewer-patch.mjs";
 
@@ -67,10 +66,6 @@ input.on("line", (line) => {
 		if (manifest.name !== "@plannotator/pi-extension")
 			throw new Error("Expected an installed @plannotator/pi-extension package");
 		const loader = createHostLoader(piPackageDir);
-		const { assertSupportedPlannotatorVersion } = await loader.import(
-			fileURLToPath(new URL("./plannotator-version.ts", import.meta.url)),
-		);
-		assertSupportedPlannotatorVersion(manifest.version);
 		const module = await loader.import(join(plannotatorDir, "server.ts"));
 		if (typeof module.startReviewServer !== "function")
 			throw new Error("Plannotator review server export unavailable");
@@ -125,7 +120,8 @@ input.on("line", (line) => {
 		if (stopped) return;
 		emit({
 			type: "error",
-			message: "Plannotator viewer failed. Check the supported installed version and local runtime.",
+			message:
+				"Plannotator viewer failed. Check the installed extension's review-server API, viewer assets, and local runtime.",
 		});
 		process.exitCode = 1;
 		stop();

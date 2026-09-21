@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadConfig, saveModel } from "./config.js";
-import { loadProfile, validateDraft } from "./profile.js";
+import { loadProfile, validateDraft, sourcePaths } from "./profile.js";
 import { loadPrompts, systemPrompt } from "./prompts.js";
 import { capture, snapshotTools } from "./snapshot.js";
 import { profilePath, publish, readStored } from "./storage.js";
@@ -15,6 +15,7 @@ import {
 } from "./types.js";
 import { runWorker } from "./worker.js";
 import { directWork, type WorkPhase } from "./work-ui.js";
+import { PermissionBlocked, WORKER_CONTROL_TOOLS, type ReviewPermissions } from "./permissions.js";
 
 export async function chooseModel(
 	ctx: ExtensionContext,
@@ -113,6 +114,7 @@ export async function setup(
 	progress: (text: string) => void,
 	work: WorkPhase = directWork,
 	mode: "normal" | "edit" | "regenerate" = "normal",
+	openPermissions?: () => ReviewPermissions,
 ): Promise<string> {
 	const prior = await loadProfile(root, repo.id);
 	const paths = draftPaths(root, repo);
@@ -136,11 +138,26 @@ export async function setup(
 			signal,
 		);
 	}
+	if (!openPermissions)
+		throw new PermissionBlocked("unavailable", "PR setup requires the permission service.");
+	const permissions = openPermissions();
+	const captureAccess = permissions.host("Prepare PR setup source");
 	const config = (await loadConfig(root)) ?? (await chooseModel(ctx, root, signal, work));
 	const prompts = await loadPrompts();
 	const snapshot = await work("Capturing repository context", () =>
-		capture(repo, { kind: "local" }, config, [], signal),
+		capture(repo, { kind: "local" }, config, captureAccess, [], signal, true),
 	);
+	const toolNames = snapshotTools(snapshot).map((tool) => tool.name);
+	const discoveryAccess = permissions.task({
+		id: "setup:discovery",
+		name: "Repository discovery",
+		assignment: "Discover repository context for PR setup",
+		model: `${config.provider}/${config.model}`,
+		tools: [...toolNames, ...WORKER_CONTROL_TOOLS],
+		kind: "worker",
+		signal,
+	});
+	const discoveryView = snapshot.withPermissions!(discoveryAccess);
 	try {
 		const legacy = ".claude/skills/pr/SKILL.md";
 		let legacySkill: string | undefined;
@@ -150,16 +167,26 @@ export async function setup(
 				signal,
 			}))
 		)
-			legacySkill = (await snapshot.read(legacy)).toString();
-		const tools = snapshotTools(snapshot);
+			legacySkill = (await discoveryView.read(legacy)).toString();
+		const tools = snapshotTools(discoveryView);
+		const files = await discoveryAccess.guard(
+			{
+				toolName: "list_source",
+				input: {},
+				description: "List repository paths for setup discovery",
+				signal,
+			},
+			async () => snapshot.paths(),
+		);
 		const discovery = await work(`Discovering repository context (${config.provider}/${config.model})`, () =>
 			runWorker({
 				registry: ctx.modelRegistry,
 				config,
 				schema: DiscoverySubmission,
 				system: systemPrompt(prompts, "discover"),
-				input: { files: snapshot.paths().slice(0, 1000), totalFiles: snapshot.paths().length, legacySkill },
+				input: { files: files.slice(0, 1000), totalFiles: files.length, legacySkill },
 				tools,
+				permissions: discoveryAccess,
 				signal,
 				progress,
 			}),
@@ -175,6 +202,16 @@ export async function setup(
 			if (answer === undefined) throw new Error("Setup cancelled");
 			answers.push({ question: question.question, answer });
 		}
+		const profileAccess = permissions.task({
+			id: "setup:profile",
+			name: "Profile generation",
+			assignment: "Generate the proposed PR profile from discovered context",
+			model: `${config.provider}/${config.model}`,
+			tools: [...toolNames, ...WORKER_CONTROL_TOOLS],
+			kind: "worker",
+			signal,
+		});
+		const profileView = snapshot.withPermissions!(profileAccess);
 		const generated = await work(`Generating repository profile (${config.provider}/${config.model})`, () =>
 			runWorker({
 				registry: ctx.modelRegistry,
@@ -182,13 +219,27 @@ export async function setup(
 				schema: ProfileDraft,
 				system: systemPrompt(prompts, "profile"),
 				input: { discovery: discovery.value, answers, previousProfile: prior?.profile },
-				tools,
+				tools: snapshotTools(profileView),
+				permissions: profileAccess,
+				dependencies: discoveryAccess.dependencies,
+				validateResult: async (value) => {
+					for (const path of sourcePaths(validateDraft(value))) {
+						if (!snapshot.paths().includes(path))
+							throw new Error(`Generated profile references missing source: ${path}`);
+						await profileAccess.authorizeSources(
+							profileView.sources!(path, "new"),
+							"Validate generated profile reading references",
+							signal,
+						);
+					}
+				},
 				signal,
 				progress,
 			}),
 		);
 		if (!generated.ok)
 			throw new Error(`Profile generation failed: ${generated.error}. No approved profile was changed.`);
+		await profileAccess.beforeDispatch(signal);
 		return saveDraft(
 			root,
 			repo,

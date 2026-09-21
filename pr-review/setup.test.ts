@@ -3,9 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, it, vi } from "vitest";
-import { approveSetup, setup } from "./setup.js";
+import { approveSetup, setup as setupSource } from "./setup.js";
 import { saveModel } from "./config.js";
-import { fixture, put, testDraft } from "./test-fixtures.js";
+import { fixture, put, testDraft, testPermissions } from "./test-fixtures.js";
+const setup = (...args: Parameters<typeof setupSource>) => {
+	args[7] ??= () => testPermissions();
+	return setupSource(...args);
+};
 import { profilePath } from "./storage.js";
 import { runWorker } from "./worker.js";
 vi.mock("./worker.js", () => ({ runWorker: vi.fn() }));

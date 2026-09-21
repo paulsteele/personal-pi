@@ -1,6 +1,6 @@
 {
   "name": "pi-extensions",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "private": true,
   "description": "Paul Steele's Pi extensions",
   "type": "module",
@@ -33,7 +33,7 @@
   "scripts": {
     "test": "bun run test:custom && bun run test:integration && bun run test:packages",
     "test:custom": "bun test claude-skills/index.test.ts code-blocks/core.test.ts desktop-notifications/core.test.ts",
-    "test:integration": "bun test tests/package-integration.test.ts",
+    "test:integration": "bun test tests/*integration.test.ts",
     "test:packages": "bun run --cwd pi-permission-system test && bun run --cwd progress-observer test && bun run --cwd pr-review test && bun run --cwd pi-atelier test",
     "typecheck": "bun run --cwd pi-permission-system typecheck && bun run --cwd progress-observer typecheck && bun run --cwd pr-review typecheck && bun run --cwd pi-atelier typecheck",
     "lint": "bun run --cwd pi-permission-system lint && bun run --cwd progress-observer lint && bun run --cwd pr-review lint && bun run --cwd pi-atelier lint",

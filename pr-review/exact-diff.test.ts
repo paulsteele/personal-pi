@@ -4,8 +4,7 @@ import { join } from "node:path";
 import type { Worker as NodeWorker } from "node:worker_threads";
 import { afterEach, expect, it, vi } from "vitest";
 import { ExactDiffWorker } from "./exact-diff.js";
-import { capture } from "./snapshot.js";
-import { fixture, put, testConfig } from "./test-fixtures.js";
+import { capture, fixture, put, testConfig } from "./test-fixtures.js";
 
 const observed = vi.hoisted(() => ({
 	workers: [] as NodeWorker[],

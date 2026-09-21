@@ -31,6 +31,38 @@ it("offers a session directory grant only for external-directory prompts", async
   ).resolves.toBe("approve_directory");
 });
 
+it("dismisses an active TUI prompt on abort and ignores its late answer", async () => {
+  const controller = new AbortController();
+  let component: any;
+  const done = vi.fn();
+  const custom = vi.fn(
+    (factory: any) =>
+      new Promise((resolve) => {
+        component = factory(
+          { requestRender: vi.fn() },
+          { fg: (_: string, text: string) => text },
+          { matches: () => false },
+          (value: unknown) => {
+            done(value);
+            resolve(value);
+          },
+        );
+      }),
+  );
+  const pending = presentPermissionPrompt(
+    { mode: "tui", ui: { custom } } as never,
+    "Permission",
+    payload,
+    true,
+    false,
+    controller.signal,
+  );
+  controller.abort();
+  expect(await pending).toBeNull();
+  component.handleInput("y");
+  expect(done).toHaveBeenCalledTimes(1);
+});
+
 it("uses a compact non-overlay action panel and ignores transcript page keys", async () => {
   let rendered: string[] = [];
   let doneCalls = 0;

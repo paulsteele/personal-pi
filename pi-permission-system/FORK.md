@@ -30,17 +30,18 @@ auto mode **141 tests**, Atelier **12 files / 222 tests**, and patch harness **4
 - Integrated allow-or-require-human model classifier, `/auto`, `/auto-model`, and `Ctrl+Shift+A`. The approved retained
   auto configuration is provider/model, persisted state, timeout, user-turn bound, and trusted
   environment hints; prompt/log presentation bounds are fixed.
-- One-shot human decisions that commit on the first selection.
+- One-shot human decisions that commit on the first selection, subject to live policy/cancellation revalidation before execution.
+- One shared context-explicit evaluator and a narrow parent-owned delegated review service, with isolated worker-turn classifier memoization and a cancellable shared human queue.
 - Always-on bounded/redacted review JSONL.
 - Prompt/decision and auto Activity events consumed by the local Atelier and desktop notification extensions.
 
 ### Deliberately deleted
 
 - YOLO and every blanket ask-to-allow rewrite.
-- Session approvals/grants and the `s` decision path.
+- Legacy blanket session approvals and the `s` decision path. Modern explicit canonical-directory and exact-file boundary grants remain supported.
 - Windows/MSYS support.
-- Public `PermissionsService`, `permissions:ready`, generic authorizer chains, and extension registration APIs.
-- Subagent/per-agent behavior, filesystem forwarding, serving registries, and project-specific policy/config.
+- The upstream public `PermissionsService`, `permissions:ready`, generic authorizer chains, and extension registration APIs. The local `permissions:review-service:v1` is intentionally narrower and does not restore those APIs.
+- Legacy subagent runtimes, per-agent configuration, filesystem forwarding, serving registries, and project-specific policy/config. PR's delegated actors still use the one global policy.
 - MCP server/target policy, shell aliases, custom extractor/formatter registries, generic settings modal/status, debug logging, legacy config migration, and OpenCode compatibility material. Generic
   structured inputs are still safety-inspected without a tool-family exception.
 
@@ -56,6 +57,10 @@ auto mode **141 tests**, Atelier **12 files / 222 tests**, and patch harness **4
 8. Activity and permission UI share provenance glyphs: `󰚩` classifier, `󰀄` human, and `󰒃` security/policy.
 9. There is exactly one local permission/auto owner at runtime.
 10. Bash compound syntax cannot hide deterministic path/command guards or an explicit inner Bash policy deny. The local projection performs bounded same-program scalar assignment dataflow. Unresolved path-bearing expansions are mandatory review risk: auto mode sends them to the classifier even when generic policy allows the command, while manual mode asks the human. Sensitive paths and other deterministic guards still require fresh human approval.
+
+11. Config and auto mode are live at permission/execution boundaries. Invalid config blocks actions; stale in-flight decisions cannot override new rules. Explicit grants/counters/notes survive an ordinary config refresh.
+12. Preserve main-agent turn-local classifier allows and use separate worker-turn caches, never cross-worker or run-long grants. Human answers are not memoized. Task/operation cancellation retires their authority.
+13. Delegated classifier facts preserve actual user authority separately from assignment/source data, and identify original paths even when a generic tool rule determines the review surface. All source effects participate in deterministic checks.
 
 ## Selective upstream adoption
 

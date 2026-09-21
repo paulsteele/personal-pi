@@ -1,6 +1,23 @@
 import { expect, it } from "vitest";
 import { normalizeConfig } from "./config.js";
 import { testConfig } from "./test-fixtures.js";
+
+it("tracks overlapping permission waits without confusing them with retry or reviving cancellation", () => {
+	const tasks = new TaskStore();
+	tasks.add({ id: "worker", stage: "review", name: "Worker", files: [], reason: "fixture" });
+	tasks.update("worker", { state: "running" });
+	tasks.permission({ taskId: "worker", requestId: "one", state: "queued" });
+	tasks.permission({ taskId: "worker", requestId: "two", state: "showing" });
+	expect(tasks.records.get("worker")?.state).toBe("permission");
+	tasks.permission({ taskId: "worker", requestId: "one", state: "finished" });
+	expect(tasks.records.get("worker")?.state).toBe("permission");
+	tasks.permission({ taskId: "worker", requestId: "two", state: "finished" });
+	expect(tasks.records.get("worker")?.state).toBe("running");
+	tasks.permission({ taskId: "worker", requestId: "three", state: "queued" });
+	tasks.cancel();
+	tasks.permission({ taskId: "worker", requestId: "three", state: "finished" });
+	expect(tasks.records.get("worker")?.state).toBe("cancelled");
+});
 import { CoverageLedger, RecoveryGate, TaskStore } from "./tasks.js";
 
 it("normalizes legacy config without retaining work quotas or mutating it", () => {

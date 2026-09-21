@@ -14,8 +14,18 @@ import { safePath } from "./profile.js";
 import { hash } from "./prompts.js";
 import { inside } from "./storage.js";
 import type { Config, Repo, Scope } from "./types.js";
+import { isPermissionBlocked, type PermissionScope, type SourceEffect } from "./permissions.js";
 
-type Entry = { mode: string; oid: string; data?: Buffer; backing?: string | undefined; unavailable?: string };
+type Entry = {
+	mode: string;
+	oid: string;
+	contentOid?: string;
+	backing?: string | undefined;
+	unavailable?: string;
+	live?: { path: string; size: number; identity: string; oidLength: number };
+};
+const liveIdentity = (stat: Awaited<ReturnType<typeof lstat>>) =>
+	hash([stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeMs, stat.ctimeMs].map(String).join(":"));
 export interface Change {
 	file: string;
 	oldPath: string;
@@ -34,7 +44,18 @@ export interface Snapshot {
 	baseline: string | null;
 	fingerprint: string;
 	changes: Change[];
-	omitted: Array<{ file: string; reason: string }>;
+	omitted: Array<{ file: string; reason: string; permission?: boolean }>;
+	permissions?: PermissionScope;
+	withPermissions?(permissions: PermissionScope): Snapshot;
+	sources?(path: string, side: "old" | "new", range?: string): SourceEffect[];
+	changePage?(
+		path: string,
+		cursor: number,
+		limit?: number,
+		signal?: AbortSignal,
+		lineOffset?: number,
+	): Promise<{ text: string; total: number; nextOffset: number | null; start?: number }>;
+	validateCurrent?(signal?: AbortSignal): Promise<void>;
 	read(path: string, side?: "old" | "new"): Promise<Buffer>;
 	paths(side?: "old" | "new"): string[];
 	page?(
@@ -96,7 +117,6 @@ async function workingTree(
 	head: string | null,
 	_config: Config,
 	signal?: AbortSignal,
-	store?: SnapshotStore,
 ): Promise<Map<string, Entry>> {
 	if ((await git(repo.root, ["ls-files", "--unmerged", "-z"], signal)).length)
 		throw new Error("Resolve merge conflicts before reviewing");
@@ -150,22 +170,12 @@ async function workingTree(
 					unavailable: stat.isDirectory() ? "submodule/directory (not traversed)" : "non-regular file",
 				});
 			} else {
-				let oid: string, backing: string | undefined;
-				if (store) {
-					const copied = await store.copy(full, stat.size, format === "sha256" ? 64 : 40, signal);
-					oid = copied.oid;
-					backing = copied.path;
-				} else {
-					const digest = createHash(format === "sha256" ? "sha256" : "sha1").update(`blob ${stat.size}\0`);
-					let bytes = 0;
-					for await (const chunk of createReadStream(full, { signal })) {
-						digest.update(chunk);
-						bytes += chunk.length;
-					}
-					if (bytes !== stat.size) throw new Error("Source changed during capture");
-					oid = digest.digest("hex");
-				}
-				result.set(path, { mode: stat.mode & 0o111 ? "100755" : "100644", oid, backing });
+				const identity = liveIdentity(stat);
+				result.set(path, {
+					mode: stat.mode & 0o111 ? "100755" : "100644",
+					oid: `live:${identity}`,
+					live: { path: full, size: stat.size, identity, oidLength: format === "sha256" ? 64 : 40 },
+				});
 			}
 		} catch (error) {
 			if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) result.delete(path);
@@ -227,14 +237,17 @@ export async function capture(
 	repo: Repo,
 	scope: Scope,
 	config: Config,
+	permissions: PermissionScope,
 	exclusions: Array<{ glob: string; reason: string }> = [],
 	signal?: AbortSignal,
+	discovery = false,
 ): Promise<Snapshot> {
+	permissions.revision();
 	const store = await SnapshotStore.create(repo);
 	const diffWorker = new ExactDiffWorker();
 	try {
 		const head = await resolveCommit(repo.root, "HEAD", signal, true);
-		const live = await workingTree(repo, head, config, signal, store);
+		const live = await workingTree(repo, head, config, signal);
 		const committed = scope.kind !== "local" && scope.committedOnly;
 		const target = committed ? await tree(repo, head, signal) : live;
 		let baseline: string | null = head;
@@ -259,12 +272,37 @@ export async function capture(
 		}
 		const before = await tree(repo, baseline, signal);
 		const blobs = new Map<string, Promise<string>>();
+		const liveCopies = new Map<Entry, Promise<string>>();
 		const empty = await store.put("");
+		// Private primitive: every caller below must enter a PermissionScope.guard first.
 		async function entryPath(entry: Entry | undefined): Promise<string> {
 			if (!entry) throw new Error("File not present in snapshot");
 			if (entry.unavailable || !["100644", "100755"].includes(entry.mode))
 				throw new Error(entry.unavailable ?? "symlink/submodule content unavailable");
 			if (entry.backing) return entry.backing;
+			if (entry.live) {
+				let copying = liveCopies.get(entry);
+				if (!copying) {
+					const source = entry.live;
+					copying = (async () => {
+						const relative = source.path.slice(repo.root.length + 1);
+						if (await symlinkAncestor(repo.root, relative))
+							throw new Error("Source acquired a symlink ancestor");
+						const stat = await lstat(source.path);
+						if (!stat.isFile() || liveIdentity(stat) !== source.identity)
+							throw new Error("Source changed since capture; start a new review");
+						const copy = await store.copy(source.path, source.size, source.oidLength, signal);
+						if (liveIdentity(await lstat(source.path)) !== source.identity)
+							throw new Error("Source changed during capture");
+						entry.backing = copy.path;
+						entry.contentOid = copy.oid;
+						return copy.path;
+					})();
+					liveCopies.set(entry, copying);
+					void copying.catch(() => liveCopies.delete(entry));
+				}
+				return copying;
+			}
 			let pending = blobs.get(entry.oid);
 			if (!pending) {
 				const path = store.allocate();
@@ -274,47 +312,92 @@ export async function capture(
 			}
 			return pending;
 		}
+		const source = (path: string, side: "old" | "new", entry: Entry, range?: string): SourceEffect => ({
+			path: join(repo.root, safePath(path)),
+			side,
+			version: entry.contentOid ?? entry.oid,
+			...(range ? { range } : {}),
+		});
 		const changes: Change[] = [];
 		const omitted: Snapshot["omitted"] = [];
+		const denied = new Map<string, unknown>();
+		// Capture only needed dirty source. Excluded/discovery-only content stays metadata-only until requested.
+		if (!discovery)
+			for (const [path, entry] of target) {
+				if (!entry.live || exclusions.some((item) => matchesGlob(path, item.glob))) continue;
+				try {
+					await permissions.guard(
+						{
+							toolName: "read",
+							input: { path: join(repo.root, path) },
+							effects: [source(path, "new", entry)],
+							description: "Capture working source for local PR diff preparation",
+							...(signal ? { signal } : {}),
+						},
+						() => entryPath(entry),
+					);
+				} catch (error) {
+					if (!isPermissionBlocked(error)) throw error;
+					if (error.kind === "cancelled" || error.kind === "unavailable") throw error;
+					denied.set(path, error);
+				}
+			}
+		const objectId = (entry: Entry) => entry.contentOid ?? entry.oid;
 		const deleted = new Map<string, string>();
 		for (const [path, entry] of before)
-			if (!target.has(path)) deleted.set(`${entry.mode}:${entry.oid}`, path);
+			if (!target.has(path)) deleted.set(`${entry.mode}:${objectId(entry)}`, path);
 		const renamedOld = new Set<string>();
 		const renames = new Map<string, string>();
 		for (const [path, entry] of target)
 			if (!before.has(path)) {
-				const old = deleted.get(`${entry.mode}:${entry.oid}`);
+				const old = deleted.get(`${entry.mode}:${objectId(entry)}`);
 				if (old && !renamedOld.has(old)) {
 					renames.set(path, old);
 					renamedOld.add(old);
 				}
 			}
-		for (const file of [...new Set([...before.keys(), ...target.keys()])].sort()) {
+		for (const file of discovery ? [] : [...new Set([...before.keys(), ...target.keys()])].sort()) {
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			signal?.throwIfAborted();
 			if (renamedOld.has(file)) continue;
 			const oldPath = renames.get(file) ?? file;
 			const old = before.get(oldPath),
 				next = target.get(file);
-			if (oldPath === file && old?.oid === next?.oid && old?.mode === next?.mode) continue;
+			if (oldPath === file && old && next && objectId(old) === objectId(next) && old.mode === next.mode)
+				continue;
 			const exclusion = exclusions.find((item) => matchesGlob(file, item.glob));
 			if (exclusion) {
 				omitted.push({ file, reason: `excluded: ${exclusion.reason}` });
 				continue;
 			}
 			try {
+				if (denied.has(file)) throw denied.get(file);
 				const patchPath = store.allocate();
-				const diff = await diffWorker.diff(
+				const effects = [
+					...(old ? [source(oldPath, "old", old)] : []),
+					...(next ? [source(file, "new", next)] : []),
+				];
+				const diff = await permissions.guard(
 					{
-						oldFile: old ? await entryPath(old) : empty,
-						newFile: next ? await entryPath(next) : empty,
-						oldPath,
-						file,
-						oldMode: old?.mode,
-						newMode: next?.mode,
-						output: patchPath,
+						toolName: "read_change",
+						input: { path: join(repo.root, file) },
+						effects,
+						description: "Read old/new source and prepare the local review diff",
+						...(signal ? { signal } : {}),
 					},
-					signal,
+					async () =>
+						diffWorker.diff(
+							{
+								oldFile: old ? await entryPath(old) : empty,
+								newFile: next ? await entryPath(next) : empty,
+								oldPath,
+								file,
+								oldMode: old?.mode,
+								newMode: next?.mode,
+								output: patchPath,
+							},
+							signal,
+						),
 				);
 				const patch = () => readFileSync(patchPath, "utf8");
 				let oldLines: Set<number> | undefined, newLines: Set<number> | undefined;
@@ -341,7 +424,12 @@ export async function capture(
 					},
 				});
 			} catch (error) {
-				omitted.push({ file, reason: error instanceof Error ? error.message : "unavailable" });
+				if (signal?.aborted || (isPermissionBlocked(error) && error.kind !== "denied")) throw error;
+				omitted.push({
+					file,
+					reason: error instanceof Error ? error.message : "unavailable",
+					...(isPermissionBlocked(error) ? { permission: true } : {}),
+				});
 			}
 		}
 		// A second independent capture detects edits made while the view was assembled.
@@ -351,64 +439,178 @@ export async function capture(
 			fingerprint(head, live) !== fingerprint(head, await workingTree(repo, head, config, signal))
 		)
 			throw new Error("Repository changed during capture; retry review");
-		return {
-			repo,
-			head,
-			baseline,
-			fingerprint: fingerprint(head, target),
-			changes,
-			omitted,
-			dispose: () => store.dispose(),
-			async writePatch(destination, writeSignal) {
-				async function* chunks() {
-					for (const change of changes) {
-						writeSignal?.throwIfAborted();
-						if (!change.patchPath || !inside(store.directory, change.patchPath))
-							throw new Error("Patch is not owned by this snapshot");
-						yield* createReadStream(change.patchPath, { signal: writeSignal });
-					}
-				}
-				await pipeline(
-					Readable.from(chunks(), { objectMode: false }),
-					createWriteStream(destination, { flags: "wx", mode: 0o600 }),
-					{ signal: writeSignal },
-				);
-			},
-			async readLines(path, side, offset, limit, maxChars, pageSignal) {
-				safePath(path);
-				const actual = side === "old" ? (renames.get(path) ?? path) : path;
-				return textLinePage(
-					await entryPath((side === "old" ? before : target).get(actual)),
-					offset,
-					limit,
-					maxChars,
-					pageSignal,
-				);
-			},
-			async lineCount(path, side, pageSignal) {
-				safePath(path);
-				const actual = side === "old" ? (renames.get(path) ?? path) : path;
-				return textLineCount(await entryPath((side === "old" ? before : target).get(actual)), pageSignal);
-			},
-			paths: (side = "new") => [...(side === "old" ? before : target).keys()].sort(),
-			async page(path, side, offset, limit, pageSignal) {
-				safePath(path);
-				const actual = side === "old" ? (renames.get(path) ?? path) : path;
-				return textPage(
-					await entryPath((side === "old" ? before : target).get(actual)),
-					offset,
-					limit,
-					pageSignal,
-				);
-			},
-			async read(path, side = "new") {
-				safePath(path);
-				const actual = side === "old" ? (renames.get(path) ?? path) : path;
-				const data = await readFile(await entryPath((side === "old" ? before : target).get(actual)));
-				text(data);
-				return data;
-			},
+		const resolveSource = (path: string, side: "old" | "new") => {
+			safePath(path);
+			const actual = side === "old" ? (renames.get(path) ?? path) : path;
+			const entry = (side === "old" ? before : target).get(actual);
+			if (!entry) throw new Error("File not present in snapshot");
+			return { actual, entry };
 		};
+		const sources = (path: string, side: "old" | "new", range?: string): SourceEffect[] => {
+			const { actual, entry } = resolveSource(path, side);
+			return [...new Set([path, actual])].map((name) => source(name, side, entry, range));
+		};
+		const changeSources = (change: Change, range?: string): SourceEffect[] => [
+			...(before.has(change.oldPath) ? sources(change.oldPath, "old", range) : []),
+			...(target.has(change.file) ? sources(change.file, "new", range) : []),
+		];
+		const metadataFingerprint = fingerprint(head, target);
+		const capturedFingerprint = hash(
+			JSON.stringify([
+				metadataFingerprint,
+				[...target].filter(([, entry]) => entry.contentOid).map(([path, entry]) => [path, entry.contentOid]),
+			]),
+		);
+		const view = (access: PermissionScope): Snapshot => {
+			const readSource = async <T>(
+				path: string,
+				side: "old" | "new",
+				range: string,
+				read: (backing: string) => Promise<T>,
+				readSignal?: AbortSignal,
+			): Promise<T> => {
+				const { entry } = resolveSource(path, side);
+				return access.guard(
+					{
+						toolName: "read",
+						input: { path: join(repo.root, path), side, range },
+						effects: sources(path, side, range),
+						description: "Read immutable captured repository source",
+						...((readSignal ?? signal) ? { signal: readSignal ?? signal } : {}),
+					},
+					async () => read(await entryPath(entry)),
+				);
+			};
+			const changePage: NonNullable<Snapshot["changePage"]> = async (
+				path,
+				cursor,
+				limit = 16000,
+				readSignal,
+				lineOffset,
+			) => {
+				const change = changes.find((item) => item.file === path || item.oldPath === path);
+				if (!change?.patchPath || !inside(store.directory, change.patchPath))
+					throw new Error("No captured change for that path");
+				const range = JSON.stringify({ cursor, limit, lineOffset });
+				return access.guard(
+					{
+						toolName: "read_change",
+						input: { path: join(repo.root, path), cursor, limit, lineOffset },
+						effects: changeSources(change, range),
+						description: "Read a captured old/new diff",
+						...((readSignal ?? signal) ? { signal: readSignal ?? signal } : {}),
+					},
+					async () => {
+						if (lineOffset !== undefined) {
+							const page = await textLinePage(change.patchPath!, lineOffset, 200, limit, readSignal);
+							return { text: page.text, total: page.total, nextOffset: page.nextOffset, start: page.start };
+						}
+						return textPage(change.patchPath!, cursor, limit, readSignal);
+					},
+				);
+			};
+			return {
+				repo,
+				head,
+				baseline,
+				fingerprint: capturedFingerprint,
+				changes,
+				omitted,
+				permissions: access,
+				sources,
+				withPermissions: view,
+				changePage,
+				dispose: () => store.dispose(),
+				paths: (side = "new") => [...(side === "old" ? before : target).keys()].sort(),
+				readLines: (path, side, offset, limit, maxChars, pageSignal) =>
+					readSource(
+						path,
+						side,
+						JSON.stringify({ offset, limit, maxChars }),
+						(backing) => textLinePage(backing, offset, limit, maxChars, pageSignal),
+						pageSignal,
+					),
+				lineCount: (path, side, pageSignal) =>
+					readSource(path, side, "line-count", (backing) => textLineCount(backing, pageSignal), pageSignal),
+				page: (path, side, offset, limit, pageSignal) =>
+					readSource(
+						path,
+						side,
+						JSON.stringify({ offset, limit }),
+						(backing) => textPage(backing, offset, limit, pageSignal),
+						pageSignal,
+					),
+				read: (path, side = "new") =>
+					readSource(path, side, "full", async (backing) => {
+						const data = await readFile(backing);
+						text(data);
+						return data;
+					}),
+				async writePatch(destination, writeSignal) {
+					async function* chunks() {
+						for (const change of changes) {
+							if (!change.patchPath || !inside(store.directory, change.patchPath))
+								throw new Error("Patch is not owned by this snapshot");
+							const action = {
+								toolName: "read_change",
+								input: { path: join(repo.root, change.file) },
+								effects: changeSources(change),
+								description: "Export captured diff to the local review viewer",
+								...(writeSignal ? { signal: writeSignal } : {}),
+							};
+							let revision = await access.guard(action, async () => access.revision());
+							// Keep byte streaming: text page boundaries may split UTF-16 surrogate pairs.
+							for await (const part of createReadStream(change.patchPath, { signal: writeSignal })) {
+								while (revision !== access.revision()) revision = await access.authorize(action);
+								yield part;
+							}
+						}
+					}
+					await pipeline(
+						Readable.from(chunks(), { objectMode: false }),
+						createWriteStream(destination, { flags: "wx", mode: 0o600 }),
+						{ signal: writeSignal },
+					);
+				},
+				async validateCurrent(checkSignal) {
+					const currentHead = await resolveCommit(repo.root, "HEAD", checkSignal, true);
+					const current = await workingTree(repo, currentHead, config, checkSignal);
+					if (fingerprint(currentHead, current) !== metadataFingerprint)
+						throw new Error("Source changed since review; rerun /pr before requesting fixes");
+					for (const [path, entry] of target) {
+						if (!entry.live || !entry.contentOid) continue;
+						const sourcePath = entry.live.path;
+						await access.guard(
+							{
+								toolName: "read",
+								input: { path: sourcePath },
+								effects: sources(path, "new"),
+								description: "Validate current working source before fix handoff",
+								...(checkSignal ? { signal: checkSignal } : {}),
+							},
+							async () => {
+								if (await symlinkAncestor(repo.root, path))
+									throw new Error("Source acquired a symlink ancestor");
+								const stat = await lstat(sourcePath);
+								if (!stat.isFile() || liveIdentity(stat) !== entry.live!.identity)
+									throw new Error("Source changed since review");
+								const digest = createHash(entry.live!.oidLength === 64 ? "sha256" : "sha1").update(
+									`blob ${stat.size}\0`,
+								);
+								for await (const part of createReadStream(sourcePath, { signal: checkSignal }))
+									digest.update(part);
+								if (
+									digest.digest("hex") !== entry.contentOid ||
+									liveIdentity(await lstat(sourcePath)) !== entry.live!.identity
+								)
+									throw new Error("Source changed since review");
+							},
+						);
+					}
+				},
+			};
+		};
+		return view(permissions);
 	} catch (error) {
 		await diffWorker.dispose();
 		await store.dispose();
@@ -418,6 +620,8 @@ export async function capture(
 	}
 }
 export async function assertCurrent(snapshot: Snapshot, config: Config, signal?: AbortSignal): Promise<void> {
+	if (snapshot.permissions) await snapshot.permissions.beforeDispatch(signal);
+	if (snapshot.validateCurrent) return snapshot.validateCurrent(signal);
 	const head = await resolveCommit(snapshot.repo.root, "HEAD", signal, true);
 	const current = await workingTree(snapshot.repo, head, config, signal);
 	if (fingerprint(head, current) !== snapshot.fingerprint)
@@ -560,6 +764,27 @@ export function snapshotTools(
 				signal?.throwIfAborted();
 				const change = snapshot.changes.find((item) => item.file === args.path || item.oldPath === args.path);
 				if (!change) throw new Error("No captured change for that path");
+				if (snapshot.changePage) {
+					const page = await snapshot.changePage(
+						args.path,
+						args.cursor ?? 0,
+						args.limit,
+						signal,
+						args.offset,
+					);
+					signal?.throwIfAborted();
+					const start = args.offset === undefined ? (args.cursor ?? 0) : (page.start ?? 0);
+					delivered?.(`diff:${change.file}`, start, start + page.text.length, page.total);
+					return {
+						content: [
+							{
+								type: "text",
+								text: `${page.text}\n[${JSON.stringify({ file: change.file, nextOffset: page.nextOffset, nextCursor: page.nextOffset, total: page.total })}]`,
+							},
+						],
+						details: {},
+					};
+				}
 				if (args.offset === undefined) {
 					const offset = args.cursor ?? 0;
 					const page = change.patchPath
@@ -631,7 +856,9 @@ export function snapshotTools(
 				const all = snapshot.paths().filter((path) => !args.glob || matchesGlob(path, args.glob));
 				const selected = all.slice(args.offset ?? 0, (args.offset ?? 0) + 200);
 				const found: Array<{ file: string; line: number; text: string }> = [];
-				let scanned = 0;
+				let scanned = 0,
+					unavailable = 0;
+				const denied: Array<{ file: string; reason: string }> = [];
 				for (const file of selected) {
 					if (found.length >= 100) break;
 					signal?.throwIfAborted();
@@ -641,8 +868,12 @@ export function snapshotTools(
 						for (let i = 0; i < lines.length && found.length < 100; i++)
 							if (lines[i]!.includes(args.query))
 								found.push({ file, line: i + 1, text: lines[i]!.slice(0, 300) });
-					} catch {
-						/* unavailable files cannot be searched */
+					} catch (error) {
+						signal?.throwIfAborted();
+						if (isPermissionBlocked(error)) {
+							if (error.kind !== "denied") throw error;
+							denied.push({ file, reason: error.message });
+						} else unavailable++;
 					}
 				}
 				return {
@@ -654,6 +885,10 @@ export function snapshotTools(
 								totalFiles: all.length,
 								nextOffset: (args.offset ?? 0) + scanned,
 								matches: found,
+								denied,
+								unavailable,
+								complete:
+									denied.length === 0 && unavailable === 0 && (args.offset ?? 0) + scanned >= all.length,
 								matchLimitReached: found.length === 100,
 							}),
 						},
@@ -737,9 +972,11 @@ export async function* contextResources(
 		let page: { text: string; total: number };
 		if (id.startsWith("diff:")) {
 			const change = snapshot.changes.find((change) => change.file === path)!;
-			page = change.patchPath
-				? await textPage(change.patchPath, 0, maxChars, signal)
-				: stringPage(change.patch, 0, maxChars);
+			page = snapshot.changePage
+				? await snapshot.changePage(path, 0, maxChars, signal)
+				: change.patchPath
+					? await textPage(change.patchPath, 0, maxChars, signal)
+					: stringPage(change.patch, 0, maxChars);
 		} else if (id.startsWith("doc:"))
 			page = snapshot.page
 				? await snapshot.page(path, "new", 0, maxChars, signal)

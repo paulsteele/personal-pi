@@ -1,14 +1,10 @@
 import { createHash } from "node:crypto";
-import { statSync } from "node:fs";
-import { posix } from "node:path";
 import {
   type ExtensionAPI,
   type ExtensionContext,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import type { AccessPath } from "./access-intent/access-path.ts";
 import { warmBashParser } from "./access-intent/bash/parser.ts";
-import { BashProgram } from "./access-intent/bash/program.ts";
 import { classify, type ReviewFacts } from "./auto/classifier.ts";
 import {
   type AutoModeSnapshot,
@@ -16,9 +12,7 @@ import {
   type ModelReviewResult,
   type Verdict,
 } from "./auto/core.ts";
-import { formatEditForClassifier } from "./auto/edit-preview.ts";
 import { createAutoPublisher } from "./auto/events.ts";
-import { evaluateSafety, type SafetyContext } from "./auto/safety-policy.ts";
 import {
   boundedNotes,
   CLASSIFIER_NOTE_ENTRY,
@@ -29,14 +23,29 @@ import {
 } from "./auto/session-notes.ts";
 import { type Config, loadConfig, saveAutoEnabled, saveAutoModel } from "./config.ts";
 import { ReviewLogger } from "./logging.ts";
-import { PathNormalizer } from "./path-normalizer.ts";
+import { ApprovalQueue } from "./approval-queue.ts";
+import {
+  createDelegatedReviewService,
+  permissionRevision,
+  REVIEW_SERVICE_CHANNEL,
+  type DelegatedActor,
+} from "./delegated-review.ts";
 import {
   type EventBus,
   emitDecision,
   emitUiPrompt,
   type PermissionDecisionEvent,
+  PERMISSIONS_REVIEW_STATE_CHANNEL,
 } from "./permission-events.ts";
-import { checkPolicy, type PolicyDecision } from "./policy.ts";
+import { checkPolicy } from "./policy.ts";
+import {
+  reviewToolCall,
+  reviewRevision,
+  type ActiveSkill,
+  type ReviewState,
+  type ToolReviewRequest,
+  type HumanReviewRequest,
+} from "./tool-review.ts";
 import { ALLOW_SESSION_FILES_CHANNEL, sessionFileGrants } from "./session-files.ts";
 import { presentPermissionPrompt } from "./prompt/component.ts";
 import {
@@ -44,25 +53,19 @@ import {
   appendPermissionRequest,
   registerPermissionEntryRenderers,
 } from "./prompt/entries.ts";
-import {
-  buildPermissionPromptPayload,
-  type PermissionPromptPayload,
-  type PermissionReview,
-} from "./prompt/payload.ts";
 
 const STATUS_KEY = "auto-mode";
 const REVIEW_LOG = "pi-permission-system-permission-review.jsonl";
-
-interface ActiveSkill {
-  name: string;
-  filePath: string;
-  baseDir: string;
-}
 
 interface Runtime {
   pi: ExtensionAPI;
   ctx: ExtensionContext;
   config: Config;
+  revision: string;
+  agentDir: string;
+  lifetime: AbortController;
+  approvals: ApprovalQueue;
+  delegated?: ReturnType<typeof createDelegatedReviewService>;
   enabled: boolean;
   notes: readonly ClassifierNote[];
   skills: readonly ActiveSkill[];
@@ -87,50 +90,6 @@ function clean(value: unknown, max = 500): string {
         .slice(0, max)
         .join("")
     : "";
-}
-
-function text(value: unknown): string | null {
-  return typeof value === "string" ? value : null;
-}
-
-function toolInputPath(input: unknown): string | null {
-  if (!input || typeof input !== "object") return null;
-  const record = input as Record<string, unknown>;
-  const direct =
-    typeof record.path === "string"
-      ? record.path
-      : typeof record.file_path === "string"
-        ? record.file_path
-        : undefined;
-  if (direct?.trim()) return direct;
-  const args = record.arguments;
-  if (args && typeof args === "object") {
-    const nested = args as Record<string, unknown>;
-    const value =
-      typeof nested.path === "string"
-        ? nested.path
-        : typeof nested.file_path === "string"
-          ? nested.file_path
-          : undefined;
-    return value?.trim() ? value : null;
-  }
-  return null;
-}
-
-function requestId(toolCallId: string): string {
-  return `perm-${toolCallId || crypto.randomUUID()}`;
-}
-
-function externalDirectoryForPath(value: string, normalizer: PathNormalizer): string | undefined {
-  const canonical = normalizer.forPath(value).boundaryValue() || normalizer.comparableValue(value);
-  if (!canonical || !posix.isAbsolute(canonical) || canonical === "/") return undefined;
-  try {
-    return statSync(canonical).isDirectory() ? canonical : posix.dirname(canonical);
-  } catch {
-    // A missing target may itself be a directory being created. Persisting that
-    // exact path is safer than broadening the grant to its existing parent.
-    return canonical;
-  }
 }
 
 function skillNameFromInput(value: string): string | null {
@@ -205,84 +164,123 @@ async function refreshGitRemotes(pi: ExtensionAPI, runtime: Runtime): Promise<vo
 
 async function humanDecision(
   runtime: Runtime,
-  request: {
-    id: string;
-    toolCallId: string;
-    surface: string;
-    value: string;
-    pattern: string | null;
-    category?: string;
-    reason?: string;
-    source?: "tool_call" | "skill_input" | "skill_read";
-    payload?: PermissionPromptPayload;
-    allowDirectory?: string;
-  },
-): Promise<{ allowed: boolean; reason: string | null }> {
+  request: HumanReviewRequest,
+): Promise<{
+  allowed: boolean;
+  reason: string | null;
+  stale?: boolean;
+  unavailable?: boolean;
+}> {
   const { ctx } = runtime;
-  if (!ctx.hasUI) return { allowed: false, reason: "No interactive human authority is available." };
-  const payload =
-    request.payload ??
-    buildPermissionPromptPayload({
-      surface: request.surface,
-      value: request.value,
-      matchedPattern: request.pattern,
-      category: request.category,
-      reason: request.reason,
-    });
-  const classifierFeedback = payload.review.source === "classifier";
-  emitUiPrompt(runtime.events, {
-    requestId: request.id,
-    toolCallId: request.toolCallId || null,
-    source: request.source ?? "tool_call",
-    surface: request.surface,
-    value: request.value,
-  });
-  if (ctx.mode === "tui")
-    appendPermissionRequest(runtime.pi, request.id, request.toolCallId || null, payload);
-  const choice = await presentPermissionPrompt(
-    ctx,
-    "Permission Required",
-    payload,
-    classifierFeedback,
-    Boolean(request.allowDirectory),
-  );
-  if (ctx.mode === "tui")
-    appendPermissionOutcome(runtime.pi, request.id, request.toolCallId || null, choice);
-  if (!choice) return { allowed: false, reason: "Human cancelled permission confirmation." };
-  const allow = choice === "approve" || choice === "approve_directory" || choice === "approve_note";
-  if (choice === "approve_directory") {
-    if (!request.allowDirectory)
-      return { allowed: false, reason: "No specific external directory was available to allow." };
-    runtime.sessionExternalDirectories.add(request.allowDirectory);
-    runtime.cache.clear();
-    ctx.ui.notify(`Allowed external directory for this session: ${request.allowDirectory}`, "info");
-  }
-  const noteChoice = choice === "approve_note" || choice === "deny_note";
-  if (noteChoice) {
-    const draft = await ctx.ui.input("Classifier note for this session");
-    const note = normalizeNote(draft);
-    // A note is optional metadata for later classifier calls. Cancelling or
-    // blanking it leaves this already-confirmed decision authoritative.
-    if (!note)
+  if (!ctx.hasUI)
+    return {
+      allowed: false,
+      reason: "No interactive human authority is available.",
+      unavailable: true,
+    };
+  const announce = (state: "queued" | "showing" | "finished") => {
+    try {
+      runtime.events.emit(PERMISSIONS_REVIEW_STATE_CHANNEL, {
+        requestId: request.id,
+        toolCallId: request.toolCallId || null,
+        delegated: request.delegated,
+        state,
+      });
+    } catch {
+      /* presentation is non-authoritative */
+    }
+  };
+  const isCurrent = () => {
+    try {
+      return request.isCurrent();
+    } catch {
+      return false;
+    }
+  };
+  announce("queued");
+  try {
+    return await runtime.approvals.run(request.signal, async (signal) => {
+      if (!isCurrent())
+        return { allowed: false, reason: "Permission context changed.", stale: true };
+      announce("showing");
+      emitUiPrompt(runtime.events, {
+        requestId: request.id,
+        toolCallId: request.toolCallId || null,
+        delegated: request.delegated,
+        source: request.source,
+        surface: request.surface,
+        value: request.value,
+      });
+      if (ctx.mode === "tui")
+        appendPermissionRequest(
+          runtime.pi,
+          request.id,
+          request.toolCallId || null,
+          request.payload,
+        );
+      const choice = await presentPermissionPrompt(
+        ctx,
+        "Permission Required",
+        request.payload,
+        request.payload.review.source === "classifier",
+        Boolean(request.allowDirectory),
+        signal,
+      );
+      let stale = !signal.aborted && !isCurrent();
+      const allow =
+        choice === "approve" || choice === "approve_directory" || choice === "approve_note";
+      if (!stale && !signal.aborted && (choice === "approve_note" || choice === "deny_note")) {
+        const draft = await ctx.ui.input("Classifier note for this session", undefined, { signal });
+        const note = normalizeNote(draft);
+        stale = !signal.aborted && !isCurrent();
+        if (!stale && !signal.aborted && note) {
+          (
+            ctx.sessionManager as unknown as {
+              appendCustomEntry(type: string, data: unknown): string;
+            }
+          ).appendCustomEntry(CLASSIFIER_NOTE_ENTRY, { version: 1, text: note.text });
+          runtime.notes = boundedNotes([...runtime.notes, note]);
+          runtime.cache.clear();
+          runtime.logger.review("classifier_note.added", {
+            requestId: request.id,
+            toolCallId: request.toolCallId || null,
+            length: note.text.length,
+            digest: note.digest,
+          });
+        }
+      }
+      if (ctx.mode === "tui" && !runtime.lifetime.signal.aborted)
+        appendPermissionOutcome(
+          runtime.pi,
+          request.id,
+          request.toolCallId || null,
+          choice,
+          signal.aborted ? "cancelled" : stale ? "superseded" : undefined,
+        );
+      if (stale) return { allowed: false, reason: "Permission context changed.", stale: true };
+      if (signal.aborted || !choice)
+        return { allowed: false, reason: "Human cancelled permission confirmation." };
+      if (choice === "approve_directory") {
+        if (!request.allowDirectory)
+          return {
+            allowed: false,
+            reason: "No specific external directory was available to allow.",
+          };
+        runtime.sessionExternalDirectories.add(request.allowDirectory);
+        runtime.cache.clear();
+        ctx.ui.notify(
+          `Allowed external directory for this session: ${request.allowDirectory}`,
+          "info",
+        );
+      }
       return {
         allowed: allow,
         reason: allow ? null : (request.reason ?? "Human denied permission."),
       };
-    (
-      ctx.sessionManager as unknown as {
-        appendCustomEntry(customType: string, data?: unknown): string;
-      }
-    ).appendCustomEntry(CLASSIFIER_NOTE_ENTRY, { version: 1, text: note.text });
-    runtime.notes = boundedNotes([...runtime.notes, note]);
-    runtime.cache.clear();
-    runtime.logger.review("classifier_note.added", {
-      requestId: request.id,
-      toolCallId: request.toolCallId || null,
-      length: note.text.length,
-      digest: note.digest,
     });
+  } finally {
+    announce("finished");
   }
-  return { allowed: allow, reason: allow ? null : (request.reason ?? "Human denied permission.") };
 }
 
 function decision(runtime: Runtime, event: PermissionDecisionEvent): void {
@@ -339,122 +337,113 @@ function publish(runtime: Runtime): void {
   runtime.publisher.update(current);
 }
 
-interface PolicyCheck {
-  surface: string;
-  value: string;
-  decision: PolicyDecision;
-  path?: AccessPath;
-}
-
-function policyForCall(
-  config: Config,
-  sessionExternalDirectories: ReadonlySet<string>,
-  sessionExternalFiles: ReadonlySet<string>,
-  toolName: string,
-  command: string | null,
-  directPath: string | null,
-  skillName: string | null,
-  normalizer: PathNormalizer,
-  program: BashProgram | null,
-): PolicyCheck {
-  const checks: PolicyCheck[] = [];
-  const sessionAllows = (surface: string, matchValues: readonly string[]): boolean =>
-    surface === "external_directory" &&
-    matchValues.some((value) =>
-      [...sessionExternalDirectories].some(
-        (directory) => value === directory || value.startsWith(`${directory}/`),
-      ),
-    );
-  const add = (surface: string, displayValue: string, path?: AccessPath): void => {
-    if ((surface === "path" || surface === "external_directory") && !(surface in config.permission))
-      return;
-    const matchValues = path?.matchValues() ?? [displayValue];
-    const decisions = matchValues.map((matchValue) =>
-      checkPolicy(config.permission, surface, matchValue),
-    );
-    // Lexical and canonical aliases describe the same path. Any explicit deny
-    // remains strongest; otherwise an allow on either alias covers the access.
-    const explicitDeny = decisions.find((candidate) => candidate.state === "deny");
-    const decision =
-      explicitDeny ??
-      // File grants match only the current canonical destination, never a lexical
-      // alias that could have been retargeted since the grant was registered.
-      (surface === "external_directory" && path && sessionExternalFiles.has(path.boundaryValue())
-        ? { state: "allow" as const, matchedPattern: "<session-file>", reason: null }
-        : undefined) ??
-      (sessionAllows(surface, matchValues)
-        ? { state: "allow" as const, matchedPattern: "<session-directory>", reason: null }
-        : undefined) ??
-      decisions.find((candidate) => candidate.state === "allow") ??
-      decisions[0] ??
-      checkPolicy(config.permission, surface, displayValue);
-    checks.push({ surface, value: displayValue, decision, ...(path ? { path } : {}) });
-  };
-  if (skillName) add("skill", skillName);
-  if (directPath) {
-    const path = normalizer.forPath(directPath);
-    add("path", directPath, path);
-    if (normalizer.isOutsideWorkingDirectory(directPath))
-      add("external_directory", directPath, path);
+function refreshPolicy(runtime: Runtime): ReviewState {
+  const loaded = loadConfig(runtime.agentDir);
+  if (loaded.issues.length) {
+    runtime.cache.clear();
+    throw new Error("Permission config is missing, invalid or unreadable.");
   }
-  for (const candidate of program?.pathRuleCandidates() ?? [])
-    add("path", candidate.path.value(), candidate.path);
-  for (const external of program?.externalPaths() ?? [])
-    add("external_directory", external.value(), external);
-  if (command) {
-    // Gate every executable projection as well as the full source. Compound
-    // units are retained by BashProgram, so explicit inner deny/ask rules
-    // cannot be hidden by control flow or a permissive whole-command match.
-    for (const unit of program?.commands() ?? []) add("bash", unit.text);
-    add("bash", command);
-  } else {
-    add(toolName, toolName);
+  // JSON preserves rule insertion order, which is semantically significant.
+  const revision = permissionRevision([loaded.config]);
+  if (revision !== runtime.revision) {
+    runtime.config = loaded.config;
+    runtime.revision = revision;
+    runtime.enabled = loaded.config.auto.enabledByDefault;
+    runtime.cache.clear();
+    publish(runtime);
   }
-  const rank = (state: PolicyDecision["state"]): number =>
-    state === "deny" ? 2 : state === "ask" ? 1 : 0;
-  return checks.reduce((worst, candidate) =>
-    rank(candidate.decision.state) > rank(worst.decision.state) ? candidate : worst,
-  );
-}
-
-function classifyFacts(
-  toolName: string,
-  input: unknown,
-  command: string | null,
-  selected: PolicyCheck,
-  normalizer: PathNormalizer,
-): ReviewFacts {
-  const edit =
-    toolName === "edit" && input && typeof input === "object"
-      ? formatEditForClassifier(input as Record<string, unknown>)
-      : undefined;
   return {
-    surface: selected.surface,
-    toolName,
-    invokedToolName: selected.surface === "skill" ? selected.value : null,
-    value: selected.value,
-    ...(selected.path
-      ? {
-          path: {
-            resolved: selected.path.boundaryValue(),
-            // Resolve the root too: macOS normally aliases /tmp to /private/tmp.
-            withinTmp: normalizer.isWithinDirectory(
-              selected.path.boundaryValue(),
-              normalizer.forPath("/tmp").boundaryValue(),
-            ),
-          },
-        }
-      : {}),
-    matchedPattern: selected.decision.matchedPattern,
-    commandContext: null,
-    executedUnit: null,
-    agentName: null,
-    evidence: edit
-      ? [{ label: "input", text: edit, detail: null }]
-      : command
-        ? [{ label: "full command", text: command, detail: null }]
-        : [],
+    config: runtime.config,
+    revision,
+    contextRevision: permissionRevision([noteDigest(runtime.notes), runtime.gitRemotes]),
+    skills: runtime.skills,
+    directories: runtime.sessionExternalDirectories,
+    files: runtime.sessionExternalFiles,
   };
+}
+
+function authorize(
+  runtime: Runtime,
+  ctx: ExtensionContext,
+  request: ToolReviewRequest,
+  actor?: DelegatedActor,
+) {
+  request = {
+    ...request,
+    signal: request.signal
+      ? AbortSignal.any([runtime.lifetime.signal, request.signal])
+      : runtime.lifetime.signal,
+  };
+  return reviewToolCall(request, {
+    refresh: () => {
+      runtime.lifetime.signal.throwIfAborted();
+      const state = refreshPolicy(runtime);
+      return actor
+        ? {
+            ...state,
+            skills: actor.skills ?? state.skills,
+            directories: new Set<string>(),
+            files: new Set<string>(),
+          }
+        : state;
+    },
+    model: (action, state, id, facts, risks) =>
+      modelDecision(runtime, ctx, id, facts, risks, action.toolCallId || null, {
+        request: action,
+        state,
+        actor,
+      }),
+    human: (human) =>
+      humanDecision(runtime, {
+        ...human,
+        ...(actor
+          ? {
+              delegated: {
+                operationId: actor.operationId,
+                taskId: actor.taskId,
+                taskName: request.agentName ?? "Worker",
+                childToolCallId: actor.childToolCallId,
+              },
+            }
+          : {}),
+      }),
+    decision: (event) => {
+      if (!runtime.lifetime.signal.aborted)
+        decision(runtime, {
+          ...event,
+          ...(actor
+            ? {
+                delegated: {
+                  operationId: actor.operationId,
+                  taskId: actor.taskId,
+                  taskName: request.agentName ?? "Worker",
+                  childToolCallId: actor.childToolCallId,
+                },
+              }
+            : {}),
+        });
+    },
+    review: (event, id) => {
+      if (!runtime.lifetime.signal.aborted) runtime.publisher.decision(event, id);
+    },
+    count: (kind) => {
+      runtime.counts[kind]++;
+      publish(runtime);
+    },
+  });
+}
+
+function createDelegation(runtime: Runtime) {
+  return createDelegatedReviewService({
+    sessionId: () => runtime.ctx.sessionManager.getSessionId(),
+    revision: () => {
+      runtime.lifetime.signal.throwIfAborted();
+      return reviewRevision(refreshPolicy(runtime));
+    },
+    authority: () =>
+      recentUserTurns(runtime.ctx, refreshPolicy(runtime).config.auto.contextUserTurns),
+    authorize: (request, actor) => authorize(runtime, runtime.ctx, request, actor),
+  });
 }
 
 async function modelDecision(
@@ -464,14 +453,33 @@ async function modelDecision(
   facts: ReviewFacts,
   riskMarkers: readonly string[],
   toolCallId: string | null,
+  options?: { request: ToolReviewRequest; state: ReviewState; actor?: DelegatedActor },
 ): Promise<ModelReviewResult> {
-  if (ctx.signal?.aborted) return { kind: "cancelled", modelCalled: false };
+  const signal = options?.request.signal ?? ctx.signal;
+  const config = options?.state.config ?? runtime.config;
+  const cwd = options?.request.cwd ?? ctx.cwd;
+  const authority = options?.actor?.authority ?? recentUserTurns(ctx, config.auto.contextUserTurns);
+  const cache = options?.actor?.cache ?? runtime.cache;
+  if (signal?.aborted) return { kind: "cancelled", modelCalled: false };
   const key = createHash("sha256")
-    .update(JSON.stringify([facts, noteDigest(runtime.notes)]))
+    .update(
+      JSON.stringify([
+        facts,
+        options?.actor?.identity,
+        options?.request.input,
+        options?.request.effects,
+        cwd,
+        authority,
+        runtime.gitRemotes,
+        riskMarkers,
+        config,
+        noteDigest(runtime.notes),
+      ]),
+    )
     .digest("hex");
-  const cached = runtime.cache.get(key);
+  const cached = cache.get(key);
   if (cached) return { kind: "allow", modelCalled: false };
-  const model = ctx.modelRegistry.find(runtime.config.auto.provider, runtime.config.auto.model);
+  const model = ctx.modelRegistry.find(config.auto.provider, config.auto.model);
   const unavailable: ModelReviewResult = !model
     ? {
         kind: "require_human",
@@ -510,19 +518,19 @@ async function modelDecision(
     model: model as never,
     facts,
     context: {
-      cwd: ctx.cwd,
+      cwd,
       gitRemotes: runtime.gitRemotes,
-      trustedRoots: runtime.config.auto.environment.trustedRoots,
-      trustedRemotes: runtime.config.auto.environment.trustedRemotes,
-      trustedDomains: runtime.config.auto.environment.trustedDomains,
+      trustedRoots: config.auto.environment.trustedRoots,
+      trustedRemotes: config.auto.environment.trustedRemotes,
+      trustedDomains: config.auto.environment.trustedDomains,
       notes: runtime.notes,
       riskMarkers,
-      recentUserTurns: recentUserTurns(ctx, runtime.config.auto.contextUserTurns),
+      recentUserTurns: authority,
     },
-    config: runtime.config.auto,
-    signal: ctx.signal,
+    config: config.auto,
+    signal,
   });
-  if (response.kind === "allow") runtime.cache.set(key, { kind: "allow" });
+  if (response.kind === "allow") cache.set(key, { kind: "allow" });
   if (response.kind !== "cancelled")
     runtime.publisher.decision(
       {
@@ -545,8 +553,13 @@ export default function permissionSystem(pi: ExtensionAPI): void {
   registerPermissionEntryRenderers(pi);
   let runtime: Runtime | undefined;
   let unsubscribeSessionFiles: (() => void) | undefined;
+  let unsubscribeService: (() => void) | undefined;
 
   const reload = (ctx: ExtensionContext): Runtime => {
+    runtime?.approvals.dispose();
+    runtime?.lifetime.abort();
+    runtime?.delegated?.dispose();
+    unsubscribeService?.();
     runtime?.publisher.dispose();
     unsubscribeSessionFiles?.();
     const loaded = loadConfig(getAgentDir());
@@ -554,6 +567,10 @@ export default function permissionSystem(pi: ExtensionAPI): void {
       pi,
       ctx,
       config: loaded.config,
+      revision: permissionRevision([loaded.config]),
+      agentDir: getAgentDir(),
+      lifetime: new AbortController(),
+      approvals: new ApprovalQueue(),
       enabled: loaded.config.auto.enabledByDefault,
       notes: notesFromBranch(ctx.sessionManager.getBranch()),
       skills: [],
@@ -570,6 +587,13 @@ export default function permissionSystem(pi: ExtensionAPI): void {
     };
     for (const issue of loaded.issues) next.logger.review("config.warning", { issue });
     runtime = next;
+    next.delegated = createDelegation(next);
+    unsubscribeService = pi.events.on(REVIEW_SERVICE_CHANNEL, (data) => {
+      if (!next.delegated || !data || typeof data !== "object") return;
+      const request = data as { version?: unknown; accept?: unknown };
+      if (request.version === 1 && typeof request.accept === "function")
+        request.accept(next.delegated.service);
+    });
     unsubscribeSessionFiles = pi.events.on(ALLOW_SESSION_FILES_CHANNEL, (data) => {
       if (runtime !== next) return;
       const files = sessionFileGrants(data, next.ctx.sessionManager.getSessionId());
@@ -588,11 +612,14 @@ export default function permissionSystem(pi: ExtensionAPI): void {
       runtime.ctx = ctx;
       runtime.notes = notesFromBranch(ctx.sessionManager.getBranch());
       runtime.cache.clear();
+      runtime.delegated?.dispose();
+      runtime.delegated = createDelegation(runtime);
     }
   });
   pi.on("before_agent_start", async (event, ctx) => {
     await warmBashParser();
     const current = runtime ?? reload(ctx);
+    if (!loadConfig(current.agentDir).issues.length) refreshPolicy(current);
     current.skills = (event.systemPromptOptions.skills ?? []).map((skill) => ({
       name: skill.name,
       filePath: skill.filePath,
@@ -604,6 +631,11 @@ export default function permissionSystem(pi: ExtensionAPI): void {
   });
   pi.on("turn_start", () => runtime?.cache.clear());
   pi.on("session_shutdown", () => {
+    runtime?.approvals.dispose();
+    runtime?.lifetime.abort();
+    runtime?.delegated?.dispose();
+    unsubscribeService?.();
+    unsubscribeService = undefined;
     if (runtime?.ctx.hasUI) runtime.ctx.ui.setStatus(STATUS_KEY, undefined);
     runtime?.publisher.dispose();
     unsubscribeSessionFiles?.();
@@ -615,6 +647,7 @@ export default function permissionSystem(pi: ExtensionAPI): void {
     description: "Toggle and persist integrated auto permission review",
     handler: async (args, ctx) => {
       const current = runtime ?? reload(ctx);
+      if (!loadConfig(current.agentDir).issues.length) refreshPolicy(current);
       const value = args.trim().toLowerCase();
       const enabled = value === "on" ? true : value === "off" ? false : !current.enabled;
       saveAutoEnabled(getAgentDir(), enabled);
@@ -631,6 +664,7 @@ export default function permissionSystem(pi: ExtensionAPI): void {
     description: "Toggle auto permission review",
     handler: async (ctx) => {
       const current = runtime ?? reload(ctx as ExtensionContext);
+      if (!loadConfig(current.agentDir).issues.length) refreshPolicy(current);
       const enabled = !current.enabled;
       saveAutoEnabled(getAgentDir(), enabled);
       current.enabled = enabled;
@@ -646,6 +680,7 @@ export default function permissionSystem(pi: ExtensionAPI): void {
     description: "Select and persist the integrated auto classifier model",
     handler: async (args, ctx) => {
       const current = runtime ?? reload(ctx);
+      if (!loadConfig(current.agentDir).issues.length) refreshPolicy(current);
       const requested = args.trim();
       const available = ctx.modelRegistry.getAvailable();
       const selected = requested
@@ -671,109 +706,22 @@ export default function permissionSystem(pi: ExtensionAPI): void {
   });
 
   pi.on("input", async (event, ctx) => {
-    const current = runtime ?? reload(ctx);
-    const skillName = skillNameFromInput(event.text);
-    if (!skillName) return { action: "continue" as const };
-    const policy = checkPolicy(current.config.permission, "skill", skillName);
-    const req = requestId("");
-    if (policy.state === "deny") {
-      decision(current, {
-        requestId: req,
-        toolCallId: null,
-        surface: "skill",
-        value: skillName,
-        result: "deny",
-        resolution: "policy_deny",
-        decidedBy: { kind: "policy", pattern: policy.matchedPattern },
-        matchedPattern: policy.matchedPattern,
-        reason: policy.reason,
-      });
-      if (ctx.hasUI) ctx.ui.notify(`Skill '${skillName}' is not permitted.`, "warning");
-      return { action: "handled" as const };
-    }
-    if (policy.state === "allow") {
-      decision(current, {
-        requestId: req,
-        toolCallId: null,
-        surface: "skill",
-        value: skillName,
-        result: "allow",
-        resolution: "policy_allow",
-        decidedBy: { kind: "policy", pattern: policy.matchedPattern },
-        matchedPattern: policy.matchedPattern,
-      });
-      return { action: "continue" as const };
-    }
-    let review: PermissionReview = { source: "policy", reason: policy.reason };
-    if (current.enabled) {
-      const verdict = await modelDecision(
-        current,
-        ctx,
-        req,
-        {
-          surface: "skill",
-          toolName: null,
-          invokedToolName: skillName,
-          value: skillName,
-          matchedPattern: policy.matchedPattern,
-          commandContext: null,
-          executedUnit: null,
-          agentName: null,
-          evidence: [],
-        },
-        [],
-        null,
-      );
-      if (verdict.kind === "cancelled") return { action: "handled" as const };
-      if (verdict.kind === "allow") {
-        current.counts.allowed += 1;
-        publish(current);
-        decision(current, {
-          requestId: req,
-          toolCallId: null,
-          surface: "skill",
-          value: skillName,
-          result: "allow",
-          resolution: "auto_approved",
-          decidedBy: { kind: "auto", verdict: "allow" },
-        });
-        return { action: "continue" as const };
-      }
-      current.counts.asked += 1;
-      publish(current);
-      review = { source: "classifier", reason: verdict.reason, cause: verdict.cause };
-    }
-    const human = await humanDecision(current, {
-      id: req,
+    const skill = skillNameFromInput(event.text);
+    if (!skill) return { action: "continue" as const };
+    const result = await authorize(runtime ?? reload(ctx), ctx, {
+      toolName: "skill",
+      input: {},
+      skillInput: skill,
+      cwd: ctx.cwd,
       toolCallId: "",
-      surface: "skill",
-      value: skillName,
-      pattern: policy.matchedPattern,
-      source: "skill_input",
-      payload: buildPermissionPromptPayload({
-        surface: "skill",
-        value: skillName,
-        matchedPattern: policy.matchedPattern,
-        reason: policy.reason ?? undefined,
-        review,
-      }),
+      signal: ctx.signal,
     });
-    decision(current, {
-      requestId: req,
-      toolCallId: null,
-      surface: "skill",
-      value: skillName,
-      result: human.allowed ? "allow" : "deny",
-      resolution: human.allowed ? "user_approved" : "user_denied",
-      decidedBy: { kind: "human" },
-      matchedPattern: policy.matchedPattern,
-      reason: human.reason,
-    });
-    return { action: human.allowed ? ("continue" as const) : ("handled" as const) };
+    if (result.kind !== "allowed" && ctx.hasUI)
+      ctx.ui.notify(`Skill '${skill}' is not permitted.`, "warning");
+    return { action: result.kind === "allowed" ? ("continue" as const) : ("handled" as const) };
   });
 
   pi.on("tool_call", async (event, ctx) => {
-    const current = runtime ?? reload(ctx);
     const raw = event as {
       toolName?: unknown;
       name?: unknown;
@@ -781,260 +729,13 @@ export default function permissionSystem(pi: ExtensionAPI): void {
       input?: unknown;
       arguments?: unknown;
     };
-    const toolName = clean(raw.toolName ?? raw.name, 100) || "unknown";
-    const toolCallId = clean(raw.toolCallId, 160);
-    const input = raw.input ?? raw.arguments ?? {};
-    const normalizer = new PathNormalizer(ctx.cwd);
-    const command =
-      toolName === "bash" && input && typeof input === "object"
-        ? text((input as Record<string, unknown>).command)
-        : null;
-    const program = command ? await BashProgram.parse(command, normalizer) : null;
-    const directPath = toolInputPath(input);
-    const normalizedDirectPath = directPath
-      ? normalizer.forPath(directPath).boundaryValue() || normalizer.comparableValue(directPath)
-      : "";
-    const matchedSkill =
-      toolName === "read"
-        ? current.skills
-            .filter((skill) => {
-              const filePath =
-                normalizer.forPath(skill.filePath).boundaryValue() ||
-                normalizer.comparableValue(skill.filePath);
-              const baseDir =
-                normalizer.forPath(skill.baseDir).boundaryValue() ||
-                normalizer.comparableValue(skill.baseDir);
-              return (
-                normalizedDirectPath === filePath ||
-                normalizer.isWithinDirectory(normalizedDirectPath, baseDir)
-              );
-            })
-            .sort((left, right) => right.baseDir.length - left.baseDir.length)[0]
-        : undefined;
-    const paths = [
-      ...(directPath ? [normalizer.forPath(directPath)] : []),
-      ...(program?.pathRuleCandidates().map((entry) => entry.path) ?? []),
-      ...(program?.externalPaths() ?? []),
-    ];
-    const guardContext: SafetyContext = {
-      requestId: requestId(toolCallId),
-      toolCallId,
-      toolName,
-      agentName: null,
-      input,
+    const result = await authorize(runtime ?? reload(ctx), ctx, {
+      toolName: clean(raw.toolName ?? raw.name, 100) || "unknown",
+      input: raw.input ?? raw.arguments ?? {},
+      toolCallId: clean(raw.toolCallId, 160),
       cwd: ctx.cwd,
-      platform: process.platform,
-      shell: command
-        ? {
-            command,
-            workdir: null,
-            parseComplete: program?.isParseComplete() ?? false,
-            unresolvedPathExpression: program?.hasUnresolvedPathExpression() ?? false,
-            commands: (program?.guardCommands() ?? []).map((unit) => ({
-              text: unit.text,
-              argv: unit.argv ?? null,
-              context: unit.context ?? null,
-              wrapperKind: unit.wrapperKind ?? null,
-              executedUnit: unit.executedUnit ?? null,
-            })),
-          }
-        : null,
-      paths: paths.map((path) => ({
-        value: path.value(),
-        matchValues: path.matchValues(),
-        boundaryValue: path.boundaryValue() || null,
-        mountAliases: [],
-        mountResolutionIncomplete: false,
-      })),
-      riskMarkers: program && !program.isParseComplete() ? ["shell-parse-incomplete"] : [],
-    };
-    const safety = evaluateSafety(guardContext, current.enabled, { home: process.env.HOME ?? "" });
-    const req = guardContext.requestId;
-    // The safety stage is evaluated first to collect deterministic risk evidence.
-    // A persistent deny remains stronger and is resolved before every escalation.
-    const selected = policyForCall(
-      current.config,
-      current.sessionExternalDirectories,
-      current.sessionExternalFiles,
-      toolName,
-      command,
-      directPath,
-      matchedSkill?.name ?? null,
-      normalizer,
-      program,
-    );
-    const policyValue = selected.value;
-    const policy = selected.decision;
-    const allowDirectory =
-      selected.surface === "external_directory"
-        ? externalDirectoryForPath(selected.value, normalizer)
-        : undefined;
-    const promptSource = matchedSkill ? "skill_read" : "tool_call";
-    const promptPayload = (
-      category?: string,
-      reason?: string,
-      review?: PermissionReview,
-    ): PermissionPromptPayload =>
-      buildPermissionPromptPayload({
-        surface: selected.surface,
-        value: policyValue,
-        matchedPattern: policy.matchedPattern,
-        category,
-        reason,
-        review,
-        toolName,
-        command,
-        cwd: ctx.cwd,
-        commandUnits: program?.guardCommands().map((unit) => ({
-          ...unit,
-          // Presentation only: show units covered by deterministic Bash policy
-          // in the policy color, without changing aggregate policy selection or
-          // any classifier facts/verdict behavior.
-          policyState: checkPolicy(current.config.permission, "bash", unit.text).state,
-        })),
-        paths: paths.map((path) => ({
-          value: path.value(),
-          resolved: path.resolvedAlias(),
-        })),
-        inputPreview:
-          toolName === "edit" && input && typeof input === "object"
-            ? formatEditForClassifier(input as Record<string, unknown>)
-            : undefined,
-      });
-    // Persistent policy deny is stronger than a deterministic escalation.
-    if (policy.state === "deny") {
-      decision(current, {
-        requestId: req,
-        toolCallId: toolCallId || null,
-        surface: selected.surface,
-        value: policyValue,
-        result: "deny",
-        resolution: "policy_deny",
-        decidedBy: { kind: "policy", pattern: policy.matchedPattern },
-        matchedPattern: policy.matchedPattern,
-        reason: policy.reason,
-      });
-      return { block: true, reason: "Denied by permission policy." };
-    }
-    if (safety.kind === "require_human") {
-      current.publisher.decision(
-        {
-          requestId: req,
-          mechanism: "guard",
-          category: safety.category,
-          surface: toolName,
-          value: policyValue,
-          verdict: "require_human",
-          reason: safety.reason,
-          cause: null,
-          at: Date.now(),
-        },
-        toolCallId || null,
-      );
-      const human = await humanDecision(current, {
-        id: req,
-        toolCallId,
-        surface: toolName,
-        value: policyValue,
-        pattern: `<guard:${safety.category}>`,
-        category: safety.category,
-        reason: safety.reason,
-        source: promptSource,
-        payload: promptPayload(safety.category, safety.reason, {
-          source: "guard",
-          reason: safety.reason,
-          category: safety.category,
-        }),
-      });
-      decision(current, {
-        requestId: req,
-        toolCallId: toolCallId || null,
-        surface: toolName,
-        value: policyValue,
-        result: human.allowed ? "allow" : "deny",
-        resolution: human.allowed ? "user_approved" : "user_denied",
-        decidedBy: { kind: "human" },
-        category: safety.category,
-        reason: human.reason,
-      });
-      return human.allowed ? {} : { block: true, reason: human.reason ?? safety.reason };
-    }
-    const unresolvedPathExpression = safety.riskMarkers.includes("unresolved-path-expression");
-    if (policy.state === "allow" && !unresolvedPathExpression) {
-      decision(current, {
-        requestId: req,
-        toolCallId: toolCallId || null,
-        surface: selected.surface,
-        value: policyValue,
-        result: "allow",
-        resolution: "policy_allow",
-        decidedBy: { kind: "policy", pattern: policy.matchedPattern },
-        matchedPattern: policy.matchedPattern,
-      });
-      return {};
-    }
-    let review: PermissionReview = {
-      source: "policy",
-      reason: unresolvedPathExpression
-        ? "A filesystem path contains a shell expansion that could not be resolved statically."
-        : policy.reason,
-    };
-    if (current.enabled) {
-      const facts = classifyFacts(toolName, input, command, selected, normalizer);
-      const verdict = await modelDecision(
-        current,
-        ctx,
-        req,
-        facts,
-        safety.riskMarkers,
-        toolCallId || null,
-      );
-      if (verdict.kind === "cancelled")
-        return { block: true, reason: "Permission review cancelled." };
-      if (verdict.kind === "allow") {
-        current.counts.allowed += 1;
-        publish(current);
-        decision(current, {
-          requestId: req,
-          toolCallId: toolCallId || null,
-          surface: facts.surface,
-          value: facts.value,
-          result: "allow",
-          resolution: "auto_approved",
-          decidedBy: { kind: "auto", verdict: "allow" },
-        });
-        return {};
-      }
-      current.counts.asked += 1;
-      publish(current);
-      review = { source: "classifier", reason: verdict.reason, cause: verdict.cause };
-    }
-    const human = await humanDecision(current, {
-      id: req,
-      toolCallId,
-      surface: selected.surface,
-      value: policyValue,
-      pattern: policy.matchedPattern,
-      source: promptSource,
-      ...(allowDirectory ? { allowDirectory } : {}),
-      payload: promptPayload(
-        undefined,
-        unresolvedPathExpression
-          ? "A filesystem path contains a shell expansion that could not be resolved statically."
-          : (policy.reason ?? undefined),
-        review,
-      ),
+      signal: ctx.signal,
     });
-    decision(current, {
-      requestId: req,
-      toolCallId: toolCallId || null,
-      surface: selected.surface,
-      value: policyValue,
-      result: human.allowed ? "allow" : "deny",
-      resolution: human.allowed ? "user_approved" : "user_denied",
-      decidedBy: { kind: "human" },
-      reason: human.reason,
-    });
-    return human.allowed ? {} : { block: true, reason: human.reason ?? "Human denied permission." };
+    return result.kind === "allowed" ? {} : { block: true, reason: result.reason };
   });
 }

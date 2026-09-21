@@ -1,8 +1,8 @@
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import { expect, it } from "vitest";
-import { runWorker, type Registry } from "./worker.js";
+import type { Registry } from "./worker.js";
 import { ReviewSubmission } from "./types.js";
-import { testConfig } from "./test-fixtures.js";
+import { runWorker, testConfig } from "./test-fixtures.js";
 
 export function fakeRegistry(values: unknown[], inspect?: (options: unknown) => void): Registry {
 	let index = 0;

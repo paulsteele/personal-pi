@@ -23,6 +23,7 @@ export interface PermissionOutcomeEntry {
   readonly requestId: string;
   readonly toolCallId: string | null;
   readonly allowed: boolean;
+  readonly status?: "cancelled" | "superseded";
 }
 
 export function appendPermissionRequest(
@@ -44,12 +45,16 @@ export function appendPermissionOutcome(
   requestId: string,
   toolCallId: string | null,
   choice: HumanPromptChoice | null,
+  status?: "cancelled" | "superseded",
 ): void {
   pi.appendEntry<PermissionOutcomeEntry>(PERMISSION_OUTCOME_ENTRY, {
     version: 1,
     requestId: boundedId(requestId),
     toolCallId: toolCallId ? boundedId(toolCallId) : null,
-    allowed: choice === "approve" || choice === "approve_directory" || choice === "approve_note",
+    allowed:
+      !status &&
+      (choice === "approve" || choice === "approve_directory" || choice === "approve_note"),
+    ...(status ? { status } : {}),
   });
 }
 
@@ -70,9 +75,14 @@ export function registerPermissionEntryRenderers(
     (entry, _options, theme) => {
       const data = entry.data;
       if (!isOutcomeEntry(data)) return undefined;
-      const outcome = data.allowed
-        ? theme.fg("success", "✓ approved once")
-        : theme.fg("error", "✕ denied");
+      const outcome = data.status
+        ? theme.fg(
+            "warning",
+            data.status === "superseded" ? "↻ policy changed; re-evaluating" : "✕ cancelled",
+          )
+        : data.allowed
+          ? theme.fg("success", "✓ approved once")
+          : theme.fg("error", "✕ denied");
       return new Text(`${theme.fg("syntaxType", "󰀄")} ${outcome}`, 0, 0);
     },
   );

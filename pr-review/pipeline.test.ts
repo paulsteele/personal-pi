@@ -2,11 +2,9 @@ import { rm } from "node:fs/promises";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import { expect, it } from "vitest";
-import { review } from "./runner.js";
-import { capture } from "./snapshot.js";
 import { hash, loadPrompts } from "./prompts.js";
 import { TaskStore, RecoveryGate } from "./tasks.js";
-import { commit, fixture, put, testConfig, testDraft } from "./test-fixtures.js";
+import { review, capture, commit, fixture, put, testConfig, testDraft } from "./test-fixtures.js";
 
 it.each([
 	{ failScout: false, blockArchitecture: false, concurrency: 4 },

@@ -8,7 +8,6 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { representatives } from "./findings.js";
-import { assertSupportedPlannotatorVersion, supportedPlannotatorVersions } from "./plannotator-version.js";
 import { redact, renderAdvisory } from "./report.js";
 import { ensurePrivateDirectory, inside } from "./storage.js";
 import type { Snapshot } from "./snapshot.js";
@@ -202,7 +201,6 @@ export async function installedPlannotator(pi: Pick<ExtensionAPI, "getCommands">
 			try {
 				const manifest = JSON.parse(await readFile(join(directory, "package.json"), "utf8"));
 				if (manifest.name === "@plannotator/pi-extension") {
-					assertSupportedPlannotatorVersion(manifest.version);
 					await stat(join(directory, "server.ts"));
 					await stat(join(directory, "review-editor.html"));
 					return directory;
@@ -214,7 +212,7 @@ export async function installedPlannotator(pi: Pick<ExtensionAPI, "getCommands">
 		}
 	}
 	throw new Error(
-		`PR review requires the already-loaded supported Plannotator extension (${supportedPlannotatorVersions.join(", ")}). No packages will be installed automatically.`,
+		"PR review requires the already-loaded Plannotator extension with its review server and viewer assets. No packages will be installed automatically.",
 	);
 }
 async function cleanupAbandoned(directory: string): Promise<void> {
@@ -284,7 +282,11 @@ export async function present(options: {
 	signal: AbortSignal;
 	progress: (message: string) => void;
 	openBrowser?: boolean;
+	/** Recheck all source dependencies before sending annotations to the UI helper. */
+	authorize?: () => Promise<string | void>;
+	permissionRevision?: () => string;
 }): Promise<NonNullable<Report["browser"]>> {
+	await options.authorize?.();
 	const annotations = seeds(options.report, options.snapshot);
 	const parent = join(options.root, "viewer-sessions");
 	await ensurePrivateDirectory(parent);
@@ -298,6 +300,12 @@ export async function present(options: {
 	let patchFile: string;
 	try {
 		patchFile = await prepareViewerPatch(options.snapshot, directory, options.signal);
+		let revision = await options.authorize?.();
+		if (options.permissionRevision) {
+			if (!options.authorize) throw new Error("Missing viewer authorization callback");
+			while (revision !== options.permissionRevision()) revision = await options.authorize();
+		}
+		options.signal.throwIfAborted();
 	} catch (error) {
 		await rm(directory, { recursive: true, force: true });
 		throw error;

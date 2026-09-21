@@ -54,6 +54,19 @@ credential directories and resolved symlink targets, including dangling destinat
 files, order path rules as `"*.env": "deny"`, `"*.env.*": "deny"`, then `"*.env.example": "allow"`.
 Other `.env.*` names remain sensitive; allow rules do not bypass other deterministic guards.
 
+### Live updates and existing approvals
+
+The shared tool gate rereads this file at permission/action boundaries, including after an awaited
+classifier or human answer. Rule edits and `/auto` changes apply without `/reload` or restarting a PR
+review. Invalid, missing, or unreadable config blocks source/tool actions rather than silently retaining
+old permissions. Config refresh does not reset session grants, notes, counters, or event subscriptions.
+An already executing command/provider request cannot be recalled.
+
+The existing turn-local cache of **classifier allows** is retained. Current deterministic rules/guards
+run before cache lookup, and changed policy, auto settings, action/context facts or notes invalidate
+reuse. This is not a cache of human approvals. Existing configured allows, explicit session-directory
+grants and exact session-file grants remain supported; none overrides a deterministic deny or guard.
+
 ### Auto settings
 
 The retained configuration scope is deliberately limited to these five behavior controls; there is no
@@ -98,8 +111,9 @@ requests offer `y` approve once and `n` deny. External-directory policy prompts 
 directory for session; that choice grants the canonical directory and its descendants in memory until
 the current Pi session ends, without modifying global configuration. Classifier-triggered requests
 additionally offer `a` approve + classifier note and `d` deny + classifier note. There is no follow-up
-confirmation. The selected allow/deny is authoritative immediately; a cancelled or blank note never
-retries or changes it.
+confirmation. A cancelled or blank note never retries or changes the selected decision. Before execution,
+newer policy and cancellation still apply: an answer to a stale request is superseded and the action is
+re-evaluated, not executed under old rules.
 
 In the TUI, each bounded permission request is appended as a durable, non-context transcript entry;
 a compact `󰀄 Human decision` panel contains only the choices. The full thread therefore remains
@@ -112,12 +126,33 @@ Notes are capped at 500 characters, reconstructed from the active session branch
 newest eight / 2,000 prompt characters. They affect only later classifier calls and never appear in
 Activity, agent-facing denial copy, transcript request/outcome entries, or review JSONL.
 
+## Delegated PR permissions
+
+The loaded extension owns the versioned, in-process `permissions:review-service:v1` service. PR capture,
+worker tools, inline source, and source-derived transfers use the same `tool-review.ts` evaluator as the
+main agent. There is no second policy file, bundled engine, public model tool, or general subagent runtime.
+
+Each worker has its own turn-local classifier cache; a new turn/retry or relevant live context change
+invalidates it. Host preparation and pre-turn input work do not retain such verdicts. Human approvals are
+one-shot; parent directory/file grants are not silently inherited by children. PR remains snapshot-only
+and read-only regardless of a classifier's answer. Deterministic source/path denies and human-only guards
+cannot be overridden by a tool-level allow. Paths are shown to the classifier even when a tool-level ask
+wins policy selection; oversized path previews require human review instead of hiding scope.
+
+Requests include the genuine parent user intent or actual `/pr` invocation, separately labeled delegated
+assignment metadata, worker identity, original source paths, and an explicit cancellation signal. Protected
+file contents are not sent to the classifier merely to ask whether they may be read. A shared FIFO queue
+serializes main/child human dialogs; cancelling a queued request cannot open a stale prompt. Reload,
+session replacement and tree navigation retire old delegated operations.
+
 ## Events and Activity
 
 The fork preserves `permissions:ui_prompt`, `permissions:decision`, `auto-mode:state`, and
 `auto-mode:decision` for local Atelier and desktop notifications. Every tool-call prompt and final
 decision includes `toolCallId`; request transitions retain `requestId`, so policy, auto, guard, and
-human outcomes attach to the owning tool row.
+human outcomes attach to the owning tool row. Delegated identity is separate from the outer tool ID:
+`pr_review` activity attaches to its actual parent row, while slash-command requests are standalone.
+`permissions:review_state` supplies queued/showing/finished transitions for PR's task dashboard.
 
 Trusted extensions can emit `permissions:allow_session_files` with
 `{ version: 1, sessionId: ctx.sessionManager.getSessionId(), paths: [absoluteFilePath] }`.

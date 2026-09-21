@@ -7,10 +7,10 @@ import {
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { expect, it } from "vitest";
-import { runWorker, type Registry } from "./worker.js";
+import type { Registry } from "./worker.js";
 import { CoverageLedger } from "./tasks.js";
 import { ReviewSubmission } from "./types.js";
-import { testConfig } from "./test-fixtures.js";
+import { runWorker, testConfig } from "./test-fixtures.js";
 import { emptyUsage, sumUsage, providerUsage, toProviderUsage, formatUsage, formatCost } from "./usage.js";
 import { packInlineContext } from "./worker-context.js";
 

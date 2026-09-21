@@ -2,6 +2,7 @@ import { emptyUsage, type UsageTotals } from "./usage.js";
 import type { Advisory, Checkpoint, Finding } from "./types.js";
 import { awaitWithSignal } from "./work-ui.js";
 import { hash } from "./prompts.js";
+import { deferToolCommit } from "./tool-commit.js";
 
 export type TaskState =
 	| "queued"
@@ -9,6 +10,9 @@ export type TaskState =
 	| "compacting"
 	| "retrying"
 	| "blocked"
+	| "permission"
+	| "checking"
+	| "waiting_slot"
 	| "completed"
 	| "cancelled"
 	| "failed"
@@ -42,6 +46,7 @@ export class TaskStore {
 	readonly records = new Map<string, TaskRecord>();
 	readonly events = new Map<string, TaskEvent[]>();
 	private listeners = new Set<() => void>();
+	private permissionWaits = new Map<string, { prior: TaskState; requests: Set<string> }>();
 	peakActive = 0;
 	phase = "Starting review";
 	progress = "";
@@ -54,8 +59,9 @@ export class TaskStore {
 	private emit() {
 		this.peakActive = Math.max(
 			this.peakActive,
-			[...this.records.values()].filter((t) => ["running", "compacting", "retrying"].includes(t.state))
-				.length,
+			[...this.records.values()].filter((t) =>
+				["running", "compacting", "retrying", "checking"].includes(t.state),
+			).length,
 		);
 		for (const fn of this.listeners) {
 			try {
@@ -105,7 +111,32 @@ export class TaskStore {
 		}
 		this.emit();
 	}
+	permission(event: { taskId: string; requestId: string; state: "queued" | "showing" | "finished" }) {
+		const task = this.records.get(event.taskId);
+		if (!task || ["cancelled", "completed", "failed", "skipped"].includes(task.state)) return;
+		let wait = this.permissionWaits.get(task.id);
+		if (event.state === "finished") {
+			wait?.requests.delete(event.requestId);
+			if (wait && !wait.requests.size) {
+				this.permissionWaits.delete(task.id);
+				if (task.state === "permission")
+					this.update(task.id, { state: wait.prior }, "Permission review finished");
+			}
+			return;
+		}
+		if (!wait) {
+			wait = { prior: task.state, requests: new Set() };
+			this.permissionWaits.set(task.id, wait);
+		}
+		wait.requests.add(event.requestId);
+		this.update(
+			task.id,
+			{ state: "permission" },
+			event.state === "showing" ? "Awaiting human permission" : "Permission approval queued",
+		);
+	}
 	cancel() {
+		this.permissionWaits.clear();
 		for (const task of this.records.values())
 			if (task.state !== "completed" && task.state !== "skipped")
 				this.update(task.id, { state: "cancelled", endedAt: Date.now() }, "Cancelled");
@@ -165,6 +196,7 @@ export class CoverageLedger {
 		for (const id of new Set(ids)) this.resources.set(id, { ranges: [], reviewed: false });
 	}
 	deliver(id: string, start: number, end: number, total: number) {
+		if (deferToolCommit(() => this.deliver(id, start, end, total))) return;
 		const resource = this.resources.get(id);
 		if (!resource) return;
 		if (![start, end, total].every(Number.isSafeInteger) || start < 0 || end < start || end > total)
@@ -196,6 +228,7 @@ export class CoverageLedger {
 			if (r.total === undefined || r.ranges[0]?.[0] !== 0 || r.ranges[0]?.[1] !== r.total)
 				throw new Error(`Read all pages before acknowledging ${id}`);
 		}
+		if (deferToolCommit(() => this.checkpoint(JSON.parse(serialized) as Checkpoint))) return true;
 		this.findings.push(...(value.findings ?? []));
 		this.advisories.push(...(value.advisories ?? []));
 		this.notes.push({ key, notes: value.notes ?? "Results saved" });
