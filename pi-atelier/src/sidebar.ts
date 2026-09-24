@@ -21,6 +21,7 @@ import {
 	type ToolActivity,
 } from "./run-activity.js";
 import type { SidebarPanelData } from "./sidebar-panels.js";
+import type { QualityActivity, QualityHeader } from "./quality-activity.js";
 import { createSplitPaneController, type SplitPaneController } from "./split-pane.js";
 import { type AtelierState, type ProgressObserverSnapshot, type WorkspacePulseState } from "./types.js";
 import type { WorkspacePulseData } from "./workspace-pulse.js";
@@ -42,6 +43,7 @@ export interface SidebarSnapshotInput {
 	};
 	sidebarPanels?: readonly SidebarPanelData[];
 	progressObserver?: ProgressObserverSnapshot;
+	qualityHeader?: QualityHeader;
 }
 
 export interface SidebarSnapshot extends AtelierState {
@@ -61,6 +63,7 @@ export interface SidebarSnapshot extends AtelierState {
 	};
 	sidebarPanels?: readonly SidebarPanelData[];
 	progressObserver?: ProgressObserverSnapshot;
+	qualityHeader?: QualityHeader;
 }
 
 function workspacePulseData(pulse: WorkspacePulseState): WorkspacePulseData | undefined {
@@ -83,6 +86,7 @@ export function buildSidebarSnapshot(input: SidebarSnapshotInput): SidebarSnapsh
 		...(input.autoModeState ? { autoModeState: input.autoModeState } : {}),
 		sidebarPanels: input.sidebarPanels ?? [],
 		...(input.progressObserver ? { progressObserver: input.progressObserver } : {}),
+		...(input.qualityHeader ? { qualityHeader: input.qualityHeader } : {}),
 	};
 }
 
@@ -267,6 +271,25 @@ function packBadgeRows(badges: readonly string[], width: number, prefix = "  "):
 	return rows;
 }
 
+const QUALITY_ICON = "󰅴";
+
+function qualityBadge(quality: QualityActivity, palette: AtelierPalette): string {
+	const modelIcon = palette.paint("permissionAuto", QUALITY_ICON);
+	if (quality.phase === "approved") return `${modelIcon} ${palette.paint("permissionAuto", "✓")}`;
+	if (quality.phase === "user_approved") {
+		return `${palette.paint("permissionHuman", QUALITY_ICON)} ${palette.paint("permissionHuman", "✓")}`;
+	}
+	if (quality.phase === "needs_work" || quality.phase === "blocked") {
+		return `${modelIcon} ${palette.paint("error", "✕")}`;
+	}
+	if (
+		["pending", "checking", "awaiting_user", "applying", "paused", "unconfigured"].includes(quality.phase)
+	) {
+		return `${modelIcon} ${palette.paint("warning", "?")}`;
+	}
+	return palette.paint("dim", `${QUALITY_ICON} –`);
+}
+
 function toolActivityRows(
 	tool: ToolActivity,
 	contentWidth: number,
@@ -281,23 +304,27 @@ function toolActivityRows(
 	const middleWidth = Math.max(0, contentWidth - nameWidth - statusWidth - 2);
 	const groups = groupPermissionBadges(tool.permissions ?? []);
 	const badges = groups.map((group) => renderPermissionBadge(group, palette));
-	const minimumSummaryWidth = Math.min(visibleWidth(safeSummary || "—"), 6);
+	const quality = tool.quality ? qualityBadge(tool.quality, palette) : "";
+	const qualityWidth = visibleWidth(quality);
+	const showQuality = qualityWidth > 0 && qualityWidth <= middleWidth;
+	const permissionAndSummaryWidth = showQuality ? Math.max(0, middleWidth - qualityWidth - 2) : middleWidth;
+	const minimumSummaryWidth = Math.min(visibleWidth(safeSummary || "—"), showQuality ? 1 : 6);
 	const inline: string[] = [];
 	let inlineWidth = 0;
 	for (const badge of badges) {
 		const nextWidth = inlineWidth + (inline.length > 0 ? 2 : 0) + visibleWidth(badge);
-		if (nextWidth + 2 + minimumSummaryWidth > middleWidth) break;
+		if (nextWidth + 2 + minimumSummaryWidth > permissionAndSummaryWidth) break;
 		inline.push(badge);
 		inlineWidth = nextWidth;
 	}
 
 	const inlineBadges = inline.join("  ");
-	const summaryWidth = Math.max(0, middleWidth - (inline.length > 0 ? inlineWidth + 2 : 0));
+	const summaryWidth = Math.max(0, permissionAndSummaryWidth - (inline.length > 0 ? inlineWidth + 2 : 0));
 	const summary = padToWidth(
 		palette.paint(safeSummary ? "primary" : "dim", safeSummary || "—"),
 		summaryWidth,
 	);
-	const middle = inline.length > 0 ? `${summary}  ${inlineBadges}` : summary;
+	const middle = [summary, inlineBadges, showQuality ? quality : ""].filter(Boolean).join("  ");
 	const statusText = truncateToWidth(status, statusWidth, "");
 	const row = `${padToWidth(palette.paint("muted", safeName), nameWidth)} ${middle} ${palette.paint(
 		toolStatusRole(tool.status),
@@ -620,6 +647,11 @@ function activityBandRows(
 				" ",
 			),
 		);
+	}
+	if (snapshot.qualityHeader) {
+		const quality = snapshot.qualityHeader;
+		const header = `${QUALITY_ICON} quality · ${quality.modelId}`;
+		rows.push(centeredTrackContent(palette.paint("accent", header), leadWidth, " "));
 	}
 	rows.push(...activityTrackRows(activity, snapshot.autoModeState, palette, theme, leadWidth, now));
 	for (const tool of tools) rows.push(...toolActivityRows(tool, continuationWidth, palette, now));

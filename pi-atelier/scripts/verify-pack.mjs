@@ -14,6 +14,7 @@ const required = [
 	"src/state.ts",
 	"src/palette.ts",
 	"src/run-activity.ts",
+	"src/quality-activity.ts",
 	"src/sidebar-panels.ts",
 	"src/sidebar.ts",
 	"src/split-pane.ts",

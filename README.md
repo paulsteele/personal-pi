@@ -10,9 +10,10 @@ Pi loads the entries in this deliberate order:
 2. `code-blocks` — renders copyable fenced code blocks.
 3. `desktop-notifications` — provides actionable terminal-window notifications.
 4. `pi-permission-system` — source-owned permission and auto-mode fork.
-5. `progress-observer` — passive side-model progress inference.
-6. `pr-review` — code-owned reviews with private generated repo context and Plannotator findings.
-7. `pi-atelier` — source-owned fullscreen sidebar/footer fork.
+5. `code-quality` — isolated post-edit style gate with bounded corrections and human arbitration.
+6. `progress-observer` — passive side-model progress inference.
+7. `pr-review` — code-owned reviews with private generated repo context and Plannotator findings.
+8. `pi-atelier` — source-owned fullscreen sidebar/footer fork.
 
 Permission System and Progress Observer load before Atelier so their replayable event state is available when Atelier subscribes. Desktop Notifications remains the sole notification owner.
 
@@ -21,7 +22,7 @@ Permission System and Progress Observer load before Atelier so their replayable 
 After the public repository and release tag exist:
 
 ```sh
-pi install https://github.com/paulsteele/personal-pi@v1.3.1
+pi install https://github.com/paulsteele/personal-pi@v1.4.0
 ```
 
 The dotfiles repository normally records the same pinned source in `~/.pi/agent/settings.json`, so Pi installs a missing user package automatically at startup when online. The public HTTPS URL requires no SSH alias or repository credentials.
@@ -38,11 +39,11 @@ bun run check
 pi
 ```
 
-Trust the checkout when Pi prompts. The committed `.pi/settings.json` disables all seven resources from the globally configured release and loads the seven local entries in the same order, so development does not create duplicate commands, UI owners, or event subscribers. This override applies only while Pi's working directory is this repository.
+Trust the checkout when Pi prompts. The committed `.pi/settings.json` disables all eight resources from the globally configured release and loads the eight local entries in the same order, so development does not create duplicate commands, UI owners, or event subscribers. This override applies only while Pi's working directory is this repository.
 
 ## Verification
 
-Checks are local by design; this repository does not use GitHub Actions.
+Checks are local by design; this repository does not use GitHub Actions. All workspaces target Pi 0.87.x and are tested with the Pi 0.87.1 packages.
 
 ```sh
 bun install --frozen-lockfile
@@ -63,7 +64,7 @@ bun run check:pack
 
 ## Releases
 
-The repository and all seven workspace packages share one version.
+The repository and all eight workspace packages share one version.
 
 1. Start from a clean `main` checkout.
 2. Run `bun install --frozen-lockfile && bun run check`.
@@ -98,10 +99,13 @@ Source and dependencies live in Pi's managed git checkout. Runtime Permission Sy
 
 - config: `~/.pi/agent/extensions/pi-permission-system/config.json`
 - logs: `~/.pi/agent/extensions/pi-permission-system/logs/`
+- code quality config: `~/.pi/agent/extensions/code-quality/config.json` (select the reviewer with `/quality-model`; no default model)
 - progress observer config: `~/.pi/agent/extensions/progress-observer/config.json`
 - PR review settings/profiles/reports: `~/.pi/agent/extensions/pr-review/`
 
 PR review methodology and personal-global rules are versioned here in `pr-review/prompts/`; only generated repo semantics and runtime settings live in Pi config. Run `/pr setup` to create a private context draft, inspect it, then run `/pr setup approve` to activate it before the first review. Use `/pr model` to choose the independent model and `/pr` to review changes. Existing approved context is reused; `/pr setup regenerate` explicitly creates a replacement draft that also requires inspection and `/pr setup approve`. Verified findings open in the already-loaded Plannotator UI without a version allowlist; submitted feedback goes to the main agent without a second fix-selection screen. The harness never installs or updates Plannotator. See [`pr-review/README.md`](pr-review/README.md) for compatibility, privacy, scope, and verification details.
+
+The Code Quality gate injects its versioned clarity policy and reviews explicit edit/write batches in interactive sessions. Configure its independent reviewer with `/quality-model`. It pauses unrelated work while feedback is unresolved. Corrections and bounded disagreements return to the reviewer, sharing five response-and-review rounds before automatic terminal arbitration. Known generated/lock filenames auto-approve without model review. See [`code-quality/README.md`](code-quality/README.md) for coverage, privacy, controls, and recovery. It does not replace tests, permissions, or PR review.
 
 The Progress Observer uses a separate model to infer goal/progress/current/next state for Atelier's upper sidebar pane. It is TUI-only, memory-only, never injects into the main agent conversation, and degrades without interrupting work. See [`progress-observer/README.md`](progress-observer/README.md) for cadence, commands, privacy, and cost details.
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.0 — 2026-09-24
+
+- Align the workspace with Pi 0.87.x and verify against 0.87.1 development dependencies. Permission rules and classifier authority are unchanged.
+
 ## 1.3.0
 
 - Remove edit bodies from classifier input and explicitly scope edit/write review to file-modification authorization using operation, paths, and user intent. Keep bounded edit previews for human approval, Bash command evidence, and deterministic path/safety checks unchanged.

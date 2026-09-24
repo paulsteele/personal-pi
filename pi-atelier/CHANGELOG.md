@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.0 — 2026-09-24
+
+- Add a `󰅴 quality · provider/model` header directly below auto mode and inline quality outcome badges beside corresponding edit/write permission badges.
+- Match classifier outcome colors and glyphs, distinguish user approval and unreviewed states, and preserve each batch's result across subsequent correction batches.
+- Consume bounded, replayable, session-scoped quality events with stale-revision rejection and lifecycle cleanup; keep review decisions and source data out of Atelier.
+- Target and test the workspace against Pi 0.87.1.
+
 ## 1.3.1
 
 - Stop the fullscreen sidebar's overlay-visibility check from requesting another frame during every paint. Idle rendering now settles instead of continuously redrawing and starving background work; real updates and responsive visibility changes still repaint.

@@ -431,7 +431,7 @@ export async function runWorker<T extends TSchema>(options: {
 		},
 		streamFn: stream,
 		sessionId: options.sessionId ?? randomUUID(),
-		shouldStopAfterTurn: ({ message, toolResults }) => {
+		finishTurn: ({ message, toolResults }) => {
 			compact =
 				contextTokens(
 					system,
@@ -454,7 +454,7 @@ export async function runWorker<T extends TSchema>(options: {
 			recentSignatures.push(signature);
 			if (recentSignatures.length > 24) recentSignatures.shift();
 			stalled = recentSignatures.filter((value) => value === signature).length >= 4;
-			return submitted || compact || stalled || Boolean(permissionFailure);
+			return submitted || compact || stalled || permissionFailure ? { action: "end" } : undefined;
 		},
 		beforeToolCall: async () => {
 			if (!submitted) return undefined;

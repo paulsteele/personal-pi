@@ -1,5 +1,6 @@
 import {
 	createAssistantMessageEventStream,
+	getCurrentTools,
 	type AssistantMessage,
 	type Context,
 } from "@earendil-works/pi-ai";
@@ -32,7 +33,7 @@ function scriptedRegistry(
 		getApiKeyAndHeaders: async () => ({ ok: true }),
 		getProvider: () => ({
 			streamSimple: (_model: unknown, context: Context) => {
-				const summary = !context.tools?.length;
+				const summary = !(context.tools?.length || getCurrentTools(context.messages).length);
 				observe?.(context, summary);
 				const action = summary ? undefined : actions[next++];
 				if (!summary && !action) throw new Error("Script exhausted before worker completed");

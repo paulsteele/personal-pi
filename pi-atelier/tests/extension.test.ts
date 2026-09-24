@@ -117,6 +117,7 @@ function harness(
 		modelRegistry: { isUsingOAuth: vi.fn().mockReturnValue(false) },
 		compact: vi.fn(),
 		sessionManager: {
+			getSessionId: vi.fn().mockReturnValue("session-a"),
 			getEntries: vi.fn().mockReturnValue([]),
 			getBranch: vi.fn().mockReturnValue([]),
 			getSessionName: vi.fn().mockReturnValue("Test session"),
@@ -233,6 +234,96 @@ async function waitForWorkspacePulseInspection(h: ReturnType<typeof harness>): P
 }
 
 describe("extension registration", () => {
+	it("discovers the current Quality header and ignores stale or foreign header updates", async () => {
+		const h = harness();
+		h.pi.events.on("code-quality:activity:discover", () => {
+			h.pi.events.emit("code-quality:status", {
+				version: 1,
+				sessionId: "session-a",
+				revision: 4,
+				phase: "ready",
+				modelId: "test/reviewer",
+			});
+		});
+		await start(h);
+		expect(renderOverlayText(h)).toContain("󰅴 quality · test/reviewer");
+		h.pi.events.emit("code-quality:status", {
+			version: 1,
+			sessionId: "other",
+			revision: 5,
+			phase: "paused",
+			modelId: "test/wrong",
+		});
+		h.pi.events.emit("code-quality:status", {
+			version: 1,
+			sessionId: "session-a",
+			revision: 3,
+			phase: "disabled",
+			modelId: "test/stale",
+		});
+		expect(renderOverlayText(h)).toContain("󰅴 quality · test/reviewer");
+		expect(renderOverlayText(h)).not.toContain("test/wrong");
+		expect(renderOverlayText(h)).not.toContain("test/stale");
+		await h.handlers.get("session_shutdown")?.({}, h.ctx);
+		expect(h.getEventBusHandlerCount("code-quality:status")).toBe(0);
+	});
+
+	it("attaches inline quality badges to the matching call and ignores stale or foreign events", async () => {
+		const h = harness();
+		await start(h);
+		await h.handlers.get("tool_execution_start")?.(
+			{ type: "tool_execution_start", toolCallId: "edit-a", toolName: "edit", args: { path: "a.ts" } },
+			h.ctx,
+		);
+		await h.handlers.get("tool_execution_end")?.(
+			{ type: "tool_execution_end", toolCallId: "edit-a", toolName: "edit", result: {}, isError: false },
+			h.ctx,
+		);
+		h.pi.events.emit("code-quality:activity", {
+			version: 1,
+			sessionId: "session-a",
+			toolCallId: "edit-a",
+			revision: 1,
+			phase: "checking",
+			reviewAttempt: 2,
+		});
+		const renderedText = () => renderOverlayText(h).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+		const checkingRow = renderedText()
+			.split("\n")
+			.find((line) => line.includes("a.ts"));
+		expect(checkingRow).toContain("󰅴 ?");
+		h.pi.events.emit("code-quality:activity", {
+			version: 1,
+			sessionId: "other",
+			toolCallId: "edit-a",
+			revision: 2,
+			phase: "approved",
+		});
+		expect(renderedText()).not.toContain("󰅴 ✓");
+		h.pi.events.emit("code-quality:activity", {
+			version: 1,
+			sessionId: "session-a",
+			toolCallId: "edit-a",
+			revision: 3,
+			phase: "approved",
+		});
+		h.pi.events.emit("code-quality:activity", {
+			version: 1,
+			sessionId: "session-a",
+			toolCallId: "edit-a",
+			revision: 2,
+			phase: "checking",
+		});
+		const approvedRow = renderedText()
+			.split("\n")
+			.find((line) => line.includes("a.ts"));
+		expect(approvedRow).toContain("󰅴 ✓");
+		expect(renderedText()).not.toContain("󰅴 ?");
+		await h.handlers.get("session_tree")?.({}, h.ctx);
+		expect(renderedText()).not.toContain("󰅴 ✓");
+		await h.handlers.get("session_shutdown")?.({}, h.ctx);
+		expect(h.getEventBusHandlerCount("code-quality:activity")).toBe(0);
+	});
 	it("discovers and renders a structured contributed panel through pi.events", async () => {
 		const h = harness();
 		await start(h);

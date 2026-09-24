@@ -9,7 +9,7 @@ This directory is a manually maintained, source-owned workspace in the `pi-exten
 - Peeled commit: `159f34cf440c18cba847999a191b252b4574b57d`
 - Original package version: `0.8.2`
 - Local package version: `0.8.2-local.2`
-- Pi/TUI target used by this fork: `0.84.2`
+- Pi/TUI target used by this fork: `0.87.1`
 
 The local copy retains only runtime source, tests, build configuration, the package lock, license,
 and concise local maintenance docs. Upstream agent/Claude skills, contributor workflow, research/demo
@@ -25,7 +25,7 @@ Primary files:
 - `src/sidebar.ts`
 - `tests/split-pane.test.ts`
 
-In the supported fullscreen Pi 0.84 renderer, the right side is a real `HStack` child containing a
+In the supported fullscreen Pi renderer, the right side is a real `HStack` child containing a
 non-primary, contained `ScrollView`. The passive overlay remains only as an invisible lifecycle/theme
 acquisition seam. Regular and unknown renderers fail closed without layout mutation or overlay
 presentation. Width is fixed at 44 preferred/28 minimum columns, with a 64-column main-pane minimum
@@ -57,7 +57,7 @@ Primary files:
 
 Atelier's registered footer is a single-line Nerd Font overview for auto mode, Plan, thinking level,
 model state, Git churn, context, usage, performance, alerts, and external contribution summaries. It remains in
-Pi's native dock while the Activity Sidebar is presented. The existing guarded Pi 0.84 adapter only
+Pi's native dock while the Activity Sidebar is presented. The guarded fullscreen adapter only
 owns the transcript/sidebar split and leaves unknown layouts untouched.
 
 **Invariant:** keep the overview in Pi's supported native footer and do not relocate editor/footer

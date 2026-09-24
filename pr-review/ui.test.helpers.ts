@@ -67,6 +67,7 @@ export function uiHarness() {
 								focus: () => {},
 								unfocus: () => {},
 								isFocused: () => true,
+								getBounds: () => undefined,
 							});
 							render();
 						}

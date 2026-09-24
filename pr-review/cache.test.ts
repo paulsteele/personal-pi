@@ -1,5 +1,6 @@
 import {
 	createAssistantMessageEventStream,
+	getCurrentTools,
 	type AssistantMessage,
 	type Context,
 	type SimpleStreamOptions,
@@ -41,7 +42,7 @@ function scripted(actions: Action[], window = 100000) {
 		getApiKeyAndHeaders: async () => ({ ok: true }),
 		getProvider: () => ({
 			streamSimple: (_model: unknown, context: Context, options: SimpleStreamOptions) => {
-				const summary = !context.tools?.length;
+				const summary = !(context.tools?.length || getCurrentTools(context.messages).length);
 				calls.push({ context: JSON.parse(JSON.stringify(context)), options, summary });
 				const action = summary ? undefined : actions[at++];
 				if (!summary && !action) throw new Error("Unexpected extra request");
@@ -102,7 +103,8 @@ it("shares documentation prefixes while placing distinct lenses before any inlin
 		const call = script.calls[0]!;
 		expect(call.options.cacheRetention).toBeUndefined();
 		ids.push(call.options.sessionId!);
-		const text = (call.context.messages[0]!.content as Array<{ text: string }>)[0]!.text;
+		const inputMessage = call.context.messages.find((message) => message.role === "user")!;
+		const text = (inputMessage.content as Array<{ text: string }>)[0]!.text;
 		expect(text.indexOf("Shared guidance")).toBeLessThan(text.indexOf('"lens"'));
 		expect(text.indexOf(`Find ${lens} defects`)).toBeLessThan(text.indexOf("DIFF-MARKER"));
 		expect(JSON.parse(text).sharedContext.map((r: { id: string }) => r.id)).toEqual(["doc:rules.md"]);

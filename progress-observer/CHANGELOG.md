@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 — 2026-09-24
+
+- Align the workspace with Pi 0.87.x and verify against 0.87.1 development dependencies. Passive observation behavior is unchanged.
 
 ## 1.0.5 — 2026-09-03
 

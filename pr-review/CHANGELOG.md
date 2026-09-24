@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.0 — 2026-09-24
+
+- Migrate worker termination to Pi 0.87.1's `finishTurn` hook while preserving submission, compaction, stall detection, and permission exits.
+- Update synthetic provider tests for transcript-carried tool declarations and UI fixtures for the current overlay contract; target Pi 0.87.x.
+
 ## 1.3.1
 
 - Skip unchanged snapshot metadata before yielding, so large repositories no longer spend an event-loop turn (and possible full UI redraw) per tracked file. Retain cooperative cancellation for actual, excluded, and denied changes.

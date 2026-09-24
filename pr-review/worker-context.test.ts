@@ -1,4 +1,9 @@
-import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
+import {
+	createAssistantMessageEventStream,
+	getCurrentTools,
+	type Context,
+	type AssistantMessage,
+} from "@earendil-works/pi-ai";
 import { expect, it } from "vitest";
 import type { Registry } from "./worker.js";
 import { CoverageLedger } from "./tasks.js";
@@ -23,8 +28,8 @@ it("continues beyond old turn quotas through repeated compaction without losing 
 		hasConfiguredAuth: () => true,
 		getApiKeyAndHeaders: async () => ({ ok: true }),
 		getProvider: () => ({
-			streamSimple: (_model: unknown, context: { tools?: unknown[] }) => {
-				const summary = !context.tools?.length;
+			streamSimple: (_model: unknown, context: Context) => {
+				const summary = !(context.tools?.length || getCurrentTools(context.messages).length);
 				if (summary) summaries++;
 				else turns++;
 				const tool =

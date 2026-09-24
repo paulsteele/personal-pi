@@ -1,6 +1,7 @@
 import nodePath from "node:path";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { DisplayValue, ResponsePerformance } from "./types.js";
+import type { QualityActivity } from "./quality-activity.js";
 
 export type ToolActivityStatus = "running" | "done" | "failed";
 
@@ -27,6 +28,7 @@ export interface ToolActivity {
 	startedAt: number;
 	durationMs?: number;
 	permissions?: readonly PermissionActivity[];
+	quality?: QualityActivity;
 }
 
 export interface RunActivitySnapshot {
@@ -67,6 +69,8 @@ export interface RunActivityTracker {
 	startTool(event: ToolExecutionStartEvent, now?: number): void;
 	finishTool(event: ToolExecutionEndEvent, now?: number): void;
 	recordPermission(permission: PermissionActivity): void;
+	recordQuality(toolCallId: string, quality: QualityActivity): void;
+	clearQuality(): void;
 	settle(now?: number): void;
 	reset(): void;
 	isRunning(): boolean;
@@ -82,6 +86,7 @@ const MAX_SUMMARY_COLUMNS = 26;
 const MAX_RECENT_TOOLS = 36;
 const MAX_STANDALONE_PERMISSIONS = 12;
 const MAX_PENDING_PERMISSIONS = 96;
+const MAX_PENDING_QUALITY = 96;
 
 export const EMPTY_RUN_ACTIVITY: RunActivitySnapshot = Object.freeze({
 	phase: "idle",
@@ -173,6 +178,7 @@ class DefaultRunActivityTracker implements RunActivityTracker {
 	private recentTools: ToolActivity[] = [];
 	private standalonePermissions: PermissionActivity[] = [];
 	private pendingPermissions = new Map<string, PermissionActivity[]>();
+	private pendingQuality = new Map<string, QualityActivity>();
 	private completedCount = 0;
 	private failedCount = 0;
 	private readonly cwd: string;
@@ -271,6 +277,8 @@ class DefaultRunActivityTracker implements RunActivityTracker {
 		const id = sanitizeText(event.toolCallId);
 		if (id.length === 0) return;
 
+		const quality = this.pendingQuality.get(id);
+		this.pendingQuality.delete(id);
 		const tool: ToolActivity = freezeTool({
 			id,
 			name: sanitizeToolName(event.toolName),
@@ -278,6 +286,7 @@ class DefaultRunActivityTracker implements RunActivityTracker {
 			status: "running",
 			startedAt: normalizeTimestamp(now ?? Date.now()),
 			permissions: this.takePending(id),
+			...(quality ? { quality } : {}),
 		});
 		this.phase = "running";
 		this.durationMs = undefined;
@@ -321,6 +330,36 @@ class DefaultRunActivityTracker implements RunActivityTracker {
 			if (!oldest) break;
 			this.pendingPermissions.delete(oldest);
 		}
+		this.notify();
+	}
+
+	recordQuality(toolCallId: string, quality: QualityActivity): void {
+		const active = this.activeTools.get(toolCallId);
+		const recentIndex = this.recentTools.findIndex((tool) => tool.id === toolCallId);
+		const recent = this.recentTools[recentIndex];
+		const previous = active?.quality ?? recent?.quality ?? this.pendingQuality.get(toolCallId);
+		if (previous && previous.revision >= quality.revision) return;
+		const frozen = Object.freeze({ ...quality });
+		if (active) this.activeTools.set(toolCallId, freezeTool({ ...active, quality: frozen }));
+		else if (recent) this.recentTools[recentIndex] = freezeTool({ ...recent, quality: frozen });
+		else {
+			this.pendingQuality.set(toolCallId, frozen);
+			while (this.pendingQuality.size > MAX_PENDING_QUALITY) {
+				const oldest = this.pendingQuality.keys().next().value!;
+				this.pendingQuality.delete(oldest);
+			}
+		}
+		this.notify();
+	}
+
+	clearQuality(): void {
+		const withoutQuality = (tool: ToolActivity): ToolActivity => {
+			const { quality: _quality, ...rest } = tool;
+			return freezeTool(rest);
+		};
+		this.activeTools = new Map([...this.activeTools].map(([id, tool]) => [id, withoutQuality(tool)]));
+		this.recentTools = this.recentTools.map(withoutQuality);
+		this.pendingQuality.clear();
 		this.notify();
 	}
 
@@ -383,6 +422,7 @@ class DefaultRunActivityTracker implements RunActivityTracker {
 		this.recentTools = [];
 		this.standalonePermissions = [];
 		this.pendingPermissions.clear();
+		this.pendingQuality.clear();
 		this.completedCount = 0;
 		this.failedCount = 0;
 		this.notify();
@@ -434,6 +474,7 @@ class DefaultRunActivityTracker implements RunActivityTracker {
 			this.recentTools.length === 0 &&
 			this.standalonePermissions.length === 0 &&
 			this.pendingPermissions.size === 0 &&
+			this.pendingQuality.size === 0 &&
 			this.completedCount === 0 &&
 			this.failedCount === 0
 		);
@@ -453,6 +494,7 @@ function freezeTool(tool: ToolActivity): ToolActivity {
 	return Object.freeze({
 		...tool,
 		permissions: Object.freeze((tool.permissions ?? []).map(freezePermission)),
+		...(tool.quality ? { quality: Object.freeze({ ...tool.quality }) } : {}),
 	});
 }
 

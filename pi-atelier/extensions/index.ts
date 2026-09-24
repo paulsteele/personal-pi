@@ -28,6 +28,7 @@ import {
 } from "../src/sidebar.js";
 import { createSidebarPanelRegistry, type SidebarPanelRegistry } from "../src/sidebar-panels.js";
 import { AtelierRuntime, createInertAtelierState } from "../src/state.js";
+import { parseQualityActivity, parseQualityHeader, type QualityHeader } from "../src/quality-activity.js";
 import {
 	type AtelierState,
 	type FooterPanelSummary,
@@ -91,6 +92,7 @@ interface ActiveSession {
 	branchEntryCount: number;
 	panelSummaries: readonly FooterPanelSummary[];
 	progressObserver: ProgressObserverSnapshot | undefined;
+	qualityHeader: QualityHeader | undefined;
 	autoModeState:
 		| {
 				enabled: boolean;
@@ -336,6 +338,7 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 			runActivity: runActivity.getSnapshot(),
 			...(targetSession.autoModeState ? { autoModeState: targetSession.autoModeState } : {}),
 			...(targetSession.progressObserver ? { progressObserver: targetSession.progressObserver } : {}),
+			...(targetSession.qualityHeader ? { qualityHeader: targetSession.qualityHeader } : {}),
 			sidebarPanels: [],
 		});
 	}
@@ -596,6 +599,7 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 				branchEntryCount: initializationContext.sessionManager.getBranch().length,
 				panelSummaries: [],
 				progressObserver: undefined,
+				qualityHeader: undefined,
 				autoModeState: undefined,
 				footerGeneration: 0,
 				retired: false,
@@ -625,6 +629,21 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 					if (!snapshot) return;
 					nextSession.progressObserver = snapshot;
 					nextSession.sidebar.requestRender();
+				}),
+				pi.events.on("code-quality:status", (raw) => {
+					if (activeSession !== nextSession || nextSession.retired) return;
+					const header = parseQualityHeader(raw);
+					if (!header || header.sessionId !== nextSession.sessionManager.getSessionId()) return;
+					if (nextSession.qualityHeader && header.revision <= nextSession.qualityHeader.revision) return;
+					nextSession.qualityHeader = header;
+					nextSession.sidebar.requestRender();
+				}),
+				pi.events.on("code-quality:activity", (raw) => {
+					if (activeSession !== nextSession || nextSession.retired) return;
+					const event = parseQualityActivity(raw);
+					if (!event || event.sessionId !== nextSession.sessionManager.getSessionId()) return;
+					const { sessionId: _sessionId, toolCallId, ...quality } = event;
+					nextSession.runActivity.recordQuality(toolCallId, quality);
 				}),
 				pi.events.on("permissions:ui_prompt", trackPermission(permissionFromPrompt)),
 				pi.events.on("permissions:decision", trackPermission(permissionFromDecision)),
@@ -656,6 +675,10 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 			);
 			pi.events.emit("auto-mode:discover", {});
 			pi.events.emit("progress-observer:discover", { version: 1 });
+			pi.events.emit("code-quality:activity:discover", {
+				version: 1,
+				sessionId: nextSession.sessionManager.getSessionId(),
+			});
 
 			if (isFresh() && activeSession === nextSession) {
 				installFooter(nextSession);
@@ -706,6 +729,12 @@ export default function atelierExtension(pi: ExtensionAPI): void {
 	pi.on("session_tree", (_event, ctx) => {
 		const current = getActiveSession(ctx);
 		if (!current) return;
+		current.runActivity.clearQuality();
+		current.qualityHeader = undefined;
+		pi.events.emit("code-quality:activity:discover", {
+			version: 1,
+			sessionId: current.sessionManager.getSessionId(),
+		});
 		refreshSessionSummary(current);
 		schedulePlannotatorRefresh(current);
 		requestAllRenders(current);
