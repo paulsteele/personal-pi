@@ -27,12 +27,21 @@ export function testAccess(
 		kind: "allowed",
 		revision: "fixture",
 	}),
+	checkLocalSearch: (action: PermissionAction) => Promise<PermissionResult> = check,
 ) {
-	return new PermissionScope({ check, revision: () => "fixture", nextTurn() {}, endTurn() {}, close() {} });
+	return new PermissionScope({
+		check,
+		checkLocalSearch,
+		revision: () => "fixture",
+		nextTurn() {},
+		endTurn() {},
+		close() {},
+	});
 }
 const testOperationPort = () => ({
 	task: () => ({
 		check: async () => ({ kind: "allowed" as const, revision: "fixture" }),
+		checkLocalSearch: async () => ({ kind: "allowed" as const, revision: "fixture" }),
 		revision: () => "fixture",
 		nextTurn() {},
 		endTurn() {},

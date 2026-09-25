@@ -41,6 +41,8 @@ export interface ToolReviewRequest {
   agentName?: string;
   description?: string;
   effects?: readonly ReadEffect[];
+  /** Trusted PR host scan only; approval to disclose matches is a separate read. */
+  localSearch?: true;
 }
 
 export interface ReviewState {
@@ -156,6 +158,7 @@ function policyForCall(
     add("path", value, path);
     if (normalizer.isOutsideWorkingDirectory(value)) add("external_directory", value, path);
   };
+  if (request.localSearch) add("search_source", "search_source");
   for (const skillName of skillNames) add("skill", skillName);
   if (directPath) addPath(directPath);
   for (const effect of request.effects ?? []) addPath(effect.path);
@@ -170,6 +173,19 @@ function policyForCall(
   const rank = (state: PolicyDecision["state"]) => (state === "deny" ? 2 : state === "ask" ? 1 : 0);
   return checks.reduce((worst, item) =>
     rank(item.decision.state) > rank(worst.decision.state) ? item : worst,
+  );
+}
+
+function isRepositoryLocalSearch(request: ToolReviewRequest): boolean {
+  const path = inputPath(request.input);
+  return (
+    request.toolName === "read" &&
+    !!request.agentName &&
+    !request.skillInput &&
+    !!path &&
+    request.effects?.length === 1 &&
+    request.effects[0]?.path === path &&
+    !new PathNormalizer(request.cwd).isOutsideWorkingDirectory(path)
   );
 }
 
@@ -473,6 +489,23 @@ export async function reviewToolCall(
           },
           "Denied by permission policy.",
         );
+      if (request.localSearch) {
+        const blocked =
+          safety.kind === "require_human"
+            ? safety.reason
+            : !isRepositoryLocalSearch(request)
+              ? "Local search requires one repository-contained source read."
+              : null;
+        return finish({
+          result: blocked ? "deny" : "allow",
+          resolution: blocked ? "local_search_blocked" : "local_search_allowed",
+          decidedBy:
+            safety.kind === "require_human"
+              ? { kind: "guard", category: safety.category }
+              : { kind: "policy", pattern: policy.matchedPattern },
+          reason: blocked,
+        });
+      }
       const unresolved = safety.riskMarkers.includes("unresolved-path-expression");
       if (safety.kind !== "require_human" && policy.state === "allow" && !unresolved)
         return finish({

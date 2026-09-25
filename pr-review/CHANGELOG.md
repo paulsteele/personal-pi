@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.1 — 2026-09-25
+
+- Search ordinary snapshot files locally without prompting for files that return no matches. Authorize matching snippets before disclosure and report denied/protected files as skipped coverage.
+- Retain only delivered matching files as continuing search dependencies, and commit source dependencies only after the outer tool result is accepted. Preserve live-policy and cancellation checks across scanning and disclosure.
+
 ## 1.4.0 — 2026-09-24
 
 - Migrate worker termination to Pi 0.87.1's `finishTurn` hook while preserving submission, compaction, stall detection, and permission exits.

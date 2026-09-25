@@ -34,6 +34,8 @@ export interface QualityHeader extends QualityActivity {
 	modelId: string;
 }
 
+const MAX_REVIEW_REQUESTS_WITH_REPAIR = 6;
+
 const QUALITY_LABELS: Record<QualityActivityPhase, string> = {
 	ready: "ready",
 	pending: "pending",
@@ -89,7 +91,9 @@ function parseStatus(value: unknown): (QualityActivity & { sessionId: string }) 
 		return;
 	if (
 		event.reviewAttempt !== undefined &&
-		(!nonnegativeInteger(event.reviewAttempt) || event.reviewAttempt < 1 || event.reviewAttempt > 5)
+		(!nonnegativeInteger(event.reviewAttempt) ||
+			event.reviewAttempt < 1 ||
+			event.reviewAttempt > MAX_REVIEW_REQUESTS_WITH_REPAIR)
 	)
 		return;
 	return {

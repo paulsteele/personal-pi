@@ -1406,6 +1406,67 @@ describe("integrated permission system", () => {
     rmSync(h.agentDir, { recursive: true, force: true });
   });
 
+  it("limits local-search approval deferral to the delegated search entry point", async () => {
+    const h = setup({ permission: { "*": "ask" }, enabledByDefault: false });
+    try {
+      await h.handlers.get("session_start")?.({}, h.ctx);
+      let service!: DelegatedReviewService;
+      h.events.emit(REVIEW_SERVICE_CHANNEL, {
+        version: 1,
+        accept: (value: DelegatedReviewService) => {
+          service = value;
+        },
+      });
+      const operation = service.open({
+        id: "local-search",
+        sessionId: "current-session",
+        cwd: "/repo",
+        scope: "local",
+        signal: new AbortController().signal,
+      });
+      const spec = {
+        name: "Searcher",
+        assignment: "Find callers",
+        model: "fake/reviewer",
+        kind: "worker" as const,
+      };
+      const searcher = operation.task({
+        ...spec,
+        id: "searcher",
+        tools: ["read", "search_source"],
+      });
+      const reader = operation.task({ ...spec, id: "reader", tools: ["read"] });
+      const action = {
+        toolName: "read",
+        input: { path: "/repo/a.ts", localSearch: true },
+        effects: [{ path: "/repo/a.ts" }],
+        localSearch: true,
+      };
+      expect((await reader.checkLocalSearch(action)).kind).toBe("denied");
+      expect((await searcher.checkLocalSearch(action)).kind).toBe("allowed");
+      expect(h.ctx.ui.select).not.toHaveBeenCalled();
+      expect(h.ctx.modelRegistry.complete).not.toHaveBeenCalled();
+
+      h.ctx.ui.select.mockResolvedValue("n deny");
+      expect((await searcher.check(action)).kind).toBe("denied");
+      expect(h.ctx.ui.select).toHaveBeenCalledTimes(1);
+      expect(
+        await h.handlers.get("tool_call")?.(
+          { ...action, toolCallId: "forged-local-search" },
+          h.ctx,
+        ),
+      ).toMatchObject({ block: true });
+      expect(h.ctx.ui.select).toHaveBeenCalledTimes(2);
+
+      operation.close();
+      expect((await searcher.checkLocalSearch(action)).kind).toBe("cancelled");
+      expect(h.ctx.ui.select).toHaveBeenCalledTimes(2);
+    } finally {
+      await h.handlers.get("session_shutdown")?.({}, h.ctx);
+      rmSync(h.agentDir, { recursive: true, force: true });
+    }
+  });
+
   it("queues child and main approvals together and cancels a queued child without showing it", async () => {
     const h = setup({ permission: { "*": "ask" }, enabledByDefault: false });
     await h.handlers.get("session_start")?.({}, h.ctx);

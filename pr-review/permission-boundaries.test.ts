@@ -3,6 +3,7 @@ import { expect, it, vi } from "vitest";
 import { PermissionScope, type PermissionWait } from "./permissions.js";
 import { registryStream, type Registry } from "./worker.js";
 import { testConfig } from "./test-fixtures.js";
+import { commitToolResult } from "./tool-commit.js";
 
 const source = (name: string) => ({ path: `/repo/${name}`, side: "new" as const, version: "blob" });
 function liveScope() {
@@ -88,6 +89,116 @@ it("observes cancellation during a large immediately-allowed sweep", async () =>
 	setImmediate(() => controller.abort());
 	await expect(pending).rejects.toBeDefined();
 	expect(h.check.mock.calls.length).toBeLessThan(500);
+});
+
+it.each([false, true])(
+	"rechecks local scan restrictions after a policy change (hasMatches=%s)",
+	async (hasMatches) => {
+		let revoked = false;
+		const disclosure = vi.fn(async () => ({ kind: "allowed" as const, revision: "active" }));
+		const localScan = vi.fn(async () =>
+			revoked
+				? { kind: "denied" as const, reason: "source revoked" }
+				: { kind: "allowed" as const, revision: "active" },
+		);
+		const scope = new PermissionScope({
+			check: disclosure,
+			checkLocalSearch: localScan,
+			revision: () => (revoked ? "revoked" : "active"),
+			nextTurn() {},
+			endTurn() {},
+			close() {},
+		});
+		await expect(
+			scope.searchMatches({ toolName: "read", input: {}, effects: [source("A")] }, async () => {
+				revoked = true;
+				return hasMatches ? ["matching content"] : [];
+			}),
+		).rejects.toThrow("source revoked");
+		expect(localScan).toHaveBeenCalledTimes(2);
+		expect(disclosure).not.toHaveBeenCalled();
+		expect(scope.dependencies).toEqual([]);
+	},
+);
+
+it("discards matching content when its disclosure is revoked while awaiting approval", async () => {
+	let revoked = false;
+	const scope = new PermissionScope({
+		check: async () => {
+			if (revoked) return { kind: "denied", reason: "disclosure revoked" };
+			revoked = true;
+			return { kind: "allowed", revision: "active" };
+		},
+		checkLocalSearch: async () => ({ kind: "allowed", revision: "active" }),
+		revision: () => (revoked ? "revoked" : "active"),
+		nextTurn() {},
+		endTurn() {},
+		close() {},
+	});
+	await expect(
+		scope.searchMatches({ toolName: "read", input: {}, effects: [source("A")] }, async () => [
+			"matching content",
+		]),
+	).rejects.toThrow("disclosure revoked");
+	expect(scope.dependencies).toEqual([]);
+});
+
+it("does not retain search dependencies when the outer tool result is rejected", async () => {
+	const scope = new PermissionScope({
+		check: async () => ({ kind: "allowed", revision: "active" }),
+		checkLocalSearch: async () => ({ kind: "allowed", revision: "active" }),
+		revision: () => "active",
+		nextTurn() {},
+		endTurn() {},
+		close() {},
+	});
+	await expect(
+		commitToolResult(async () => {
+			const matches = await scope.searchMatches(
+				{ toolName: "read", input: {}, effects: [source("A")] },
+				async () => ["matching content"],
+			);
+			expect(matches).toEqual(["matching content"]);
+			expect(scope.dependencies).toEqual([]);
+			throw new Error("outer tool rejected");
+		}),
+	).rejects.toThrow("outer tool rejected");
+	expect(scope.dependencies).toEqual([]);
+	await commitToolResult(() =>
+		scope.searchMatches({ toolName: "read", input: {}, effects: [source("A")] }, async () => [
+			"matching content",
+		]),
+	);
+	expect(scope.dependencies).toEqual([source("A")]);
+});
+
+it("fails closed without local-search support and never starts the scan", async () => {
+	const { scope, check } = liveScope();
+	const scan = vi.fn(async () => []);
+	await expect(scope.searchMatches({ toolName: "read", input: {} }, scan)).rejects.toThrow("unavailable");
+	expect(scan).not.toHaveBeenCalled();
+	expect(check).not.toHaveBeenCalled();
+});
+
+it("discards a cancelled scan before requesting disclosure", async () => {
+	const controller = new AbortController();
+	const disclosure = vi.fn(async () => ({ kind: "allowed" as const, revision: "active" }));
+	const scope = new PermissionScope({
+		check: disclosure,
+		checkLocalSearch: async () => ({ kind: "allowed", revision: "active" }),
+		revision: () => "active",
+		nextTurn() {},
+		endTurn() {},
+		close() {},
+	});
+	await expect(
+		scope.searchMatches({ toolName: "read", input: {}, signal: controller.signal }, async () => {
+			controller.abort();
+			return ["matching content"];
+		}),
+	).rejects.toThrow();
+	expect(disclosure).not.toHaveBeenCalled();
+	expect(scope.dependencies).toEqual([]);
 });
 
 const model = {

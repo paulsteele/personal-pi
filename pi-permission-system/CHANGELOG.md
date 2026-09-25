@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.1 — 2026-09-25
+
+- Add a trusted delegated local-search check that defers ordinary approval until matching content is disclosed. Explicit denies, sensitive-path guards, external-path restrictions, cancellation, and live policy remain enforced before scanning.
+- Distinguish local-search audit decisions from disclosure approvals; keep ordinary reads and skill invocation unchanged.
+
 ## 1.4.0 — 2026-09-24
 
 - Align the workspace with Pi 0.87.x and verify against 0.87.1 development dependencies. Permission rules and classifier authority are unchanged.

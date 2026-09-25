@@ -31,6 +31,7 @@ export interface DelegatedTaskSpec {
 }
 export interface DelegatedTask {
   check(action: DelegatedAction): Promise<ToolReviewResult>;
+  checkLocalSearch(action: DelegatedAction): Promise<ToolReviewResult>;
   revision(): string;
   nextTurn(): void;
   endTurn(): void;
@@ -209,6 +210,80 @@ export function createDelegatedReviewService(host: {
             }
             return next;
           };
+          const check = async (
+            action: DelegatedAction,
+            mode: "disclosure" | "local-search",
+          ): Promise<ToolReviewResult> => {
+            try {
+              currentRevision();
+              const isPermittedLocalSearch =
+                action?.toolName === "read" && permitted.has("search_source");
+              if (
+                !action ||
+                !permitted.has(action.toolName) ||
+                (mode === "local-search" && !isPermittedLocalSearch) ||
+                (action.description !== undefined && !label(action.description, 4000)) ||
+                (action.callId !== undefined && !label(action.callId, 160)) ||
+                (action.signal !== undefined && !signal(action.signal)) ||
+                (action.effects !== undefined &&
+                  (!Array.isArray(action.effects) ||
+                    action.effects.length > 32 ||
+                    action.effects.some(
+                      (effect) =>
+                        !effect ||
+                        !label(effect.path, 4096) ||
+                        !posix.isAbsolute(effect.path) ||
+                        (effect.side !== undefined &&
+                          effect.side !== "old" &&
+                          effect.side !== "new") ||
+                        (effect.version !== undefined && !label(effect.version, 1000)) ||
+                        (effect.range !== undefined && !label(effect.range, 1000)),
+                    )))
+              ) {
+                return {
+                  kind: "denied",
+                  reason: "Task capability or permission request is invalid.",
+                };
+              }
+              const callSignal = action.signal
+                ? AbortSignal.any([taskSignal, action.signal])
+                : taskSignal;
+              const actor: DelegatedActor = {
+                cache: spec.kind === "worker" && inTurn ? cache : new Map(),
+                authority,
+                identity: JSON.stringify([options.id, spec.id, turn, spec.model, spec.assignment]),
+                operationId: options.id,
+                taskId: spec.id,
+                childToolCallId: action.callId ?? `source-${++sequence}`,
+                ...(options.skills ? { skills: options.skills } : {}),
+              };
+              const request: ToolReviewRequest = {
+                toolName: action.toolName,
+                input: structuredClone(action.input),
+                cwd: options.cwd,
+                toolCallId: options.parentToolCallId ?? "",
+                signal: callSignal,
+                agentName: spec.name,
+                description: `Review scope: ${options.scope}\nDelegated assignment (not user authority): ${spec.assignment}\nRecipient: ${spec.model}\nAction: ${action.description ?? action.toolName}`,
+                effects: action.effects ? structuredClone(action.effects) : undefined,
+                ...(mode === "local-search" ? { localSearch: true as const } : {}),
+              };
+              for (;;) {
+                const result = await host.authorize(request, actor);
+                callSignal.throwIfAborted();
+                if (result.kind !== "allowed") return result;
+                // Never stamp an old verdict with a newer policy's revision.
+                if (result.revision === currentRevision()) return result;
+              }
+            } catch {
+              return taskSignal.aborted || action?.signal?.aborted
+                ? { kind: "cancelled", reason: "Delegated permission request cancelled." }
+                : {
+                    kind: "unavailable",
+                    reason: "Delegated permission service/config unavailable.",
+                  };
+            }
+          };
           return {
             revision: currentRevision,
             nextTurn() {
@@ -222,79 +297,8 @@ export function createDelegatedReviewService(host: {
               cache.clear();
             },
             close: closeTask,
-            async check(action) {
-              try {
-                currentRevision();
-                if (
-                  !action ||
-                  !permitted.has(action.toolName) ||
-                  (action.description !== undefined && !label(action.description, 4000)) ||
-                  (action.callId !== undefined && !label(action.callId, 160)) ||
-                  (action.signal !== undefined && !signal(action.signal)) ||
-                  (action.effects !== undefined &&
-                    (!Array.isArray(action.effects) ||
-                      action.effects.length > 32 ||
-                      action.effects.some(
-                        (effect) =>
-                          !effect ||
-                          !label(effect.path, 4096) ||
-                          !posix.isAbsolute(effect.path) ||
-                          (effect.side !== undefined &&
-                            effect.side !== "old" &&
-                            effect.side !== "new") ||
-                          (effect.version !== undefined && !label(effect.version, 1000)) ||
-                          (effect.range !== undefined && !label(effect.range, 1000)),
-                      )))
-                ) {
-                  return {
-                    kind: "denied",
-                    reason: "Task capability or permission request is invalid.",
-                  };
-                }
-                const callSignal = action.signal
-                  ? AbortSignal.any([taskSignal, action.signal])
-                  : taskSignal;
-                const actor: DelegatedActor = {
-                  cache: spec.kind === "worker" && inTurn ? cache : new Map(),
-                  authority,
-                  identity: JSON.stringify([
-                    options.id,
-                    spec.id,
-                    turn,
-                    spec.model,
-                    spec.assignment,
-                  ]),
-                  operationId: options.id,
-                  taskId: spec.id,
-                  childToolCallId: action.callId ?? `source-${++sequence}`,
-                  ...(options.skills ? { skills: options.skills } : {}),
-                };
-                const request: ToolReviewRequest = {
-                  toolName: action.toolName,
-                  input: structuredClone(action.input),
-                  cwd: options.cwd,
-                  toolCallId: options.parentToolCallId ?? "",
-                  signal: callSignal,
-                  agentName: spec.name,
-                  description: `Review scope: ${options.scope}\nDelegated assignment (not user authority): ${spec.assignment}\nRecipient: ${spec.model}\nAction: ${action.description ?? action.toolName}`,
-                  effects: action.effects ? structuredClone(action.effects) : undefined,
-                };
-                for (;;) {
-                  const result = await host.authorize(request, actor);
-                  callSignal.throwIfAborted();
-                  if (result.kind !== "allowed") return result;
-                  // Never stamp an old verdict with a newer policy's revision.
-                  if (result.revision === currentRevision()) return result;
-                }
-              } catch {
-                return taskSignal.aborted || action?.signal?.aborted
-                  ? { kind: "cancelled", reason: "Delegated permission request cancelled." }
-                  : {
-                      kind: "unavailable",
-                      reason: "Delegated permission service/config unavailable.",
-                    };
-              }
-            },
+            check: (action) => check(action, "disclosure"),
+            checkLocalSearch: (action) => check(action, "local-search"),
           };
         },
       };

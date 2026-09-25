@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.1 — 2026-09-25
+
+- Accept Code Quality activity through the sixth request, accounting for one submission repair alongside the provider retry budget.
+
 ## 1.4.0 — 2026-09-24
 
 - Add a `󰅴 quality · provider/model` header directly below auto mode and inline quality outcome badges beside corresponding edit/write permission badges.

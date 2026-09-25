@@ -80,8 +80,19 @@ commit only after the outer permission guard accepts the result.
 Approved profile exclusions control review scope, **not file access**. Excluded/unneeded dirty files are
 kept as metadata until requested; a later read requires permission and matching captured identity. If
 that deferred source has changed, start a fresh review instead of mixing newer bytes into the snapshot.
-Denied mandatory guidance is not treated as a stale missing document. Search reports denied/unavailable
-coverage rather than silently returning a complete negative result.
+Denied mandatory guidance is not treated as a stale missing document.
+
+`search_source` separates local matching from disclosure to a worker. The trusted harness can scan ordinary
+repository-contained snapshot files without resolving their `ask` rules first. Explicit tool/read/path/skill
+denies and deterministic sensitive-path guards prevent the scan; those files are reported as skipped
+coverage, not searched with zero matches. External destinations are not eligible. Files with no matches
+cause no classifier/human request and add no continuing context dependency. Matching lines pass the normal
+read/skill permission gate before they are returned, and only delivered matches become dependencies for
+later model requests or transfers. A rejected outer tool result commits no new dependencies. Local checks
+and disclosure checks both honor live policy changes and cancellation. Older permission services without
+local-search support fail closed. This changes only snapshot search, not ordinary reads or skill invocation;
+matching files can still require approval again on later turns. Search reports denied/unavailable coverage
+rather than silently returning a complete negative result.
 
 Snapshot and provider prompt caches remain performance mechanisms, not permission grants. New denials
 also apply to cached source and outgoing worker history/summary dependencies. Already sent context,

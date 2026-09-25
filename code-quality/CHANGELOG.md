@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.1 — 2026-09-25
+
+- Give invalid reviewer submissions one immediate repair attempt with explicit finding/edit ranges and bounded validation feedback, rather than repeating identical requests.
+- Keep the five-provider-failure retry budget separate from submission repair and readability rounds; preserve repair feedback across transport retries and stop when complete repair context cannot fit.
+
 ## 1.4.0 — 2026-09-24
 
 - Add an isolated post-edit human-readability gate with shared enforced preferences, an explicitly configured reviewer, and exact proposed edits. Exclude formatting, lint, unused-symbol cleanup, correctness, and coverage checks from the review policy.

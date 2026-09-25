@@ -7,7 +7,7 @@ import { canonicalPath } from "./capture.js";
 import { QualityController, type QualityUI } from "./controller.js";
 import { saveConfig } from "./config.js";
 import { revision } from "./case.js";
-import type { ReviewResult } from "./reviewer.js";
+import { review as runReview, type ReviewResult } from "./reviewer.js";
 import { QUALITY_CHECK_ENTRY } from "./feedback.js";
 import {
 	createQualityActivityPublisher,
@@ -601,6 +601,74 @@ it("reload preserves approved proposal application and branch changes cancel lat
 	release(approved());
 	expect(await pending).toBeUndefined();
 	expect(second.runtime.state?.resolution).toBeUndefined();
+});
+
+function reviewerWithOutOfScopeFinding(h: ReturnType<typeof harness>) {
+	const complete = vi.fn().mockResolvedValue({
+		stopReason: "toolUse",
+		content: [
+			{
+				type: "toolCall",
+				name: "submit_quality_verdict",
+				arguments: {
+					verdict: "needs_work",
+					rationale: "Name the coordinate",
+					findings: [{ file: h.path, line: 99, quote: "x", rule: "names", rationale: "Name intent" }],
+					edits: [{ file: h.path, oldText: "x", newText: "coordinate" }],
+				},
+			},
+		],
+	});
+	Object.assign(h.ctx.modelRegistry, {
+		find: () => ({ provider: "test", id: "reviewer", contextWindow: 100_000, maxTokens: 8000 }),
+		hasConfiguredAuth: () => true,
+		complete,
+	});
+	h.review.mockImplementation(runReview);
+	return complete;
+}
+
+it("pauses an initial review after one failed scope repair without approving", async () => {
+	const h = harness();
+	const complete = reviewerWithOutOfScopeFinding(h);
+	await edit(h, "x");
+	expect(complete).toHaveBeenCalledTimes(2);
+	expect(h.runtime.state).toMatchObject({ phase: "paused", attempts: 0, reviewed: false });
+	expect(h.runtime.state?.resolution).toBeUndefined();
+	expect(h.ui.failure).toHaveBeenCalledWith(
+		h.ctx,
+		expect.stringContaining(
+			"Quality verdict invalid after one repair attempt: Finding outside changed scope",
+		),
+		expect.any(AbortSignal),
+	);
+	expect(h.ui.arbitrate).not.toHaveBeenCalled();
+	expect(h.ctx.abort).toHaveBeenCalled();
+	await h.runtime.boundary(h.ctx, "completed", true);
+	expect(complete).toHaveBeenCalledTimes(2);
+});
+
+it("keeps a disagreement pending after one failed scope repair without spending its round", async () => {
+	const h = harness();
+	h.review.mockResolvedValueOnce(namingRejection(h.path, "x"));
+	await edit(h, "x");
+	await disagree(h, "This is a coordinate name.");
+	const complete = reviewerWithOutOfScopeFinding(h);
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(complete).toHaveBeenCalledTimes(2);
+	expect(h.runtime.state).toMatchObject({ phase: "paused", attempts: 0, reconsiderationPending: true });
+	expect(h.runtime.state?.resolution).toBeUndefined();
+	expect(h.ui.failure).toHaveBeenCalledWith(
+		h.ctx,
+		expect.stringContaining(
+			"Quality verdict invalid after one repair attempt: Finding outside changed scope",
+		),
+		expect.any(AbortSignal),
+	);
+	expect(h.ui.arbitrate).not.toHaveBeenCalled();
+	expect(h.ctx.abort).toHaveBeenCalled();
+	await h.runtime.boundary(h.ctx, "completed", true);
+	expect(complete).toHaveBeenCalledTimes(2);
 });
 
 it("failure cancellation pauses without automatic acceptance", async () => {

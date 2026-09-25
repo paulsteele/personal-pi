@@ -1,8 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG } from "#src/config.ts";
-import { reviewToolCall, type ToolReviewHost, type ToolReviewRequest } from "#src/tool-review.ts";
+import {
+  reviewToolCall,
+  type ActiveSkill,
+  type ToolReviewHost,
+  type ToolReviewRequest,
+} from "#src/tool-review.ts";
 
-function harness(permission: typeof DEFAULT_CONFIG.permission, auto = true) {
+function harness(
+  permission: typeof DEFAULT_CONFIG.permission,
+  auto = true,
+  skills: ActiveSkill[] = [],
+) {
   let config = {
     ...DEFAULT_CONFIG,
     permission,
@@ -18,7 +27,7 @@ function harness(permission: typeof DEFAULT_CONFIG.permission, auto = true) {
       config,
       revision: JSON.stringify(config),
       contextRevision: "notes",
-      skills: [],
+      skills,
       directories: new Set(),
       files: new Set(),
     }),
@@ -44,6 +53,95 @@ const read: ToolReviewRequest = {
   input: { path: "/repo/a.ts" },
   toolCallId: "call",
 };
+
+describe("repository-local search checks", () => {
+  const skill = {
+    name: "release",
+    filePath: "/repo/.claude/skills/release/SKILL.md",
+    baseDir: "/repo/.claude/skills/release",
+  };
+  const localSearchRequest: ToolReviewRequest = {
+    ...read,
+    agentName: "Reviewer",
+    input: { path: skill.filePath },
+    effects: [{ path: skill.filePath, version: "captured" }],
+    localSearch: true,
+  };
+
+  it.each([true, false])(
+    "defers ordinary skill approval until disclosure (auto=%s)",
+    async (auto) => {
+      const h = harness({ "*": "allow", skill: "ask" }, auto, [skill]);
+      expect((await reviewToolCall(localSearchRequest, h.host)).kind).toBe("allowed");
+      expect(h.model).not.toHaveBeenCalled();
+      expect(h.human).not.toHaveBeenCalled();
+      expect(h.host.decision).toHaveBeenCalledWith(
+        expect.objectContaining({ resolution: "local_search_allowed", surface: "skill" }),
+      );
+      const { localSearch: _localSearch, ...disclosure } = localSearchRequest;
+      await reviewToolCall(disclosure, h.host);
+      expect(h.model).toHaveBeenCalledTimes(auto ? 1 : 0);
+      expect(h.human).toHaveBeenCalledTimes(auto ? 0 : 1);
+    },
+  );
+
+  it.each(["path", "read", "skill", "search_source"])(
+    "never scans past an explicit %s deny",
+    async (surface) => {
+      const h = harness({ "*": "allow", [surface]: "deny" }, true, [skill]);
+      expect((await reviewToolCall(localSearchRequest, h.host)).kind).toBe("denied");
+      expect(h.model).not.toHaveBeenCalled();
+      expect(h.human).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["/repo/.env", "/outside/readme.md"])(
+    "skips protected or external source %s",
+    async (path) => {
+      const h = harness({ "*": "allow" });
+      expect(
+        (
+          await reviewToolCall(
+            { ...localSearchRequest, input: { path }, effects: [{ path }] },
+            h.host,
+          )
+        ).kind,
+      ).toBe("denied");
+      expect(h.model).not.toHaveBeenCalled();
+      expect(h.human).not.toHaveBeenCalled();
+      expect(h.host.decision).toHaveBeenCalledWith(
+        expect.objectContaining({ resolution: "local_search_blocked" }),
+      );
+    },
+  );
+
+  it.each([
+    { toolName: "write" },
+    { effects: [] },
+    { effects: [{ path: "/repo/different.ts" }] },
+    { agentName: "" },
+  ])("refuses a local-search check with invalid read scope %j", async (invalid) => {
+    const h = harness({ "*": "allow" });
+    expect((await reviewToolCall({ ...localSearchRequest, ...invalid }, h.host)).kind).toBe(
+      "denied",
+    );
+    expect(h.model).not.toHaveBeenCalled();
+    expect(h.human).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before scanning with a cancelled request or unreadable config", async () => {
+    const h = harness({ "*": "allow" });
+    expect(
+      (await reviewToolCall({ ...localSearchRequest, signal: AbortSignal.abort() }, h.host)).kind,
+    ).toBe("cancelled");
+    h.host.refresh = () => {
+      throw new Error("invalid config");
+    };
+    expect((await reviewToolCall(localSearchRequest, h.host)).kind).toBe("unavailable");
+    expect(h.model).not.toHaveBeenCalled();
+    expect(h.human).not.toHaveBeenCalled();
+  });
+});
 
 describe("context-explicit tool evaluation", () => {
   it.each(["main", "reviewer"])("preserves routing for %s", async (actor) => {

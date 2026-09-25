@@ -36,6 +36,8 @@ export interface PermissionDecisionEvent {
   resolution:
     | "policy_allow"
     | "policy_deny"
+    | "local_search_allowed"
+    | "local_search_blocked"
     | "auto_approved"
     | "user_approved"
     | "user_denied"

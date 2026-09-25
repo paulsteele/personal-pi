@@ -106,7 +106,9 @@ export function validateVerdict(value: unknown, files: ReviewFile[]): ValidatedV
 		const file = files.find((file) => file.path === finding.file);
 		const lines = file?.after.split("\n");
 		if (!file || !lines || !contained([finding.line, finding.line], file.changedRanges))
-			throw new Error("Finding outside changed scope");
+			throw new Error(
+				`Finding outside changed scope: ${JSON.stringify({ file: finding.file, line: finding.line, quote: finding.quote })}`,
+			);
 		if (
 			!lines
 				.slice(finding.line - 1)
@@ -122,7 +124,7 @@ export function validateVerdict(value: unknown, files: ReviewFile[]): ValidatedV
 	for (const edit of verdict.edits) {
 		const file = files.find((file) => file.path === edit.file);
 		if (!file || !verdict.findings.some((finding) => finding.file === edit.file))
-			throw new Error("Proposal outside finding scope");
+			throw new Error(`Proposal outside finding scope: ${JSON.stringify(edit.file)}`);
 		const start = file.after.indexOf(edit.oldText);
 		if (start < 0 || !contained(lineRange(file.after, start, edit.oldText.length), file.visibleRanges))
 			throw new Error("Proposal uses unseen context");

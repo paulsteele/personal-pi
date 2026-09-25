@@ -38,6 +38,11 @@ export interface Change {
 	patchPath?: string;
 	changedRanges?: { old: Array<[number, number]>; new: Array<[number, number]> };
 }
+export interface SearchMatch {
+	file: string;
+	line: number;
+	text: string;
+}
 export interface Snapshot {
 	repo: Repo;
 	head: string | null;
@@ -57,6 +62,12 @@ export interface Snapshot {
 	): Promise<{ text: string; total: number; nextOffset: number | null; start?: number }>;
 	validateCurrent?(signal?: AbortSignal): Promise<void>;
 	read(path: string, side?: "old" | "new"): Promise<Buffer>;
+	searchMatches?(
+		path: string,
+		query: string,
+		maxMatches: number,
+		signal?: AbortSignal,
+	): Promise<SearchMatch[]>;
 	paths(side?: "old" | "new"): string[];
 	page?(
 		path: string,
@@ -274,7 +285,7 @@ export async function capture(
 		const blobs = new Map<string, Promise<string>>();
 		const liveCopies = new Map<Entry, Promise<string>>();
 		const empty = await store.put("");
-		// Private primitive: every caller below must enter a PermissionScope.guard first.
+		// Private backing access requires a disclosure guard or a restricted local-search check.
 		async function entryPath(entry: Entry | undefined): Promise<string> {
 			if (!entry) throw new Error("File not present in snapshot");
 			if (entry.unavailable || !["100644", "100755"].includes(entry.mode))
@@ -549,6 +560,22 @@ export async function capture(
 						text(data);
 						return data;
 					}),
+				async searchMatches(path, query, maxMatches, searchSignal) {
+					const { entry } = resolveSource(path, "new");
+					return access.searchMatches(
+						{
+							toolName: "read",
+							input: { path: join(repo.root, path) },
+							effects: sources(path, "new"),
+							description: "Search captured source locally; disclose only authorized matching lines",
+							...((searchSignal ?? signal) ? { signal: searchSignal ?? signal } : {}),
+						},
+						async () => {
+							const data = await readFile(await entryPath(entry));
+							return matchingLines(path, text(data), query, maxMatches);
+						},
+					);
+				},
 				async writePatch(destination, writeSignal) {
 					async function* chunks() {
 						for (const change of changes) {
@@ -849,7 +876,7 @@ export function snapshotTools(
 			name: "search_source",
 			label: "Search captured source",
 			description:
-				"Literal search in captured text; scans up to 200 files per call and returns at most 100 matches. Use offset to page files.",
+				"Literal search in captured text; scans up to 200 files per call and returns at most 100 matches. Ordinary file approval is requested only for matches; denied/protected files are reported as skipped coverage. Use offset to page files.",
 			parameters: Type.Object({
 				query: Type.String({ minLength: 1, maxLength: 256 }),
 				glob: Type.Optional(Type.String()),
@@ -858,7 +885,7 @@ export function snapshotTools(
 			execute: async (_id, args, signal) => {
 				const all = snapshot.paths().filter((path) => !args.glob || matchesGlob(path, args.glob));
 				const selected = all.slice(args.offset ?? 0, (args.offset ?? 0) + 200);
-				const found: Array<{ file: string; line: number; text: string }> = [];
+				const found: SearchMatch[] = [];
 				let scanned = 0,
 					unavailable = 0;
 				const denied: Array<{ file: string; reason: string }> = [];
@@ -867,10 +894,11 @@ export function snapshotTools(
 					signal?.throwIfAborted();
 					scanned++;
 					try {
-						const lines = (await snapshot.read(file)).toString().split("\n");
-						for (let i = 0; i < lines.length && found.length < 100; i++)
-							if (lines[i]!.includes(args.query))
-								found.push({ file, line: i + 1, text: lines[i]!.slice(0, 300) });
+						const remainingMatches = 100 - found.length;
+						const matches = snapshot.searchMatches
+							? await snapshot.searchMatches(file, args.query, remainingMatches, signal)
+							: matchingLines(file, (await snapshot.read(file)).toString(), args.query, remainingMatches);
+						found.push(...matches);
 					} catch (error) {
 						signal?.throwIfAborted();
 						if (isPermissionBlocked(error)) {
@@ -901,6 +929,15 @@ export function snapshotTools(
 			},
 		}),
 	];
+}
+function matchingLines(file: string, source: string, query: string, maxMatches: number): SearchMatch[] {
+	const matches: SearchMatch[] = [];
+	const lines = source.split("\n");
+	for (let index = 0; index < lines.length && matches.length < maxMatches; index++) {
+		const line = lines[index]!;
+		if (line.includes(query)) matches.push({ file, line: index + 1, text: line.slice(0, 300) });
+	}
+	return matches;
 }
 export async function snapshotLines(
 	snapshot: Snapshot,

@@ -269,6 +269,111 @@ test("PR uses live parent permissions without copying its authority across worke
 	}
 }, 30000);
 
+test("PR search prompts only for matching skill content and keeps normal reads gated", async () => {
+	const previous = process.env.PI_CODING_AGENT_DIR;
+	const agentDir = await mkdtemp(join(tmpdir(), "pr-search-permissions-"));
+	const repo = await fixture();
+	const handlers = new Map<string, (event: any, ctx: any) => unknown>();
+	const listeners = new Map<string, Set<(data: unknown) => void>>();
+	const events = {
+		on(name: string, handler: (data: unknown) => void) {
+			const set = listeners.get(name) ?? new Set();
+			set.add(handler);
+			listeners.set(name, set);
+			return () => { set.delete(handler); };
+		},
+		emit(name: string, data: unknown) {
+			for (const handler of listeners.get(name) ?? []) handler(data);
+		},
+	};
+	const api = {
+		events,
+		on: (name: string, handler: (event: any, ctx: any) => unknown) => handlers.set(name, handler),
+		registerCommand() {}, registerShortcut() {}, registerEntryRenderer() {}, appendEntry() {},
+	};
+	const skillPath = ".claude/skills/release/SKILL.md";
+	const skills = [{ name: "release", filePath: join(repo.root, skillPath), baseDir: join(repo.root, ".claude/skills/release") }];
+	const classifierInputs: string[] = [];
+	let prompts = 0;
+	const ctx = {
+		cwd: repo.root, mode: "rpc", hasUI: true,
+		getSystemPromptOptions: () => ({ skills }),
+		sessionManager: { getSessionId: () => "search-test", getBranch: () => [], appendCustomEntry() {} },
+		ui: {
+			setStatus() {}, notify() {},
+			select: async () => { prompts++; return "y approve once"; },
+		},
+		modelRegistry: {
+			find: () => ({ provider: "fake", id: "classifier" }),
+			hasConfiguredAuth: () => true,
+			complete: async (_model: unknown, input: unknown) => {
+				classifierInputs.push(JSON.stringify(input));
+				return { content: [{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "require_human", reason: "Confirm skill disclosure" } }] };
+			},
+		},
+	};
+	let snapshot: Awaited<ReturnType<typeof capture>> | undefined;
+	let permissions: ReturnType<typeof openReviewPermissions> | undefined;
+	try {
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		await put(repo.root, skillPath, "RELEASE_MATCH_SENTINEL\n");
+		await put(repo.root, "blocked.ts", "RELEASE_MATCH_SENTINEL\n");
+		await put(repo.root, ".env", "RELEASE_MATCH_SENTINEL\n");
+		await commit(repo.root);
+		await put(repo.root, "change.ts", "ordinary change\n");
+		const configPath = join(agentDir, "extensions/pi-permission-system/config.json");
+		const config = {
+			permission: { "*": "allow", path: { "*": "allow", "blocked.ts": "deny" }, skill: "ask" },
+			auto: { provider: "fake", model: "classifier", enabledByDefault: true, timeoutMs: 1000 },
+		};
+		await mkdir(join(agentDir, "extensions/pi-permission-system"), { recursive: true });
+		await writeFile(configPath, JSON.stringify(config));
+		permissionSystem(api as never);
+		await handlers.get("session_start")?.({}, ctx);
+		permissions = openReviewPermissions(api as never, ctx as never, repo, "local", new AbortController().signal, { command: "/pr" });
+		snapshot = await capture(repo, { kind: "local" }, testConfig, permissions.host("Capture"));
+		const access = permissions.task({ id: "searcher", name: "Searcher", assignment: "Search callers", model: "fake/reviewer", tools: ["read", "search_source"], kind: "worker" });
+		const view = snapshot.withPermissions!(access);
+		const search = snapshotTools(view).find((tool) => tool.name === "search_source")!;
+		const absentQueryResponse = await search.execute("no-matches", { query: "absent" }, new AbortController().signal);
+		const emptyResult = JSON.parse((absentQueryResponse.content[0] as { text: string }).text);
+		expect(emptyResult.matches).toEqual([]);
+		expect(emptyResult.denied.map((entry: { file: string }) => entry.file)).toEqual([".env", "blocked.ts"]);
+		expect(emptyResult.complete).toBe(false);
+		expect(prompts).toBe(0);
+		expect(classifierInputs).toEqual([]);
+		expect(access.dependencies).toEqual([]);
+		await access.beforeDispatch();
+		expect(prompts).toBe(0);
+
+		const matchingResponse = await search.execute("matches", { query: "RELEASE_MATCH_SENTINEL" }, new AbortController().signal);
+		const matchingResult = JSON.parse((matchingResponse.content[0] as { text: string }).text);
+		expect(matchingResult.matches).toEqual([{ file: skillPath, line: 1, text: "RELEASE_MATCH_SENTINEL" }]);
+		expect(prompts).toBe(1);
+		expect(classifierInputs).toHaveLength(1);
+		expect(classifierInputs[0]).not.toContain("RELEASE_MATCH_SENTINEL");
+		expect(access.dependencies.map((effect) => effect.path)).toEqual([join(repo.root, skillPath)]);
+		await view.read(skillPath);
+		expect(prompts).toBe(2);
+
+		await writeFile(configPath, JSON.stringify({ ...config, permission: { "*": "allow", skill: "deny" } }));
+		const revoked = await search.execute("revoked", { query: "RELEASE_MATCH_SENTINEL", glob: ".claude/**" }, new AbortController().signal);
+		const revokedResult = JSON.parse((revoked.content[0] as { text: string }).text);
+		expect(revokedResult.matches).toEqual([]);
+		expect(revokedResult.denied.map((entry: { file: string }) => entry.file)).toEqual([skillPath]);
+		expect(prompts).toBe(2);
+		await expect(access.beforeDispatch()).rejects.toThrow("Denied by permission policy");
+	} finally {
+		permissions?.close();
+		await snapshot?.dispose?.();
+		await handlers.get("session_shutdown")?.({}, ctx);
+		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previous;
+		await rm(repo.root, { recursive: true, force: true });
+		await rm(agentDir, { recursive: true, force: true });
+	}
+}, 30000);
+
 test("a visible PR dashboard yields to the real permission controls before receiving input", async () => {
 	const previous = process.env.PI_CODING_AGENT_DIR;
 	const agentDir = await mkdtemp(join(tmpdir(), "pr-permission-focus-"));

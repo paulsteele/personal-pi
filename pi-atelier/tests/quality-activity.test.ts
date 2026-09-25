@@ -32,11 +32,30 @@ it("validates event identities, phases, revisions and counters without retaining
 		{ phase: "__proto__" },
 		{ revision: -1 },
 		{ revision: NaN },
-		{ reviewAttempt: 6 },
+		{ reviewAttempt: 7 },
 		{ correctionAttempt: 1 },
 		{ correctionAttempt: 6, correctionLimit: 5 },
 	])
 		expect(parseQualityActivity({ ...event, ...patch })).toBeUndefined();
+});
+
+it("accepts the sixth request when verdict repair shares the provider retry budget", () => {
+	const status = {
+		version: 1,
+		sessionId: "session",
+		phase: "checking",
+		revision: 6,
+		reviewAttempt: 6,
+	};
+	expect(parseQualityActivity({ ...status, toolCallId: "edit-a" })).toMatchObject({
+		phase: "checking",
+		reviewAttempt: 6,
+	});
+	expect(parseQualityHeader({ ...status, modelId: "test/reviewer" })).toMatchObject({
+		phase: "checking",
+		reviewAttempt: 6,
+	});
+	expect(parseQualityHeader({ ...status, modelId: "test/reviewer", reviewAttempt: 7 })).toBeUndefined();
 });
 
 it("validates standalone header data without requiring a tool call", () => {

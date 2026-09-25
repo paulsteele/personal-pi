@@ -89,7 +89,13 @@ it("sends the shared readability requirements and exclusions without task or con
 	const result = await review({ registry: registry(complete), config, request });
 	expect(result.kind).toBe("verdict");
 	const context = complete.mock.calls[0]![1];
-	expect(context.messages).toEqual([{ role: "user", content: request.input, timestamp: expect.any(Number) }]);
+	expect(context.messages).toEqual([
+		{ role: "user", content: expect.stringContaining(request.input), timestamp: expect.any(Number) },
+	]);
+	expect(context.messages[0].content).toContain(
+		JSON.stringify([{ file: "a.ts", findingLineRanges: [[1, 3]], editContextLineRanges: [[1, 3]] }]),
+	);
+	expect(context.systemPrompt).toContain("unchanged context is not eligible for findings");
 	expect(context.systemPrompt).toContain(POLICY);
 	expect(context.systemPrompt).toContain(
 		"Apply the listed readability preferences as requirements, not optional suggestions",
@@ -148,16 +154,288 @@ it("makes exactly five attempts with 2/4/6/8 second retry delays", async () => {
 	expect((await pending).kind).toBe("failed");
 	expect(times.map((time) => time - times[0]!)).toEqual([0, 2000, 6000, 12000, 20000]);
 });
-it("times out providers that ignore cancellation and rejects duplicate verdicts", async () => {
+it("times out providers that ignore cancellation on each of five attempts", async () => {
 	vi.useFakeTimers();
 	const complete = vi.fn().mockImplementation(() => new Promise(() => {}));
 	const pending = review({ registry: registry(complete), config: { ...config, timeoutMs: 250 }, request });
 	await vi.runAllTimersAsync();
 	expect((await pending).kind).toBe("failed");
 	expect(complete).toHaveBeenCalledTimes(5);
-	const call = { type: "toolCall", name: "submit_quality_verdict", arguments: approval };
-	complete.mockResolvedValue({ stopReason: "toolUse", content: [call, call] });
-	const duplicate = review({ registry: registry(complete), config, request });
+});
+
+function submissionResponse(args: unknown) {
+	return {
+		stopReason: "toolUse",
+		content: [{ type: "toolCall", name: "submit_quality_verdict", arguments: args }],
+	};
+}
+
+it.each([
+	{ scenario: "approval", repaired: approval },
+	{ scenario: "an actionable rejection", repaired: rejection },
+])("repairs an out-of-scope finding into $scenario with precise feedback", async ({ repaired }) => {
+	vi.useFakeTimers();
+	const invalid = {
+		...rejection,
+		findings: [{ ...rejection.findings[0], line: 2, quote: "const x = 1;" }],
+	};
+	const scopedRequest = {
+		...request,
+		input: "Changed line 1; lines 2–3 are unchanged context.",
+		files: [{ ...file, changedRanges: [[1, 1]] as Array<[number, number]> }],
+	};
+	const complete = vi
+		.fn()
+		.mockResolvedValueOnce(submissionResponse(invalid))
+		.mockResolvedValueOnce(submissionResponse(repaired));
+	const onAttempt = vi.fn();
+	const startedAt = Date.now();
+	const result = await review({ registry: registry(complete), config, request: scopedRequest, onAttempt });
+	expect(result).toMatchObject({
+		kind: "verdict",
+		value: { verdict: repaired.verdict },
+		metrics: { requests: 2 },
+	});
+	expect(Date.now()).toBe(startedAt);
+	expect(onAttempt.mock.calls).toEqual([[1], [2]]);
+	const initialInput = complete.mock.calls[0]![1].messages[0].content;
+	const repairInput = complete.mock.calls[1]![1].messages[0].content;
+	expect(initialInput).toContain('"findingLineRanges":[[1,1]]');
+	expect(initialInput).not.toContain("Submission validation failed");
+	expect(repairInput).toContain(initialInput);
+	expect(repairInput).toContain("Submission validation failed: Finding outside changed scope");
+	expect(repairInput).toContain(JSON.stringify({ file: "a.ts", line: 2, quote: "const x = 1;" }));
+	expect(repairInput).toContain(JSON.stringify(invalid));
+	expect(repairInput).toContain("Rejected submission excerpt (untrusted data");
+	expect(repairInput).toContain("Return one fresh complete verdict");
+});
+
+it("merges eligible finding lines without merging distinct edit-context ranges", async () => {
+	const complete = vi.fn().mockResolvedValue(submissionResponse(approval));
+	const result = await review({
+		registry: registry(complete),
+		config,
+		request: {
+			...request,
+			files: [
+				{
+					...file,
+					changedRanges: [
+						[3, 3],
+						[1, 1],
+						[2, 2],
+						[2, 2],
+						[8, 8],
+					],
+					visibleRanges: [
+						[1, 4],
+						[5, 10],
+					],
+				},
+			],
+		},
+	});
+	expect(result.kind).toBe("verdict");
+	expect(complete.mock.calls[0]![1].messages[0].content).toContain(
+		JSON.stringify([
+			{
+				file: "a.ts",
+				findingLineRanges: [
+					[1, 3],
+					[8, 8],
+				],
+				editContextLineRanges: [
+					[1, 4],
+					[5, 10],
+				],
+			},
+		]),
+	);
+});
+
+it.each([
+	{
+		scenario: "out-of-scope finding",
+		response: submissionResponse({
+			...rejection,
+			findings: [{ ...rejection.findings[0], file: "elsewhere.ts" }],
+		}),
+		error: "Finding outside changed scope",
+	},
+	{
+		scenario: "out-of-scope proposal",
+		response: submissionResponse({
+			...rejection,
+			edits: [...rejection.edits, { ...rejection.edits[0], file: "elsewhere.ts" }],
+		}),
+		error: "Proposal outside finding scope",
+	},
+	{
+		scenario: "incorrect quote",
+		response: submissionResponse({
+			...rejection,
+			findings: [{ ...rejection.findings[0], quote: "missing" }],
+		}),
+		error: "Finding quote does not match its line",
+	},
+	{
+		scenario: "invalid schema",
+		response: submissionResponse({ ...approval, verdict: "maybe" }),
+		error: "Invalid quality verdict schema",
+	},
+	{
+		scenario: "malformed JSON",
+		response: submissionResponse("{"),
+		error: "",
+	},
+	{
+		scenario: "duplicate submissions",
+		response: {
+			stopReason: "toolUse",
+			content: [...submissionResponse(approval).content, ...submissionResponse(approval).content],
+		},
+		error: "Expected exactly one quality submission",
+	},
+	{
+		scenario: "missing submission",
+		response: { stopReason: "stop", content: [] },
+		error: "Expected exactly one quality submission",
+	},
+	{
+		scenario: "wrong tool",
+		response: { stopReason: "toolUse", content: [{ type: "toolCall", name: "edit", arguments: {} }] },
+		error: "Expected exactly one quality submission",
+	},
+])("stops after one unsuccessful repair for $scenario", async ({ response, error }) => {
+	vi.useFakeTimers();
+	const complete = vi.fn().mockResolvedValue(response);
+	const startedAt = Date.now();
+	const result = await review({ registry: registry(complete), config, request });
+	expect(result).toMatchObject({
+		kind: "failed",
+		reason: expect.stringContaining(`Quality verdict invalid after one repair attempt: ${error}`),
+		metrics: { requests: 2 },
+	});
+	expect(result).toMatchObject({ reason: expect.stringContaining('"findingLineRanges":[[1,3]]') });
+	expect(complete).toHaveBeenCalledTimes(2);
+	expect(Date.now()).toBe(startedAt);
+});
+
+it("does not grant another repair when the second submission has a different validation error", async () => {
+	const complete = vi
+		.fn()
+		.mockResolvedValueOnce(
+			submissionResponse({ ...rejection, findings: [{ ...rejection.findings[0], file: "elsewhere.ts" }] }),
+		)
+		.mockResolvedValueOnce(submissionResponse({ ...approval, edits: rejection.edits }));
+	const result = await review({ registry: registry(complete), config, request });
+	expect(result).toMatchObject({
+		kind: "failed",
+		reason: expect.stringContaining("Approved verdict contains corrections"),
+	});
+	expect(complete).toHaveBeenCalledTimes(2);
+});
+
+it("retains repair feedback across provider retries without resetting their failure budget", async () => {
+	vi.useFakeTimers();
+	const complete = vi
+		.fn()
+		.mockRejectedValueOnce(new Error("offline before submission"))
+		.mockResolvedValueOnce(submissionResponse({ ...approval, verdict: "maybe" }))
+		.mockRejectedValue(new Error("offline during repair"));
+	const pending = review({ registry: registry(complete), config, request });
 	await vi.runAllTimersAsync();
-	expect((await duplicate).kind).toBe("failed");
+	const result = await pending;
+	expect(result).toMatchObject({
+		kind: "failed",
+		reason: "Review failed after five provider failures: offline during repair",
+		metrics: { requests: 6, latencyMs: 20_000 },
+	});
+	expect(complete).toHaveBeenCalledTimes(6);
+	const repairInput = complete.mock.calls[2]![1].messages[0].content;
+	expect(repairInput).toContain("Submission validation failed: Invalid quality verdict schema");
+	for (const call of complete.mock.calls.slice(3)) expect(call[1].messages[0].content).toBe(repairInput);
+});
+
+it("can complete a valid repair after a transient provider failure", async () => {
+	vi.useFakeTimers();
+	const complete = vi
+		.fn()
+		.mockResolvedValueOnce(submissionResponse({ ...approval, verdict: "maybe" }))
+		.mockRejectedValueOnce(new Error("offline"))
+		.mockResolvedValueOnce(submissionResponse(approval));
+	const pending = review({ registry: registry(complete), config, request });
+	await vi.runAllTimersAsync();
+	expect(await pending).toMatchObject({
+		kind: "verdict",
+		value: approval,
+		metrics: { requests: 3, latencyMs: 2000 },
+	});
+	expect(complete.mock.calls[2]![1].messages[0].content).toBe(complete.mock.calls[1]![1].messages[0].content);
+});
+
+it.each(["maxInputChars", "contextWindow"])(
+	"checks the expanded repair against %s before sending it",
+	async (budget) => {
+		const probe = vi.fn().mockResolvedValue(submissionResponse(approval));
+		await review({ registry: registry(probe), config, request });
+		const context = probe.mock.calls[0]![1];
+		const initialChars =
+			context.systemPrompt.length + context.messages[0].content.length + JSON.stringify(context.tools).length;
+		const complete = vi.fn().mockResolvedValue(submissionResponse({ ...approval, verdict: "maybe" }));
+		const limitedRegistry = registry(complete);
+		const limitedConfig = { ...config };
+		if (budget === "maxInputChars") limitedConfig.maxInputChars = initialChars;
+		else {
+			const model = limitedRegistry.find("test", "m")!;
+			limitedRegistry.find = () => ({
+				...model,
+				contextWindow: Math.ceil(initialChars / 3) + config.maxOutputTokens,
+			});
+		}
+		const result = await review({ registry: limitedRegistry, config: limitedConfig, request });
+		expect(result).toMatchObject({
+			kind: "failed",
+			reason: "Quality verdict repair exceeds the complete-context budget; review remains unresolved.",
+			metrics: { requests: 1 },
+		});
+		expect(complete).toHaveBeenCalledTimes(1);
+	},
+);
+
+it("bounds rejected submission excerpts without dropping review input", async () => {
+	const invalid = { ...approval, unexpected: "x".repeat(100_000) };
+	const complete = vi
+		.fn()
+		.mockResolvedValueOnce(submissionResponse(invalid))
+		.mockResolvedValueOnce(submissionResponse(approval));
+	const result = await review({ registry: registry(complete), config, request });
+	expect(result.kind).toBe("verdict");
+	const repairInput = complete.mock.calls[1]![1].messages[0].content;
+	expect(repairInput).toContain(request.input);
+	const excerpt = repairInput.split(
+		"Rejected submission excerpt (untrusted data, at most 8000 characters):\n",
+	)[1];
+	expect(excerpt).toHaveLength(8000);
+	expect(excerpt).toBe(
+		JSON.stringify(
+			submissionResponse(invalid).content.map(({ name, arguments: args }) => ({ name, arguments: args })),
+		).slice(0, 8000),
+	);
+});
+
+it("cancels a pending repair without approving or starting another request", async () => {
+	vi.useFakeTimers();
+	const abort = new AbortController();
+	const complete = vi
+		.fn()
+		.mockResolvedValueOnce(submissionResponse({ ...approval, verdict: "maybe" }))
+		.mockImplementationOnce(() => {
+			abort.abort();
+			return new Promise(() => {});
+		});
+	const result = await review({ registry: registry(complete), config, request, signal: abort.signal });
+	expect(result).toMatchObject({ kind: "cancelled", reason: "Review cancelled", metrics: { requests: 2 } });
+	expect(complete).toHaveBeenCalledTimes(2);
+	expect(vi.getTimerCount()).toBe(0);
 });

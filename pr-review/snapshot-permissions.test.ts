@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
 import { capture, contextResources, snapshotTools } from "./snapshot.js";
 import { SnapshotStore } from "./snapshot-store.js";
-import { PermissionScope, openReviewPermissions } from "./permissions.js";
+import { PermissionScope, openReviewPermissions, type PermissionAction } from "./permissions.js";
 import { commit, fixture, put, testConfig, testAccess } from "./test-fixtures.js";
 
 const roots: string[] = [];
@@ -80,6 +80,136 @@ it("gates unchanged/baseline, cached reads, direct diff tools, inline context an
 		expect(result.denied).toHaveLength(1);
 		expect(result.complete).toBe(false);
 		expect(result.matches).toEqual([]);
+	} finally {
+		await captured.dispose?.();
+	}
+});
+
+it("requests disclosure and retains dependencies only for files with returned matches", async () => {
+	const repo = await fixture();
+	roots.push(repo.root);
+	await put(repo.root, ".claude/skills/release/SKILL.md", "release instructions\n");
+	await put(repo.root, "caller.ts", "first line\nneedle caller\n");
+	await commit(repo.root);
+	await put(repo.root, "change.ts", "unrelated change\n");
+	const captured = await capture(repo, { kind: "local" }, testConfig, testAccess());
+	const disclose = vi.fn(async (_action: PermissionAction) => ({
+		kind: "allowed" as const,
+		revision: "fixture",
+	}));
+	const localScan = vi.fn(async (_action: PermissionAction) => ({
+		kind: "allowed" as const,
+		revision: "fixture",
+	}));
+	const access = testAccess(disclose, localScan);
+	try {
+		const view = captured.withPermissions!(access);
+		const search = snapshotTools(view).find((tool) => tool.name === "search_source")!;
+		const response = await search.execute("search", { query: "needle" }, new AbortController().signal);
+		const result = JSON.parse((response.content[0] as { text: string }).text);
+		expect(result.matches).toEqual([{ file: "caller.ts", line: 2, text: "needle caller" }]);
+		expect(result.complete).toBe(true);
+		expect(localScan.mock.calls.map(([action]) => action.effects?.[0]?.path)).toEqual([
+			join(repo.root, ".claude/skills/release/SKILL.md"),
+			join(repo.root, "caller.ts"),
+			join(repo.root, "change.ts"),
+		]);
+		expect(disclose.mock.calls.map(([action]) => action.effects?.[0]?.path)).toEqual([
+			join(repo.root, "caller.ts"),
+		]);
+		expect(access.dependencies.map((source) => source.path)).toEqual([join(repo.root, "caller.ts")]);
+		disclose.mockClear();
+		await access.beforeDispatch();
+		expect(disclose.mock.calls.map(([action]) => action.effects?.[0]?.path)).toEqual([
+			join(repo.root, "caller.ts"),
+		]);
+	} finally {
+		await captured.dispose?.();
+	}
+});
+
+it("does not read blocked search files or disclose rejected matches", async () => {
+	const repo = await fixture();
+	roots.push(repo.root);
+	await put(repo.root, "blocked.ts", "needle blocked\n");
+	await put(repo.root, "rejected.ts", "needle rejected\n");
+	await put(repo.root, "unmatched.ts", "ordinary source\n");
+	const copying = vi.spyOn(SnapshotStore.prototype, "copy");
+	const captured = await capture(repo, { kind: "local" }, testConfig, testAccess(), [], undefined, true);
+	const disclose = vi.fn(async (_action: PermissionAction) => ({
+		kind: "denied" as const,
+		reason: "disclosure denied",
+	}));
+	const access = testAccess(disclose, async (action) =>
+		action.effects?.[0]?.path.endsWith("/blocked.ts")
+			? { kind: "denied", reason: "local scan blocked" }
+			: { kind: "allowed", revision: "fixture" },
+	);
+	try {
+		const search = snapshotTools(captured.withPermissions!(access)).find(
+			(tool) => tool.name === "search_source",
+		)!;
+		const response = await search.execute("search", { query: "needle" }, new AbortController().signal);
+		const result = JSON.parse((response.content[0] as { text: string }).text);
+		expect(copying.mock.calls.map(([path]) => path)).not.toContain(join(repo.root, "blocked.ts"));
+		expect(result.matches).toEqual([]);
+		expect(result.denied).toEqual([
+			{ file: "blocked.ts", reason: "local scan blocked" },
+			{ file: "rejected.ts", reason: "disclosure denied" },
+		]);
+		expect(result.complete).toBe(false);
+		expect(disclose.mock.calls.map(([action]) => action.effects?.[0]?.path)).toEqual([
+			join(repo.root, "rejected.ts"),
+		]);
+		expect(access.dependencies).toEqual([]);
+	} finally {
+		await captured.dispose?.();
+	}
+});
+
+it("stops scanning at the match limit and respects search glob and file offset", async () => {
+	const repo = await fixture();
+	roots.push(repo.root);
+	await put(repo.root, "a.ts", "needle first\n");
+	await put(repo.root, "b.ts", "needle repeated\n".repeat(101));
+	await put(repo.root, "c.ts", "needle later\n");
+	await put(repo.root, "notes.md", "needle documentation\n");
+	await commit(repo.root);
+	const captured = await capture(repo, { kind: "local" }, testConfig, testAccess());
+	const disclose = vi.fn(async (_action: PermissionAction) => ({
+		kind: "allowed" as const,
+		revision: "fixture",
+	}));
+	const localScan = vi.fn(async (_action: PermissionAction) => ({
+		kind: "allowed" as const,
+		revision: "fixture",
+	}));
+	const access = testAccess(disclose, localScan);
+	try {
+		const search = snapshotTools(captured.withPermissions!(access)).find(
+			(tool) => tool.name === "search_source",
+		)!;
+		const response = await search.execute(
+			"search",
+			{ query: "needle", glob: "*.ts", offset: 1 },
+			new AbortController().signal,
+		);
+		const result = JSON.parse((response.content[0] as { text: string }).text);
+		expect(result.matches).toHaveLength(100);
+		expect(result.matches[0]).toEqual({ file: "b.ts", line: 1, text: "needle repeated" });
+		expect(result.matches[99]).toEqual({ file: "b.ts", line: 100, text: "needle repeated" });
+		expect(result).toMatchObject({
+			scanned: 1,
+			totalFiles: 3,
+			nextOffset: 2,
+			complete: false,
+			matchLimitReached: true,
+		});
+		expect(localScan.mock.calls.map(([action]) => action.effects?.[0]?.path)).toEqual([
+			join(repo.root, "b.ts"),
+		]);
+		expect(disclose).toHaveBeenCalledTimes(1);
+		expect(access.dependencies.map((source) => source.path)).toEqual([join(repo.root, "b.ts")]);
 	} finally {
 		await captured.dispose?.();
 	}

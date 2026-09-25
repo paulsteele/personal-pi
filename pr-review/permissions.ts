@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Repo } from "./types.js";
+import { deferToolCommit } from "./tool-commit.js";
 
 // Versioned structural protocol. No runtime import/bundled copy of the permission extension.
 export const REVIEW_SERVICE_CHANNEL = "permissions:review-service:v1";
@@ -32,6 +33,7 @@ export type PermissionResult =
 	| { kind: "denied" | "cancelled" | "unavailable"; reason: string };
 export interface TaskPort {
 	check(action: PermissionAction): Promise<PermissionResult>;
+	checkLocalSearch?(action: PermissionAction): Promise<PermissionResult>;
 	revision(): string;
 	nextTurn(): void;
 	endTurn(): void;
@@ -107,9 +109,21 @@ export class PermissionScope {
 		this.port.close();
 	}
 	async authorize(action: PermissionAction): Promise<string> {
+		return this.checkedRevision(action, () => this.port.check(action));
+	}
+	private async authorizeLocalSearch(action: PermissionAction): Promise<string> {
+		return this.checkedRevision(action, () => {
+			if (!this.port.checkLocalSearch) throw new Error("Local search checks unavailable");
+			return this.port.checkLocalSearch(action);
+		});
+	}
+	private async checkedRevision(
+		action: PermissionAction,
+		check: () => Promise<PermissionResult>,
+	): Promise<string> {
 		let result: PermissionResult;
 		try {
-			result = await this.port.check(action);
+			result = await check();
 		} catch {
 			throw new PermissionBlocked("unavailable", "Permission service/config unavailable.");
 		}
@@ -122,15 +136,29 @@ export class PermissionScope {
 		return result.revision;
 	}
 	async guard<T>(action: PermissionAction, read: () => Promise<T>): Promise<T> {
-		let revision = await this.authorize(action);
-		// Re-evaluate if another microtask changed policy after the verdict settled.
-		while (revision !== this.revision()) revision = await this.authorize(action);
+		const result = await this.guardRevision(action, read, () => this.authorize(action));
+		const sources = (action.effects ?? []).map(({ range: _range, ...source }) => source);
+		const remember = () => {
+			for (const source of sources) this.used.set(JSON.stringify(source), source);
+		};
+		if (!deferToolCommit(remember)) remember();
+		return result;
+	}
+	async searchMatches<T>(action: PermissionAction, scan: () => Promise<T[]>): Promise<T[]> {
+		const matches = await this.guardRevision(action, scan, () => this.authorizeLocalSearch(action));
+		if (matches.length === 0) return matches;
+		return this.guard(action, async () => matches);
+	}
+	private async guardRevision<T>(
+		action: PermissionAction,
+		read: () => Promise<T>,
+		authorize: () => Promise<string>,
+	): Promise<T> {
+		let revision = await authorize();
+		while (revision !== this.revision()) revision = await authorize();
 		const result = await read();
 		action.signal?.throwIfAborted();
-		while (revision !== this.revision()) revision = await this.authorize(action);
-		for (const { range: _range, ...source } of action.effects ?? []) {
-			this.used.set(JSON.stringify(source), source);
-		}
+		while (revision !== this.revision()) revision = await authorize();
 		return result;
 	}
 	async authorizeSources(

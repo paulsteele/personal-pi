@@ -151,6 +151,13 @@ and read-only regardless of a classifier's answer. Deterministic source/path den
 cannot be overridden by a tool-level allow. Paths are shown to the classifier even when a tool-level ask
 wins policy selection; oversized path previews require human review instead of hiding scope.
 
+The trusted PR host has a separate local-search check: ordinary repository-contained source can be scanned
+without resolving `ask` rules, but explicit denies and deterministic sensitive-path guards block scanning
+without opening a prompt. This check is available only to delegated tasks with read/search capabilities;
+it is not a model-tool argument or a disclosure grant. The host must authorize matching content through the
+normal read gate before returning it. No-match files do not become continuing context dependencies.
+Audit decisions distinguish `local_search_allowed` and `local_search_blocked` from disclosure approvals.
+
 Requests include the genuine parent user intent or actual `/pr` invocation, separately labeled delegated
 assignment metadata, worker identity, original source paths, and an explicit cancellation signal. Protected
 file contents are not sent to the classifier merely to ask whether they may be read. A shared FIFO queue
