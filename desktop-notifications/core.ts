@@ -41,6 +41,45 @@ export function askUserNotification(event: AskUserPromptLike): AskUserNotificati
 	};
 }
 
+const QUALITY_DECISION_NOTICES = {
+	arbitration: { subtitle: "Quality decision needed", body: "Choose the current code, proposed corrections, or another review cycle." },
+	coverage: { subtitle: "Quality coverage needs approval", body: "Authorize this file's review or waive its quality check." },
+	failure: { subtitle: "Quality review needs attention", body: "Retry the review, select a reviewer, or waive the quality check." },
+	scope: { subtitle: "Quality scope needs approval", body: "Approve or decline the requested correction scope expansion." },
+	model: { subtitle: "Quality reviewer selection needed", body: "Select the model for quality review." },
+	waiver: { subtitle: "Quality waiver needs confirmation", body: "Confirm or decline waiving the pending quality gate." },
+} satisfies Record<string, AskUserNotification>;
+
+type QualityDecisionKind = keyof typeof QUALITY_DECISION_NOTICES;
+type QualityAttentionChange = { action: "show"; notification: AskUserNotification } | { action: "clear" };
+
+export function createQualityAttentionTracker(sessionId: string) {
+	const pending = new Map<string, QualityDecisionKind>();
+	return {
+		get active(): boolean { return pending.size > 0; },
+		update(raw: unknown): QualityAttentionChange | undefined {
+			if (!raw || typeof raw !== "object") return;
+			const event = raw as { version?: unknown; sessionId?: unknown; requestId?: unknown; kind?: unknown; active?: unknown };
+			if (event.version !== 1 || event.sessionId !== sessionId ||
+				typeof event.requestId !== "string" || !event.requestId || event.requestId.length > 240 ||
+				typeof event.kind !== "string" || !Object.hasOwn(QUALITY_DECISION_NOTICES, event.kind) ||
+				typeof event.active !== "boolean") return;
+			const kind = event.kind as QualityDecisionKind;
+			if (event.active) {
+				if (pending.has(event.requestId)) return;
+				pending.set(event.requestId, kind);
+				return { action: "show", notification: QUALITY_DECISION_NOTICES[kind] };
+			}
+			if (pending.get(event.requestId) !== kind) return;
+			const wasLatestPendingDecision = [...pending.keys()].at(-1) === event.requestId;
+			pending.delete(event.requestId);
+			if (!wasLatestPendingDecision) return;
+			const remainingDecisionKind = [...pending.values()].at(-1);
+			return remainingDecisionKind ? { action: "show", notification: QUALITY_DECISION_NOTICES[remainingDecisionKind] } : { action: "clear" };
+		},
+	};
+}
+
 export function textFromAssistant(message: AssistantLike | undefined): string {
 	if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return "";
 	return message.content

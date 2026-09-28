@@ -12,6 +12,8 @@ import { QUALITY_CHECK_ENTRY } from "./feedback.js";
 import {
 	createQualityActivityPublisher,
 	QUALITY_ACTIVITY_CHANNEL,
+	QUALITY_ATTENTION_CHANNEL,
+	type QualityAttentionEvent,
 	type QualityActivityEvent,
 } from "./activity.js";
 
@@ -21,8 +23,10 @@ afterEach(() => {
 });
 function harness() {
 	const activityEvents: QualityActivityEvent[] = [];
+	const attentionEvents: QualityAttentionEvent[] = [];
 	const captureActivityEvent = (channel: string, event: unknown) => {
 		if (channel === QUALITY_ACTIVITY_CHANNEL) activityEvents.push(event as QualityActivityEvent);
+		if (channel === QUALITY_ATTENTION_CHANNEL) attentionEvents.push(event as QualityAttentionEvent);
 	};
 	const activity = createQualityActivityPublisher({
 		on: () => () => {},
@@ -69,6 +73,7 @@ function harness() {
 		review,
 		runtime,
 		activityEvents,
+		attentionEvents,
 		path: join(cwd, "a.ts"),
 	};
 }
@@ -135,6 +140,61 @@ it("does not label an explicitly waived failed review as approved", async () => 
 	const result = await edit(h, "const count = 1;");
 	expect(result?.entries?.[0]).toMatchObject({ details: { outcome: "waived" } });
 	expect(h.ctx.ui.setStatus).toHaveBeenLastCalledWith("code-quality", "waived");
+});
+
+it("brackets a pending failure decision with attention events", async () => {
+	const h = harness();
+	h.review.mockResolvedValue({
+		kind: "failed",
+		reason: "offline",
+		metrics: { requests: 5, latencyMs: 0, usages: [] },
+	});
+	let resolveFailureDecision!: (choice: "waive" | undefined) => void;
+	vi.mocked(h.ui.failure).mockImplementation(
+		() =>
+			new Promise((resolve) => {
+				resolveFailureDecision = resolve;
+			}),
+	);
+	const pending = edit(h, "const count = 1;");
+	await vi.waitFor(() => expect(h.ui.failure).toHaveBeenCalledOnce());
+	expect(h.attentionEvents).toMatchObject([{ sessionId: "session", kind: "failure", active: true }]);
+	resolveFailureDecision(undefined);
+	await pending;
+	expect(h.attentionEvents[1]).toEqual({ ...h.attentionEvents[0], active: false });
+});
+
+it("clears attention when a coverage dialog fails", async () => {
+	const h = harness();
+	writeFileSync(h.path, "Bearer " + "x".repeat(30));
+	vi.mocked(h.ui.coverage).mockRejectedValue(new Error("dialog closed"));
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	expect(h.attentionEvents).toMatchObject([
+		{ kind: "coverage", active: true },
+		{ kind: "coverage", active: false },
+	]);
+	expect(h.attentionEvents[1]!.requestId).toBe(h.attentionEvents[0]!.requestId);
+});
+
+it("announces the scope approval wait but not ordinary reviewer rejection", async () => {
+	const h = harness();
+	h.review.mockResolvedValue(namingRejection(h.path, "x"));
+	await edit(h, "x");
+	expect(h.attentionEvents).toEqual([]);
+	await h.runtime.respond(
+		{
+			action: "request_scope",
+			caseId: h.runtime.state!.id,
+			revision: revision(h.runtime.state!),
+			rationale: "Add a regression test",
+			paths: ["a.test.ts"],
+		},
+		h.ctx,
+	);
+	expect(h.attentionEvents).toMatchObject([
+		{ kind: "scope", active: true },
+		{ kind: "scope", active: false },
+	]);
 });
 
 it("reviews distant changes in one file together without adding conversation context", async () => {
@@ -258,10 +318,14 @@ it("arbitrates only after five disagreements and verifies exact user-approved ap
 	});
 	await edit(h, "const x = 1;");
 	expect(h.runtime.state?.phase).toBe("correcting");
+	expect(h.attentionEvents).toEqual([]);
 	expect(await h.runtime.beforeTool("write", { path: join(h.cwd, "unrelated.ts") }, h.ctx)).toMatchObject({
 		block: true,
 	});
-	vi.mocked(h.ui.arbitrate).mockResolvedValue({ choice: "proposed", note: "Use count" });
+	vi.mocked(h.ui.arbitrate).mockImplementation(async () => {
+		expect(h.attentionEvents.at(-1)).toMatchObject({ kind: "arbitration", active: true });
+		return { choice: "proposed", note: "Use count" };
+	});
 	for (let round = 1; round <= 5; round++) {
 		await h.runtime.respond(
 			{
@@ -277,6 +341,10 @@ it("arbitrates only after five disagreements and verifies exact user-approved ap
 		expect(h.runtime.state?.attempts).toBe(round);
 	}
 	expect(h.ui.arbitrate).toHaveBeenCalledTimes(1);
+	expect(h.attentionEvents).toMatchObject([
+		{ kind: "arbitration", active: true },
+		{ kind: "arbitration", active: false },
+	]);
 	expect(h.runtime.state?.phase).toBe("applying");
 	await edit(h, "const count = 1;");
 	expect(h.runtime.state?.resolution).toBe("user_approved");

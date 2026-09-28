@@ -6,7 +6,7 @@ import { pipeline } from "node:stream/promises";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { ensurePrivateDirectory, initializeStorage, storageRoot } from "./storage.js";
 import type { Repo } from "./types.js";
-import { awaitWithSignal } from "./work-ui.js";
+import { awaitWithSignal } from "./abort.js";
 
 /** Run-owned private backing, never a cache of subsequently re-read live working files. */
 export class SnapshotStore {

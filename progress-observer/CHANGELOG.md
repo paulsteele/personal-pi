@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.2 — 2026-09-28
+
+- Use SDK types for observation calls and settle cancellation/timeouts even when a provider ignores abort. Release queued refreshes after a timeout while retaining the last summary and ignoring late results.
+
 ## 1.4.0 — 2026-09-24
 
 - Align the workspace with Pi 0.87.x and verify against 0.87.1 development dependencies. Passive observation behavior is unchanged.

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	askUserNotification,
+	createQualityAttentionTracker,
 	decodeArgument,
 	encodeArgument,
 	isHyprlandAddress,
@@ -61,6 +62,60 @@ describe("notification text", () => {
 	test("creates a bounded safe project label", () => {
 		expect(safeProjectLabel("/tmp/my\nproject/")).toBe("my project");
 		expect(Array.from(safeProjectLabel(`/tmp/${"x".repeat(100)}`)).length).toBe(64);
+	});
+});
+
+describe("quality attention", () => {
+	const request = { version: 1, sessionId: "session", requestId: "request-a", kind: "arbitration", active: true };
+
+	test.each(["arbitration", "coverage", "failure", "scope", "model", "waiver"])("shows and clears a %s decision without exposing source data", (kind) => {
+		const tracker = createQualityAttentionTracker("session");
+		const event = { ...request, kind, findings: "PRIVATE_SOURCE", reason: "SECRET" };
+		const result = tracker.update(event);
+		expect(result).toMatchObject({ action: "show", notification: { subtitle: expect.stringContaining("Quality") } });
+		expect(JSON.stringify(result)).not.toContain("PRIVATE_SOURCE");
+		expect(JSON.stringify(result)).not.toContain("SECRET");
+		expect(tracker.active).toBe(true);
+		expect(tracker.update(event)).toBeUndefined();
+		expect(tracker.update({ ...event, active: false })).toEqual({ action: "clear" });
+		expect(tracker.active).toBe(false);
+		expect(tracker.update({ ...event, active: false })).toBeUndefined();
+	});
+
+	test("rejects stale sessions, malformed events, and agent-owned quality phases", () => {
+		const tracker = createQualityAttentionTracker("session");
+		const rejectedEvents = {
+			nullPayload: null,
+			missingFields: {},
+			unknownVersion: { ...request, version: 2 },
+			retiredSession: { ...request, sessionId: "old" },
+			nonStringRequestId: { ...request, requestId: 42 },
+			nonBooleanActive: { ...request, active: "true" },
+			prototypeKey: { ...request, kind: "__proto__" },
+			agentCorrection: { ...request, kind: "needs_work" },
+			inFlightReview: { ...request, kind: "checking" },
+		};
+		for (const [scenario, event] of Object.entries(rejectedEvents)) {
+			expect(tracker.update(event), scenario).toBeUndefined();
+		}
+		expect(tracker.active).toBe(false);
+	});
+
+	test("finishing an older decision cannot clear the latest decision notice", () => {
+		const tracker = createQualityAttentionTracker("session");
+		tracker.update(request);
+		tracker.update({ ...request, requestId: "request-b", kind: "coverage" });
+		expect(tracker.update({ ...request, active: false })).toBeUndefined();
+		expect(tracker.active).toBe(true);
+		expect(tracker.update({ ...request, requestId: "request-b", kind: "coverage", active: false })).toEqual({ action: "clear" });
+	});
+
+	test("restores a remaining decision when the newest one closes", () => {
+		const tracker = createQualityAttentionTracker("session");
+		const initial = tracker.update(request);
+		tracker.update({ ...request, requestId: "request-b", kind: "scope" });
+		expect(tracker.update({ ...request, requestId: "request-b", kind: "scope", active: false })).toEqual(initial);
+		expect(tracker.active).toBe(true);
 	});
 });
 

@@ -1,5 +1,6 @@
 import { posix } from "node:path";
-import type { Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { Config } from "../config.ts";
 import type { ModelReviewResult } from "./core.ts";
@@ -146,14 +147,8 @@ export function buildPrompt(
 }
 
 export async function classify(options: {
-  caller: {
-    complete(
-      model: Model<never>,
-      context: unknown,
-      options?: { signal?: AbortSignal },
-    ): Promise<{ content?: unknown; stopReason?: unknown }>;
-  };
-  model: Model<never>;
+  caller: Pick<ExtensionContext["modelRegistry"], "complete">;
+  model: Model<Api>;
   facts: ReviewFacts;
   context: ReviewContext;
   config: Config["auto"];
@@ -161,6 +156,8 @@ export async function classify(options: {
 }): Promise<ClassifyResult> {
   const timeout = new AbortController();
   let timedOut = false;
+  let modelCalled = false;
+  let rejectOnAbort: (() => void) | undefined;
   const timer = setTimeout(() => {
     timedOut = true;
     timeout.abort();
@@ -169,21 +166,33 @@ export async function classify(options: {
     ? AbortSignal.any([options.signal, timeout.signal])
     : timeout.signal;
   try {
+    signal.throwIfAborted();
     const actionPrompt = buildPrompt(options.facts, options.context, options.config);
+    const abortPromise = new Promise<never>((_, reject) => {
+      rejectOnAbort = () => reject(signal.reason);
+      signal.addEventListener("abort", rejectOnAbort, { once: true });
+    });
     for (let attempt = 0; attempt <= MAX_MALFORMED_RETRIES; attempt += 1) {
-      const response = await options.caller.complete(
-        options.model,
-        {
-          systemPrompt: buildSystemPrompt(options.facts),
-          messages: [
-            { role: "user", content: actionPrompt },
-            ...(attempt > 0 ? [{ role: "user", content: REPAIR_PROMPT }] : []),
-          ],
-          tools: [tool],
-        },
-        { signal },
-      );
-      if (options.signal?.aborted) return { kind: "cancelled", modelCalled: true };
+      signal.throwIfAborted();
+      modelCalled = true;
+      const response = await Promise.race([
+        options.caller.complete(
+          options.model,
+          {
+            systemPrompt: buildSystemPrompt(options.facts),
+            messages: [
+              { role: "user", content: actionPrompt, timestamp: Date.now() },
+              ...(attempt > 0
+                ? [{ role: "user" as const, content: REPAIR_PROMPT, timestamp: Date.now() }]
+                : []),
+            ],
+            tools: [tool],
+          },
+          { signal },
+        ),
+        abortPromise,
+      ]);
+      signal.throwIfAborted();
       if (response.stopReason === "aborted") {
         return timedOut
           ? requireHuman(
@@ -249,19 +258,20 @@ export async function classify(options: {
       true,
     );
   } catch {
-    if (options.signal?.aborted) return { kind: "cancelled", modelCalled: true };
+    if (options.signal?.aborted) return { kind: "cancelled", modelCalled };
     return timedOut
       ? requireHuman(
           "The classifier timed out before it could approve this action.",
           "timeout",
-          true,
+          modelCalled,
         )
       : requireHuman(
           "The classifier call failed before it could approve this action.",
           "call-failed",
-          true,
+          modelCalled,
         );
   } finally {
     clearTimeout(timer);
+    if (rejectOnAbort) signal.removeEventListener("abort", rejectOnAbort);
   }
 }

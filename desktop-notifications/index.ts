@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	askUserNotification,
+	createQualityAttentionTracker,
 	encodeArgument,
 	isHyprlandAddress,
 	isMacWindowId,
@@ -33,6 +34,8 @@ type Runtime = {
 	queue: Promise<void>;
 	permissionRequest?: string;
 	pendingQuestion?: { subtitle: string; body: string };
+	qualityAttention: ReturnType<typeof createQualityAttentionTracker>;
+	qualityNotice: boolean;
 	dunst?: ChildProcess;
 	dunstId?: string;
 	focusSocket?: Socket;
@@ -280,6 +283,8 @@ export default function desktopNotifications(pi: ExtensionAPI): void {
 			generation: 0,
 			queue: Promise.resolve(),
 			unsubscribers: [],
+			qualityAttention: createQualityAttentionTracker(ctx.sessionManager.getSessionId()),
+			qualityNotice: false,
 		};
 		const current = runtime;
 		const promptUnsubscribe = pi.events.on("permissions:ui_prompt", (raw) => {
@@ -287,6 +292,7 @@ export default function desktopNotifications(pi: ExtensionAPI): void {
 			const event = raw as PermissionPrompt;
 			if (typeof event.requestId !== "string") return;
 			current.permissionRequest = event.requestId;
+			current.qualityNotice = false;
 			current.generation++;
 			enqueue(current, async (generation) => {
 				const surface = typeof event.surface === "string" ? event.surface : "permission";
@@ -312,6 +318,7 @@ export default function desktopNotifications(pi: ExtensionAPI): void {
 			if (event.active === true) {
 				const notification = current.pendingQuestion;
 				if (!notification) return;
+				current.qualityNotice = false;
 				current.generation++;
 				enqueue(current, async (generation) => {
 					await sendNotification(
@@ -330,7 +337,24 @@ export default function desktopNotifications(pi: ExtensionAPI): void {
 			current.generation++;
 			enqueue(current, async () => clearNotification(current));
 		});
+		const qualityUnsubscribe = pi.events.on("code-quality:attention", (raw) => {
+			if (runtime !== current) return;
+			const attentionUpdate = current.qualityAttention.update(raw);
+			if (!attentionUpdate || (attentionUpdate.action === "clear" && !current.qualityNotice)) return;
+			current.qualityNotice = attentionUpdate.action === "show";
+			current.generation++;
+			enqueue(current, async (generation) => {
+				if (attentionUpdate.action === "clear") await clearNotification(current);
+				else await sendNotification(
+					current,
+					attentionUpdate.notification.subtitle,
+					attentionUpdate.notification.body,
+					generation,
+				);
+			});
+		});
 		current.unsubscribers.push(
+			qualityUnsubscribe,
 			promptUnsubscribe,
 			decisionUnsubscribe,
 			questionPromptUnsubscribe,
@@ -348,6 +372,7 @@ export default function desktopNotifications(pi: ExtensionAPI): void {
 	const clearWhenWorkStarts = async (): Promise<void> => {
 		if (!runtime) return;
 		const current = runtime;
+		current.qualityNotice = false;
 		current.generation++;
 		// Await the serialized clear. Previously these lifecycle handlers only
 		// queued it and returned, which allowed user input/model startup to race
@@ -373,7 +398,7 @@ export default function desktopNotifications(pi: ExtensionAPI): void {
 	pi.on("turn_start", async () => clearWhenWorkStarts());
 
 	pi.on("agent_settled", async (_event, ctx) => {
-		if (!runtime || runtime.permissionRequest) return;
+		if (!runtime || runtime.permissionRequest || runtime.qualityAttention.active) return;
 		const current = runtime;
 		const text = latestFinalAssistantText(ctx.sessionManager.getBranch());
 		if (!text) return;

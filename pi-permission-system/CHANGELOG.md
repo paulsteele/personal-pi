@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.2 — 2026-09-28
+
+- Use SDK types for classifier calls and settle cancellation/timeouts even when a provider ignores abort. Preserve one deadline across malformed-response retries and prevent late results from approving cancelled actions.
+
 ## 1.4.1 — 2026-09-25
 
 - Add a trusted delegated local-search check that defers ordinary approval until matching content is disclosed. Explicit denies, sensitive-path guards, external-path restrictions, cancellation, and live policy remain enforced before scanning.

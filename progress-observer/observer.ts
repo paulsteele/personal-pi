@@ -1,4 +1,5 @@
-import type { Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { ObserverConfig } from "./config.js";
 import type { ProgressSummary } from "./events.js";
@@ -233,14 +234,8 @@ function parseSummary(response: { content?: unknown }): ProgressSummary | undefi
 }
 
 export async function observe(options: {
-	caller: {
-		complete(
-			model: Model<never>,
-			context: unknown,
-			options?: { signal?: AbortSignal },
-		): Promise<{ content?: unknown; stopReason?: unknown }>;
-	};
-	model: Model<never>;
+	caller: Pick<ExtensionContext["modelRegistry"], "complete">;
+	model: Model<Api>;
 	prompt: string;
 	config: ObserverConfig;
 	previous?: ProgressSummary;
@@ -248,22 +243,31 @@ export async function observe(options: {
 }): Promise<ObservationResult> {
 	const timeout = new AbortController();
 	let timedOut = false;
+	let rejectOnAbort: (() => void) | undefined;
 	const timer = setTimeout(() => {
 		timedOut = true;
 		timeout.abort();
 	}, options.config.timeoutMs);
 	const signal = options.signal ? AbortSignal.any([options.signal, timeout.signal]) : timeout.signal;
 	try {
-		const response = await options.caller.complete(
-			options.model,
-			{
-				systemPrompt: SYSTEM_PROMPT,
-				messages: [{ role: "user", content: options.prompt, timestamp: Date.now() }],
-				tools: [submitTool],
-			},
-			{ signal },
-		);
-		if (options.signal?.aborted) return { kind: "cancelled" };
+		signal.throwIfAborted();
+		const abortPromise = new Promise<never>((_, reject) => {
+			rejectOnAbort = () => reject(signal.reason);
+			signal.addEventListener("abort", rejectOnAbort, { once: true });
+		});
+		const response = await Promise.race([
+			options.caller.complete(
+				options.model,
+				{
+					systemPrompt: SYSTEM_PROMPT,
+					messages: [{ role: "user", content: options.prompt, timestamp: Date.now() }],
+					tools: [submitTool],
+				},
+				{ signal },
+			),
+			abortPromise,
+		]);
+		signal.throwIfAborted();
 		if (response.stopReason === "aborted") {
 			return timedOut
 				? { kind: "error", cause: "timeout", message: "Observer timed out; showing the last inference." }
@@ -282,5 +286,6 @@ export async function observe(options: {
 			: { kind: "error", cause: "call-failed", message: "Observer request failed." };
 	} finally {
 		clearTimeout(timer);
+		if (rejectOnAbort) signal.removeEventListener("abort", rejectOnAbort);
 	}
 }

@@ -5,6 +5,8 @@ import {
 	QUALITY_ACTIVITY_CHANNEL,
 	QUALITY_ACTIVITY_DISCOVER_CHANNEL,
 	QUALITY_STATUS_CHANNEL,
+	QUALITY_ATTENTION_CHANNEL,
+	type QualityAttentionEvent,
 	type QualityActivityEvent,
 	type QualityHeaderEvent,
 } from "./activity.js";
@@ -32,6 +34,68 @@ function harness() {
 	publisher.reset("session-a");
 	return { events, received, headers, publisher };
 }
+
+it("publishes matching attention start/end events once", () => {
+	const h = harness();
+	const attention: QualityAttentionEvent[] = [];
+	h.events.on(QUALITY_ATTENTION_CHANNEL, (raw) => attention.push(raw as QualityAttentionEvent));
+	const finishArbitration = h.publisher.requestDecision("arbitration");
+	const finishCoverage = h.publisher.requestDecision("coverage");
+	expect(attention).toMatchObject([
+		{ version: 1, sessionId: "session-a", kind: "arbitration", active: true },
+		{ version: 1, sessionId: "session-a", kind: "coverage", active: true },
+	]);
+	expect(attention[0]!.requestId).not.toBe(attention[1]!.requestId);
+	finishArbitration();
+	finishArbitration();
+	expect(attention).toHaveLength(3);
+	expect(attention[2]).toEqual({ ...attention[0], active: false });
+	finishCoverage();
+	expect(attention).toHaveLength(4);
+	expect(attention[3]).toEqual({ ...attention[1], active: false });
+});
+
+it("ends active attention requests when the session resets", () => {
+	const h = harness();
+	const attention: QualityAttentionEvent[] = [];
+	h.events.on(QUALITY_ATTENTION_CHANNEL, (raw) => attention.push(raw as QualityAttentionEvent));
+	const finishCoverage = h.publisher.requestDecision("coverage");
+	h.publisher.reset("session-b");
+	expect(attention).toEqual([
+		{
+			version: 1,
+			sessionId: "session-a",
+			kind: "coverage",
+			requestId: attention[0]!.requestId,
+			active: true,
+		},
+		{ ...attention[0], active: false },
+	]);
+	finishCoverage();
+	expect(attention).toHaveLength(2);
+});
+
+it("ends active attention requests when the publisher is disposed", () => {
+	const h = harness();
+	const attention: QualityAttentionEvent[] = [];
+	h.events.on(QUALITY_ATTENTION_CHANNEL, (raw) => attention.push(raw as QualityAttentionEvent));
+	const finishFailure = h.publisher.requestDecision("failure");
+	h.publisher.dispose();
+	expect(attention[1]).toEqual({ ...attention[0], active: false });
+	finishFailure();
+	expect(attention).toHaveLength(2);
+	h.publisher.requestDecision("scope")();
+	expect(attention).toHaveLength(2);
+});
+
+it("keeps attention consumers non-authoritative", () => {
+	const h = harness();
+	h.events.on(QUALITY_ATTENTION_CHANNEL, () => {
+		throw new Error("notifier unavailable");
+	});
+	const finish = h.publisher.requestDecision("failure");
+	expect(finish).not.toThrow();
+});
 
 it("replays a standalone header without requiring a tool call", () => {
 	const h = harness();

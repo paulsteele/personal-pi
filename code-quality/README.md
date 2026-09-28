@@ -53,6 +53,12 @@ Each corresponding edit/write entry has an inline `󰅴` badge beside its permis
 
 Atelier consumes bounded, session-scoped `code-quality:status` and `code-quality:activity` events. No code, rationale, or case snapshots are sent through these presentation events. The header replays for late consumers; per-call display history is memory-only and clears on reload or branch changes. Gate recovery remains independent of the sidebar.
 
+## Desktop notifications
+
+When the desktop-notifications extension is loaded, quality dialogs notify an unfocused terminal's user through the existing macOS/Hyprland notifier. This covers choosing current/proposed code at arbitration, authorizing file review, recovering a failed review, approving extra correction paths, selecting a reviewer, and confirming a waiver. Routine review and agent-handled rejections stay silent.
+
+The controller brackets each wait with `code-quality:attention` events containing only `version: 1`, session/request IDs, a decision kind, and an `active` boolean. A matching end event, session reset, or shutdown retires the notice. These transient events carry no source, paths, findings, or provider errors, and notification failures cannot approve or block a quality decision.
+
 ## Coverage and policy
 
 Covers explicit `edit` and `write` tools in **TUI sessions only**. Print/JSON/RPC are explicitly inactive. Shell scripts, formatters, arbitrary custom tools, and independent subagents are not comprehensively detected. Hash checks invalidate observed changes to tracked files, but are not a lock against external editors.

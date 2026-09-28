@@ -1,12 +1,38 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
+import { observe } from "./observer.js";
+import type { ObserverSnapshot } from "./events.js";
 import { DEFAULT_CONFIG } from "./config.js";
 import { createObserverScheduler } from "./scheduler.js";
 
 const summary = { goal: "Goal", progress: "Done", current: "Now", next: "Next" };
+
+function progressResponse(model: Model<Api>): AssistantMessage {
+	return {
+		role: "assistant",
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		timestamp: 0,
+		content: [{ type: "toolCall", id: "progress", name: "submit_progress", arguments: summary }],
+		stopReason: "toolUse",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+	};
+}
+
 const flush = async () => {
 	await Promise.resolve();
 	await Promise.resolve();
 };
+
+afterEach(() => vi.useRealTimers());
 
 describe("observer scheduler", () => {
 	it("runs at four-turn lap boundaries, then by lap or age", async () => {
@@ -78,6 +104,74 @@ describe("observer scheduler", () => {
 		await flush();
 		expect(run).toHaveBeenCalledTimes(2);
 		expect(states.at(-1)?.phase).toBe("ready");
+	});
+
+	it("releases a timed-out observation for the queued latest refresh while retaining the last summary", async () => {
+		vi.useFakeTimers();
+		const model: Model<Api> = {
+			id: "observer",
+			name: "Observer fixture",
+			api: "openai-responses",
+			provider: "test",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_000,
+			maxTokens: 1_000,
+		};
+		const response = progressResponse(model);
+		let finishTimedOutRequest!: (response: AssistantMessage) => void;
+		let finishLatestRequest!: (response: AssistantMessage) => void;
+		const complete = vi
+			.fn<() => Promise<AssistantMessage>>()
+			.mockResolvedValueOnce(response)
+			.mockImplementationOnce(
+				() =>
+					new Promise((resolve) => {
+						finishTimedOutRequest = resolve;
+					}),
+			)
+			.mockImplementationOnce(
+				() =>
+					new Promise((resolve) => {
+						finishLatestRequest = resolve;
+					}),
+			);
+		const states: ObserverSnapshot[] = [];
+		const config = { ...DEFAULT_CONFIG, turnInterval: 1, timeoutMs: 250 };
+		const scheduler = createObserverScheduler({
+			config,
+			modelId: "test/observer",
+			onState: (state) => states.push(state),
+			run: (signal) => observe({ caller: { complete }, model, prompt: "record", config, signal }),
+		});
+		try {
+			scheduler.turnEnded("r1");
+			await vi.advanceTimersByTimeAsync(0);
+			expect(states.at(-1)).toMatchObject({ phase: "ready", summary });
+			scheduler.turnEnded("r2");
+			scheduler.turnEnded("r3");
+			scheduler.turnEnded("r4");
+			expect(complete).toHaveBeenCalledTimes(2);
+			await vi.advanceTimersByTimeAsync(250);
+			expect(states).toContainEqual(expect.objectContaining({ phase: "error", stale: true, summary }));
+			expect(complete).toHaveBeenCalledTimes(3);
+			expect(states.at(-1)).toMatchObject({ phase: "observing", stale: true, summary });
+			finishLatestRequest(response);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(states.at(-1)).toMatchObject({ phase: "ready", summary });
+			const publishedCount = states.length;
+			finishTimedOutRequest({ ...response, content: [] });
+			await vi.advanceTimersByTimeAsync(0);
+			expect(states).toHaveLength(publishedCount);
+			scheduler.turnEnded("r4");
+			await vi.advanceTimersByTimeAsync(0);
+			expect(complete).toHaveBeenCalledTimes(3);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			scheduler.dispose();
+		}
 	});
 
 	it("retains the last summary on failure and rejects retired results", async () => {

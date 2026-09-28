@@ -9,6 +9,7 @@ const files = new Set(JSON.parse(result.stdout)[0].files.map((entry) => entry.pa
 for (const path of [
 	"index.ts",
 	"worker.ts",
+	"abort.ts",
 	"runner.ts",
 	"snapshot.ts",
 	"permissions.ts",

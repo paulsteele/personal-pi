@@ -21,7 +21,12 @@ import {
 } from "./proposal.js";
 import { POLICY, review, type ReviewResult } from "./reviewer.js";
 import { CaseStore, latestReference, STATE_ENTRY } from "./state.js";
-import type { QualityActivityPhase, QualityActivityPublisher, QualityActivityStatus } from "./activity.js";
+import type {
+	QualityActivityPhase,
+	QualityActivityPublisher,
+	QualityActivityStatus,
+	QualityDecisionKind,
+} from "./activity.js";
 import {
 	CHECKING_QUALITY_LABEL,
 	QUALITY_CHECK_ENTRY,
@@ -88,6 +93,18 @@ export class QualityController {
 		readonly ports: RuntimePorts,
 	) {}
 
+	private async awaitDecision<T>(
+		ctx: ExtensionContext,
+		kind: QualityDecisionKind,
+		decide: () => Promise<T>,
+	): Promise<T> {
+		const finish = ctx.mode === "tui" ? this.ports.activity?.requestDecision(kind) : undefined;
+		try {
+			return await decide();
+		} finally {
+			finish?.();
+		}
+	}
 	private modelKey(): string {
 		return this.config.provider && this.config.model
 			? `${this.config.provider}/${this.config.model}`
@@ -358,12 +375,9 @@ export class QualityController {
 					return { result: undefined, path, phase: "not_reviewed" };
 				}
 				const generation = this.generation;
-				const decision = await this.ports.ui.coverage(
-					ctx,
-					path,
-					String(error),
-					this.modelKey(),
-					this.signal(ctx),
+				const coveragePath = path;
+				const decision = await this.awaitDecision(ctx, "coverage", () =>
+					this.ports.ui.coverage(ctx, coveragePath, String(error), this.modelKey(), this.signal(ctx)),
 				);
 				if (!this.valid(ctx, generation) || this.signal(ctx).aborted)
 					return blocked("Quality decision cancelled");
@@ -406,7 +420,9 @@ export class QualityController {
 				const decision =
 					error instanceof CoverageError && error.kind === "binary"
 						? "waive"
-						: await this.ports.ui.coverage(ctx, path, String(error), this.modelKey(), this.signal(ctx));
+						: await this.awaitDecision(ctx, "coverage", () =>
+								this.ports.ui.coverage(ctx, path, String(error), this.modelKey(), this.signal(ctx)),
+							);
 				if (!this.valid(ctx, generation) || this.signal(ctx).aborted)
 					throw new Error("Quality capture cancelled");
 				if (decision === "waive") {
@@ -649,7 +665,9 @@ export class QualityController {
 			this.pause(ctx, "No current proposal to compare; use /quality retry for fresh review");
 			return;
 		}
-		const choice = await this.ports.ui.arbitrate(ctx, state, this.signal(ctx));
+		const choice = await this.awaitDecision(ctx, "arbitration", () =>
+			this.ports.ui.arbitrate(ctx, state, this.signal(ctx)),
+		);
 		if (!this.valid(ctx, generation) || this.signal(ctx).aborted) return;
 		if (!choice) {
 			this.pause(ctx, "Quality arbitration cancelled; /quality resolve to reopen");
@@ -690,7 +708,9 @@ export class QualityController {
 		this.publishActivity();
 		let choice: Awaited<ReturnType<QualityUI["failure"]>>;
 		try {
-			choice = await this.ports.ui.failure(ctx, response.reason, this.signal(ctx));
+			choice = await this.awaitDecision(ctx, "failure", () =>
+				this.ports.ui.failure(ctx, response.reason, this.signal(ctx)),
+			);
 		} finally {
 			if (this.valid(ctx, generation)) this.activityOverride = undefined;
 		}
@@ -727,12 +747,8 @@ export class QualityController {
 		error: CoverageError,
 	): Promise<BoundaryResult | undefined> {
 		const generation = this.generation;
-		const choice = await this.ports.ui.coverage(
-			ctx,
-			error.path,
-			error.message,
-			this.modelKey(),
-			this.signal(ctx),
+		const choice = await this.awaitDecision(ctx, "coverage", () =>
+			this.ports.ui.coverage(ctx, error.path, error.message, this.modelKey(), this.signal(ctx)),
 		);
 		if (!this.valid(ctx, generation) || this.signal(ctx).aborted) return;
 		if (choice === "authorize" && ["sensitive", "external"].includes(error.kind)) {
@@ -796,10 +812,10 @@ export class QualityController {
 		const paths = (args.paths ?? []).map((path) => canonicalPath(resolve(ctx.cwd, path)));
 		if (!paths.length) throw new Error("Provide helper/test paths for scope expansion");
 		const generation = this.generation;
-		const confirmed = await ctx.ui.confirm(
-			"Expand quality correction scope?",
-			`${args.rationale}\n${paths.join("\n")}`,
-			{ signal: this.signal(ctx) },
+		const confirmed = await this.awaitDecision(ctx, "scope", () =>
+			ctx.ui.confirm("Expand quality correction scope?", `${args.rationale}\n${paths.join("\n")}`, {
+				signal: this.signal(ctx),
+			}),
 		);
 		if (!this.valid(ctx, generation) || this.signal(ctx).aborted || !confirmed)
 			return "Scope expansion not approved";
@@ -812,10 +828,12 @@ export class QualityController {
 		const models = ctx.modelRegistry.getAvailable();
 		const choice =
 			requested ||
-			(await ctx.ui.select(
-				"Quality reviewer model",
-				models.map((model) => `${model.provider}/${model.id}`),
-				{ signal: this.signal(ctx) },
+			(await this.awaitDecision(ctx, "model", () =>
+				ctx.ui.select(
+					"Quality reviewer model",
+					models.map((model) => `${model.provider}/${model.id}`),
+					{ signal: this.signal(ctx) },
+				),
 			));
 		if (!this.valid(ctx, generation) || this.signal(ctx).aborted) return false;
 		const selected = models.find((model) => `${model.provider}/${model.id}` === choice);
@@ -847,9 +865,8 @@ export class QualityController {
 			if (
 				action === "off" &&
 				this.pending &&
-				!(await ctx.ui.confirm(
-					"Disable pending quality gate?",
-					"This explicitly waives the unresolved case.",
+				!(await this.awaitDecision(ctx, "waiver", () =>
+					ctx.ui.confirm("Disable pending quality gate?", "This explicitly waives the unresolved case."),
 				))
 			)
 				return;
@@ -868,7 +885,13 @@ export class QualityController {
 			return;
 		}
 		if (this.blockedReason) {
-			if (!(await ctx.ui.confirm("Waive unrecoverable quality state?", this.blockedReason))) return;
+			const reason = this.blockedReason;
+			if (
+				!(await this.awaitDecision(ctx, "waiver", () =>
+					ctx.ui.confirm("Waive unrecoverable quality state?", reason),
+				))
+			)
+				return;
 			this.blockedReason = undefined;
 			this.state = newCase(this.cwd, this.modelKey());
 			this.state.phase = "closed";

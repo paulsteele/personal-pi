@@ -2,6 +2,15 @@ export const QUALITY_ACTIVITY_CHANNEL = "code-quality:activity";
 export const QUALITY_STATUS_CHANNEL = "code-quality:status";
 export const QUALITY_ACTIVITY_DISCOVER_CHANNEL = "code-quality:activity:discover";
 export const MAX_QUALITY_ACTIVITY_CALLS = 96;
+export const QUALITY_ATTENTION_CHANNEL = "code-quality:attention";
+export type QualityDecisionKind = "arbitration" | "coverage" | "failure" | "scope" | "model" | "waiver";
+export interface QualityAttentionEvent {
+	version: 1;
+	sessionId: string;
+	requestId: string;
+	kind: QualityDecisionKind;
+	active: boolean;
+}
 
 export type QualityActivityPhase =
 	| "ready"
@@ -35,6 +44,7 @@ export interface QualityActivityPublisher {
 	update(status: QualityActivityStatus): void;
 	updateHeader(status: QualityActivityStatus, modelId: string): void;
 	finishTool(toolCallId: string, phase: QualityActivityPhase): void;
+	requestDecision(kind: QualityDecisionKind): () => void;
 	dispose(): void;
 }
 
@@ -65,6 +75,19 @@ export function createQualityActivityPublisher(events: ActivityTransport): Quali
 	let header: QualityHeaderEvent | undefined;
 	const latest = new Map<string, QualityActivityEvent>();
 	const batch = new Set<string>();
+	let decisionSequence = 0;
+	const decisions = new Map<string, QualityAttentionEvent>();
+	const emitAttention = (event: QualityAttentionEvent): void => {
+		try {
+			events.emit(QUALITY_ATTENTION_CHANNEL, { ...event });
+		} catch {}
+	};
+	const finishDecision = (requestId: string): void => {
+		const event = decisions.get(requestId);
+		if (!event) return;
+		decisions.delete(requestId);
+		emitAttention({ ...event, active: false });
+	};
 	const publish = (toolCallId: string, status: QualityActivityStatus): void => {
 		if (disposed || !sessionId || !toolCallId || toolCallId.length > 160) return;
 		const previous = latest.get(toolCallId);
@@ -109,6 +132,7 @@ export function createQualityActivityPublisher(events: ActivityTransport): Quali
 	});
 	return {
 		reset(nextSessionId: string) {
+			for (const requestId of decisions.keys()) finishDecision(requestId);
 			sessionId = nextSessionId;
 			header = undefined;
 			latest.clear();
@@ -157,9 +181,18 @@ export function createQualityActivityPublisher(events: ActivityTransport): Quali
 			batch.delete(toolCallId);
 			publish(toolCallId, { phase });
 		},
+		requestDecision(kind) {
+			if (disposed || !sessionId) return () => {};
+			const requestId = `${sessionId}:${++decisionSequence}`;
+			const event: QualityAttentionEvent = { version: 1, sessionId, requestId, kind, active: true };
+			decisions.set(requestId, event);
+			emitAttention(event);
+			return () => finishDecision(requestId);
+		},
 		dispose() {
 			if (disposed) return;
 			disposed = true;
+			for (const requestId of decisions.keys()) finishDecision(requestId);
 			header = undefined;
 			try {
 				unsubscribe();

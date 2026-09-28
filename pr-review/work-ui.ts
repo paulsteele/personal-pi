@@ -1,32 +1,11 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Container, Loader, Text } from "@earendil-works/pi-tui";
+import { awaitWithSignal } from "./abort.js";
 
 /** Ordinary dialogs stay between phases; signalled permission prompts can temporarily own the editor. */
 export type WorkPhase = <T>(label: string, task: () => Promise<T>) => Promise<T>;
 export const directWork: WorkPhase = (_label, task) => task();
 const cancelled = (signal: AbortSignal): unknown => signal.reason ?? new Error("PR operation cancelled");
-
-/** Race an abort without leaving an unhandled late rejection (not all UI APIs accept a signal). */
-export function awaitWithSignal<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
-	return new Promise((resolve, reject) => {
-		const abort = () => {
-			signal.removeEventListener("abort", abort);
-			reject(cancelled(signal));
-		};
-		pending.then(
-			(value) => {
-				signal.removeEventListener("abort", abort);
-				resolve(value);
-			},
-			(error) => {
-				signal.removeEventListener("abort", abort);
-				reject(error);
-			},
-		);
-		if (signal.aborted) abort();
-		else signal.addEventListener("abort", abort, { once: true });
-	});
-}
 
 export interface WorkUI {
 	run: WorkPhase;

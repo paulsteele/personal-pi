@@ -39,8 +39,8 @@ export default function progressObserver(pi: ExtensionAPI): void {
 				}
 				const prompt = buildObservationPrompt(next.ctx.sessionManager, previous);
 				return observe({
-					caller: next.ctx.modelRegistry as never,
-					model: model as never,
+					caller: next.ctx.modelRegistry,
+					model,
 					prompt,
 					config: next.config,
 					...(previous ? { previous } : {}),

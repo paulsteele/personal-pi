@@ -1,6 +1,6 @@
 import { emptyUsage, type UsageTotals } from "./usage.js";
 import type { Advisory, Checkpoint, Finding } from "./types.js";
-import { awaitWithSignal } from "./work-ui.js";
+import { awaitWithSignal } from "./abort.js";
 import { hash } from "./prompts.js";
 import { deferToolCommit } from "./tool-commit.js";
 

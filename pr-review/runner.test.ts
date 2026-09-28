@@ -13,7 +13,8 @@ import {
 	type Profile,
 	type Finding,
 } from "./types.js";
-import { awaitWithSignal, createWorkUI } from "./work-ui.js";
+import { createWorkUI } from "./work-ui.js";
+import { awaitWithSignal } from "./abort.js";
 import { TaskStore, RecoveryGate } from "./tasks.js";
 import { uiHarness } from "./ui.test.helpers.js";
 import { review, capture, commit, fixture, put, testConfig, testDraft } from "./test-fixtures.js";

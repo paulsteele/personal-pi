@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Api, AssistantMessage, Context, Model, StreamOptions } from "@earendil-works/pi-ai";
 import { buildPrompt, buildSystemPrompt, classify, SYSTEM_PROMPT } from "#src/auto/classifier.ts";
 import type { Config } from "#src/config.ts";
 
@@ -10,6 +11,52 @@ const auto = {
   contextUserTurns: 3,
   environment: { trustedRoots: [], trustedRemotes: [], trustedDomains: [] },
 } satisfies Config["auto"];
+type Complete = (
+  model: Model<Api>,
+  context: Context,
+  options?: Pick<StreamOptions, "signal">,
+) => Promise<AssistantMessage>;
+const model: Model<Api> = {
+  id: "reviewer",
+  name: "Classifier fixture",
+  api: "openai-responses",
+  provider: "test",
+  baseUrl: "https://example.invalid",
+  reasoning: false,
+  input: ["text"],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 32_000,
+  maxTokens: 1_000,
+};
+function assistantResponse(content: AssistantMessage["content"]): AssistantMessage {
+  return {
+    role: "assistant",
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    timestamp: 0,
+    content,
+    stopReason: "stop",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+  };
+}
+function verdictResponse(verdict: string, reason?: string): AssistantMessage {
+  return assistantResponse([
+    {
+      type: "toolCall",
+      id: "verdict",
+      name: "submit_verdict",
+      arguments: { verdict, ...(reason ? { reason } : {}) },
+    },
+  ]);
+}
 const facts = {
   surface: "bash",
   toolName: "bash",
@@ -220,12 +267,8 @@ it("does not extend the /tmp exception to other operations or treat ownership cl
 });
 
 it("uses an object-root tool schema accepted by OpenAI-compatible providers", async () => {
-  const complete = vi.fn(async (_model, request: unknown) => {
-    const parameters = (
-      request as {
-        tools: Array<{ parameters: Record<string, unknown> }>;
-      }
-    ).tools[0]?.parameters;
+  const complete = vi.fn<Complete>(async (_model, request) => {
+    const parameters = request.tools?.[0]?.parameters;
     expect(parameters).toMatchObject({
       type: "object",
       required: ["verdict"],
@@ -234,15 +277,13 @@ it("uses an object-root tool schema accepted by OpenAI-compatible providers", as
       },
     });
     expect(parameters).not.toHaveProperty("anyOf");
-    return {
-      content: [{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "allow" } }],
-    };
+    return verdictResponse("allow");
   });
 
   await expect(
     classify({
-      caller: { complete } as never,
-      model: {} as never,
+      caller: { complete },
+      model,
       facts,
       context,
       config: auto,
@@ -252,9 +293,9 @@ it("uses an object-root tool schema accepted by OpenAI-compatible providers", as
 
 it("propagates external cancellation without requesting stale approval", async () => {
   const caller = {
-    complete: vi.fn(
-      (_model, _context, options?: { signal?: AbortSignal }) =>
-        new Promise((_resolve, reject) => {
+    complete: vi.fn<Complete>(
+      (_model, _context, options) =>
+        new Promise<AssistantMessage>((_resolve, reject) => {
           options?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
             once: true,
           });
@@ -263,8 +304,8 @@ it("propagates external cancellation without requesting stale approval", async (
   };
   const controller = new AbortController();
   const pending = classify({
-    caller: caller as never,
-    model: {} as never,
+    caller,
+    model,
     facts,
     context,
     config: auto,
@@ -279,17 +320,11 @@ it.each(["require_human", "deny", "defer"])(
   async (verdict) => {
     const result = await classify({
       caller: {
-        complete: vi.fn(async () => ({
-          content: [
-            {
-              type: "toolCall",
-              name: "submit_verdict",
-              arguments: { verdict, reason: `  needs ${"care ".repeat(150)}  ` },
-            },
-          ],
-        })),
-      } as never,
-      model: {} as never,
+        complete: vi
+          .fn<Complete>()
+          .mockResolvedValue(verdictResponse(verdict, `  needs ${"care ".repeat(150)}  `)),
+      },
+      model,
       facts,
       context,
       config: auto,
@@ -307,16 +342,16 @@ it("maps timeout and call failure to typed human requests", async () => {
   vi.useFakeTimers();
   const timeout = classify({
     caller: {
-      complete: vi.fn(
-        (_model, _context, options?: { signal?: AbortSignal }) =>
-          new Promise((_resolve, reject) =>
+      complete: vi.fn<Complete>(
+        (_model, _context, options) =>
+          new Promise<AssistantMessage>((_resolve, reject) =>
             options?.signal?.addEventListener("abort", () => reject(new Error("timeout")), {
               once: true,
             }),
           ),
       ),
-    } as never,
-    model: {} as never,
+    },
+    model,
     facts,
     context,
     config: { ...auto, timeoutMs: 250 },
@@ -327,8 +362,8 @@ it("maps timeout and call failure to typed human requests", async () => {
 
   await expect(
     classify({
-      caller: { complete: vi.fn(async () => Promise.reject(new Error("network"))) } as never,
-      model: {} as never,
+      caller: { complete: vi.fn<Complete>().mockRejectedValue(new Error("network")) },
+      model,
       facts,
       context,
       config: auto,
@@ -336,38 +371,131 @@ it("maps timeout and call failure to typed human requests", async () => {
   ).resolves.toMatchObject({ kind: "require_human", cause: "call-failed" });
 });
 
+it("does not dispatch an already cancelled classification", async () => {
+  const complete = vi.fn<Complete>().mockResolvedValue(verdictResponse("allow"));
+  const controller = new AbortController();
+  controller.abort();
+  await expect(
+    classify({
+      caller: { complete },
+      model,
+      facts,
+      context,
+      config: auto,
+      signal: controller.signal,
+    }),
+  ).resolves.toEqual({ kind: "cancelled", modelCalled: false });
+  expect(complete).not.toHaveBeenCalled();
+});
+
+it("times out a provider that ignores abort and handles its late rejection", async () => {
+  vi.useFakeTimers();
+  let rejectProvider!: (error: Error) => void;
+  const complete = vi.fn<Complete>(
+    () =>
+      new Promise((_resolve, reject) => {
+        rejectProvider = reject;
+      }),
+  );
+  const settled = vi.fn();
+  const pending = classify({ caller: { complete }, model, facts, context, config: auto }).then(
+    settled,
+  );
+  await vi.advanceTimersByTimeAsync(auto.timeoutMs);
+  expect(settled).toHaveBeenCalledWith(
+    expect.objectContaining({ kind: "require_human", cause: "timeout", modelCalled: true }),
+  );
+  expect(complete.mock.calls[0]?.[2]?.signal?.aborted).toBe(true);
+  expect(complete).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+  rejectProvider(new Error("late provider failure"));
+  await pending;
+});
+
+it("settles cancellation without waiting for a late allow verdict", async () => {
+  let resolveProvider!: (response: AssistantMessage) => void;
+  const complete = vi.fn<Complete>(
+    () =>
+      new Promise((resolve) => {
+        resolveProvider = resolve;
+      }),
+  );
+  const controller = new AbortController();
+  const settled = vi.fn();
+  const pending = classify({
+    caller: { complete },
+    model,
+    facts,
+    context,
+    config: auto,
+    signal: controller.signal,
+  }).then(settled);
+  controller.abort();
+  await vi.waitFor(() =>
+    expect(settled).toHaveBeenCalledWith({ kind: "cancelled", modelCalled: true }),
+  );
+  resolveProvider(verdictResponse("allow"));
+  await pending;
+  expect(settled).toHaveBeenCalledOnce();
+});
+
+it("times out after one shared deadline across malformed-response retries", async () => {
+  vi.useFakeTimers();
+  const complete = vi.fn<Complete>(
+    () =>
+      new Promise((resolve) => {
+        setTimeout(
+          () => resolve(assistantResponse([{ type: "text", text: "not a verdict" }])),
+          400,
+        );
+      }),
+  );
+  const settled = vi.fn();
+  const pending = classify({ caller: { complete }, model, facts, context, config: auto }).then(
+    settled,
+  );
+  await vi.advanceTimersByTimeAsync(800);
+  expect(complete).toHaveBeenCalledTimes(3);
+  expect(settled).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(200);
+  expect(settled).toHaveBeenCalledWith(expect.objectContaining({ cause: "timeout" }));
+  await vi.advanceTimersByTimeAsync(200);
+  await pending;
+  expect(complete).toHaveBeenCalledTimes(3);
+  expect(settled).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
 it("repairs a malformed response before escalating to a human", async () => {
   const complete = vi
-    .fn()
-    .mockResolvedValueOnce({ content: [{ type: "text", text: "This looks safe." }] })
-    .mockResolvedValueOnce({
-      content: [{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "allow" } }],
-    });
+    .fn<Complete>()
+    .mockResolvedValueOnce(assistantResponse([{ type: "text", text: "This looks safe." }]))
+    .mockResolvedValueOnce(verdictResponse("allow"));
 
   await expect(
     classify({
-      caller: { complete } as never,
-      model: {} as never,
+      caller: { complete },
+      model,
       facts,
       context,
       config: auto,
     }),
   ).resolves.toEqual({ kind: "allow", modelCalled: true });
   expect(complete).toHaveBeenCalledTimes(2);
-  const repairRequest = complete.mock.calls[1]?.[1] as {
-    messages: Array<{ role: string; content: string }>;
-  };
+  const repairRequest = complete.mock.calls[1]![1];
   expect(repairRequest.messages.at(-1)?.content).toContain(
     "Do not answer with prose or plain JSON",
   );
 });
 
 it("escalates after three malformed attempts", async () => {
-  const complete = vi.fn(async () => ({ content: [{ type: "text", text: "maybe" }] }));
+  const complete = vi
+    .fn<Complete>()
+    .mockResolvedValue(assistantResponse([{ type: "text", text: "maybe" }]));
   await expect(
     classify({
-      caller: { complete } as never,
-      model: {} as never,
+      caller: { complete },
+      model,
       facts,
       context,
       config: auto,
@@ -383,19 +511,13 @@ it("escalates after three malformed attempts", async () => {
 });
 
 it("does not retry a valid human-review verdict", async () => {
-  const complete = vi.fn(async () => ({
-    content: [
-      {
-        type: "toolCall",
-        name: "submit_verdict",
-        arguments: { verdict: "require_human", reason: "Operator confirmation is needed." },
-      },
-    ],
-  }));
+  const complete = vi
+    .fn<Complete>()
+    .mockResolvedValue(verdictResponse("require_human", "Operator confirmation is needed."));
   await expect(
     classify({
-      caller: { complete } as never,
-      model: {} as never,
+      caller: { complete },
+      model,
       facts,
       context,
       config: auto,

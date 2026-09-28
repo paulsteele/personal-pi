@@ -7,6 +7,7 @@ Actionable, bounded notifications for Pi running in Alacritty:
 - Sends completion notifications only after `agent_settled` and only when the originating terminal is unfocused.
 - Sends notifications for actual interactive permission prompts and clears them on the matching decision.
 - Sends notifications when `ask_user_question` opens a questionnaire, showing the first question and the remaining-question count, and clears them after the user answers or cancels.
+- Sends notifications when you need to choose between the current code and proposed corrections, authorize a file's review, recover a failed review, approve extra correction paths, select a reviewer, or waive a check. Clears the matching notice when its dialog ends or its session is retired. Ordinary agent-handled `needs_work` feedback does not notify.
 - Keeps at most one notification per terminal window and clears only that window's notice when work resumes—including after submitting a normal response or answering/canceling an in-terminal question. Merely focusing the terminal does not clear it.
 - Never uses Hammerspoon's bulk notification clear; notices from other Pi windows and unrelated Hammerspoon automation remain intact.
 
@@ -70,6 +71,7 @@ Normal behavior:
 - Completion title: `Pi · <project>` / `Ready for input`
 - Permission title: `Pi · <project>` / `Permission needed: <surface>`
 - Questionnaire title: `Pi · <project>` / `Question needs your input` (or `<n> questions need your input`)
+- Quality title: `Pi · <project>` / a label naming the pending action, such as `Quality coverage needs approval`. Quality notices use fixed instructions, never source code, findings, paths, or provider errors.
 - Body: a normalized, Unicode-safe, bounded excerpt
 - Hyprland notifications are silent. macOS sound behavior follows the Hammerspoon notification settings.
 

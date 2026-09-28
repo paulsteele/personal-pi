@@ -514,8 +514,8 @@ async function modelDecision(
     return unavailable;
   }
   const response = await classify({
-    caller: ctx.modelRegistry as never,
-    model: model as never,
+    caller: ctx.modelRegistry,
+    model: model!,
     facts,
     context: {
       cwd,

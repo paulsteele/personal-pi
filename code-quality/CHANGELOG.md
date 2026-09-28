@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.2 — 2026-09-28
+
+- Notify the desktop when quality dialogs require a human decision: arbitration, file-review authorization, failure recovery, correction-scope approval, reviewer selection, and waivers. Clear matching notices when dialogs end or sessions retire; keep ordinary agent-handled rejections silent and source data out of notifications.
+
 ## 1.4.1 — 2026-09-25
 
 - Give invalid reviewer submissions one immediate repair attempt with explicit finding/edit ranges and bounded validation feedback, rather than repeating identical requests.

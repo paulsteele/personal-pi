@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.2 — 2026-09-28
+
+- Move the shared cancellation helper into a non-UI module so task recovery and snapshot reads no longer depend on the work UI. Preserve abort reasons and late-rejection handling.
+
 ## 1.4.1 — 2026-09-25
 
 - Search ordinary snapshot files locally without prompting for files that return no matches. Authorize matching snippets before disclosure and report denied/protected files as skipped coverage.
