@@ -19,6 +19,7 @@ export default function progressObserver(pi: ExtensionAPI): void {
 	const modelId = (config: ObserverConfig): string => `${config.provider}/${config.model}`;
 
 	const createRuntime = (ctx: ExtensionContext): Runtime => {
+		const piSessionId = ctx.sessionManager.getSessionId();
 		runtime?.scheduler.dispose();
 		runtime?.publisher.dispose();
 		const loaded = loadConfig(getAgentDir());
@@ -39,6 +40,7 @@ export default function progressObserver(pi: ExtensionAPI): void {
 				}
 				const prompt = buildObservationPrompt(next.ctx.sessionManager, previous);
 				return observe({
+					piSessionId,
 					caller: next.ctx.modelRegistry,
 					model,
 					prompt,

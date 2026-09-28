@@ -136,6 +136,7 @@ export async function review(options: {
 	permissions?: ReviewPermissions;
 }): Promise<Report> {
 	const { ctx, config, profile, snapshot, prompts, signal, progress } = options;
+	const piSessionId = ctx.sessionManager.getSessionId();
 	const permissions = options.permissions;
 	if (!permissions || !snapshot.withPermissions)
 		throw new PermissionBlocked("unavailable", "PR workers require task-bound permissions");
@@ -265,6 +266,7 @@ export async function review(options: {
 						),
 					);
 					result = await runWorker({
+						piSessionId,
 						registry: ctx.modelRegistry,
 						config,
 						schema,

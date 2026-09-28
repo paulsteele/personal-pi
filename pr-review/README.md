@@ -166,6 +166,8 @@ Whether a finding is actually true and whether issues were missed remain model j
 
 Each logical worker has its own routing session ID, stable across its continuations and recovery but never shared with concurrent workers. Provider/SDK/environment cache-retention defaults are unchanged; one-off compaction requests retain the SDK's separate routing and no-cache-write policy where supported. Shared prefixes enable reuse but neither routing hints nor prefix ordering guarantee a provider cache hit. No model results, browser approvals, or fix authorizations are cached across runs.
 
+When the review provider is exactly `litellm`, setup, all review stages/workers, retries, compaction, and repeated PR runs share the LiteLLM log session `pi-<encoded Pi session ID>-pr` via `x-litellm-trace-id`. Resume, reload, and `/tree` retain the group; new sessions, forks, and clones get new groups. This correlation ID is separate from the worker and compaction routing/cache IDs above. Main-model calls stay separate, and delegated permission-classifier calls use the auto flow's group. Other providers and aliases are unchanged; existing logs are not migrated.
+
 Binary, non-UTF8, symlink, submodule, unsafe, or unavailable in-scope content is an explicit blocker requiring retry/cancel, not a reviewed file. Numeric file/diff/line limits no longer omit source. A diff too large for one request is paged and reviewed through continuation, not declared complete from a truncated preview. Pure renames retain their old/new names; edited renames can appear as deletion/addition pairs. No failed or skipped work is called clean.
 
 ## Development and verification

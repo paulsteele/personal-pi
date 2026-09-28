@@ -234,6 +234,7 @@ function parseSummary(response: { content?: unknown }): ProgressSummary | undefi
 }
 
 export async function observe(options: {
+	piSessionId?: string | undefined;
 	caller: Pick<ExtensionContext["modelRegistry"], "complete">;
 	model: Model<Api>;
 	prompt: string;
@@ -241,6 +242,21 @@ export async function observe(options: {
 	previous?: ProgressSummary;
 	signal?: AbortSignal;
 }): Promise<ObservationResult> {
+	const headers =
+		options.model.provider === "litellm" && options.piSessionId !== undefined
+			? { "x-litellm-trace-id": `pi-${encodeURIComponent(options.piSessionId)}-activity` }
+			: undefined;
+	const modelHeadersWithoutTraceId =
+		headers && options.model.headers
+			? Object.fromEntries(
+					Object.entries(options.model.headers).filter(
+						([name]) => name.toLowerCase() !== "x-litellm-trace-id",
+					),
+				)
+			: undefined;
+	const requestModel = modelHeadersWithoutTraceId
+		? { ...options.model, headers: modelHeadersWithoutTraceId }
+		: options.model;
 	const timeout = new AbortController();
 	let timedOut = false;
 	let rejectOnAbort: (() => void) | undefined;
@@ -257,13 +273,13 @@ export async function observe(options: {
 		});
 		const response = await Promise.race([
 			options.caller.complete(
-				options.model,
+				requestModel,
 				{
 					systemPrompt: SYSTEM_PROMPT,
 					messages: [{ role: "user", content: options.prompt, timestamp: Date.now() }],
 					tools: [submitTool],
 				},
-				{ signal },
+				{ signal, ...(headers ? { headers } : {}) },
 			),
 			abortPromise,
 		]);

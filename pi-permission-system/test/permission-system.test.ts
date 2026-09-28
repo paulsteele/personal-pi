@@ -1332,6 +1332,7 @@ describe("integrated permission system", () => {
         content: [{ type: "toolCall", name: "submit_verdict", arguments: { verdict: "allow" } }],
       },
     });
+    h.ctx.modelRegistry.find = () => ({ provider: "litellm", id: "reviewer" }) as never;
     await h.handlers.get("session_start")?.({}, h.ctx);
     let service!: DelegatedReviewService;
     h.events.emit(REVIEW_SERVICE_CHANNEL, {
@@ -1378,6 +1379,18 @@ describe("integrated permission system", () => {
       "allowed",
     );
     expect(h.ctx.modelRegistry.complete).toHaveBeenCalledTimes(4);
+    type ClassifierCall = [
+      model: unknown,
+      context: unknown,
+      options: { headers: Record<string, string> },
+    ];
+    const classifierCalls = h.ctx.modelRegistry.complete.mock.calls as unknown as ClassifierCall[];
+    expect(classifierCalls.map(([, , options]) => options.headers["x-litellm-trace-id"])).toEqual([
+      "pi-current-session-auto",
+      "pi-current-session-auto",
+      "pi-current-session-auto",
+      "pi-current-session-auto",
+    ]);
     const prompt = JSON.stringify(h.ctx.modelRegistry.complete.mock.calls[0]?.[1]);
     expect(prompt).toContain("worker: Correctness");
     expect(prompt).toContain("accessed path: /repo/a.ts");

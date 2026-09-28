@@ -3,11 +3,7 @@ import type { Api, AssistantMessage, Context, Model, StreamOptions, ToolCall } f
 import { DEFAULT_CONFIG } from "./config.js";
 import { buildObservationPrompt, observe } from "./observer.js";
 
-type Complete = (
-	model: Model<Api>,
-	context: Context,
-	options?: Pick<StreamOptions, "signal">,
-) => Promise<AssistantMessage>;
+type Complete = (model: Model<Api>, context: Context, options?: StreamOptions) => Promise<AssistantMessage>;
 const model: Model<Api> = {
 	id: "observer",
 	name: "Observer fixture",
@@ -119,6 +115,30 @@ describe("observer prompt", () => {
 });
 
 describe("observer model call", () => {
+	it.each([
+		{ provider: "litellm", piSessionId: "parent /雪", trace: "pi-parent%20%2F%E9%9B%AA-activity" },
+		{ provider: "litellm", piSessionId: undefined, trace: undefined },
+		{ provider: "openai", piSessionId: "parent", trace: undefined },
+		{ provider: "litellm-alias", piSessionId: "parent", trace: undefined },
+	])(
+		"scopes activity tracking to $provider with owner $piSessionId",
+		async ({ provider, piSessionId, trace }) => {
+			const complete = vi.fn<Complete>().mockResolvedValue(summaryCall());
+			const requestModel = { ...model, provider };
+			await observe({
+				caller: { complete },
+				model: requestModel,
+				piSessionId,
+				prompt: "record",
+				config: DEFAULT_CONFIG,
+			});
+			expect(complete.mock.calls[0]![2]?.headers).toEqual(
+				trace ? { "x-litellm-trace-id": trace } : undefined,
+			);
+			expect(complete.mock.calls[0]![2]?.sessionId).toBeUndefined();
+		},
+	);
+
 	it("requires and sanitizes one structured progress call", async () => {
 		const caller = { complete: vi.fn<Complete>().mockResolvedValue(summaryCall({ blockers: "None\u0000" })) };
 		const result = await observe({

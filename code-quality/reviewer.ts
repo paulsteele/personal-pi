@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Api, AssistantMessage, Context, Model, Usage } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Context, Model, StreamOptions, Usage } from "@earendil-works/pi-ai";
 import type { QualityConfig } from "./config.js";
 import { VerdictSchema, validateVerdict, type ReviewFile, type ValidatedVerdict } from "./proposal.js";
 
@@ -68,6 +68,7 @@ async function completeReviewAttempt(options: {
 	registry: ReviewerRegistry;
 	model: Model<Api>;
 	context: Context;
+	headers?: StreamOptions["headers"];
 	maxTokens: number;
 	timeoutMs: number;
 	signal?: AbortSignal;
@@ -89,6 +90,7 @@ async function completeReviewAttempt(options: {
 				signal,
 				maxTokens: options.maxTokens,
 				maxRetries: 0,
+				...(options.headers ? { headers: options.headers } : {}),
 			}),
 			aborted,
 		]);
@@ -101,6 +103,7 @@ async function completeReviewAttempt(options: {
 }
 
 export async function review(options: {
+	piSessionId?: string | undefined;
 	registry: ReviewerRegistry;
 	config: QualityConfig;
 	request: ReviewRequest;
@@ -128,6 +131,17 @@ export async function review(options: {
 			metrics,
 		});
 	}
+	const headers =
+		model.provider === "litellm" && options.piSessionId !== undefined
+			? { "x-litellm-trace-id": `pi-${encodeURIComponent(options.piSessionId)}-quality` }
+			: undefined;
+	const modelHeadersWithoutTraceId =
+		headers && model.headers
+			? Object.fromEntries(
+					Object.entries(model.headers).filter(([name]) => name.toLowerCase() !== "x-litellm-trace-id"),
+				)
+			: undefined;
+	const requestModel = modelHeadersWithoutTraceId ? { ...model, headers: modelHeadersWithoutTraceId } : model;
 	const scope = reviewScope(request.files);
 	const scopedInput = `${request.input}\n\nReview scope (exact paths; inclusive post-edit line ranges):\n${scope}`;
 	const reviewInput = request.objection
@@ -162,7 +176,8 @@ export async function review(options: {
 			metrics.requests++;
 			response = await completeReviewAttempt({
 				registry,
-				model,
+				model: requestModel,
+				headers,
 				context: {
 					systemPrompt,
 					tools,

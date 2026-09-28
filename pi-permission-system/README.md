@@ -80,6 +80,14 @@ Presentation and review-log field limits are fixed in code.
 - `environment`: up to 100 trusted roots/remotes/domains of at most 200 characters, shown as hints
   only. They cannot override deterministic safety policy.
 
+When the classifier provider is exactly `litellm`, calls share the LiteLLM log session
+`pi-<encoded Pi session ID>-auto` via `x-litellm-trace-id`. Retries and delegated PR permission
+checks belong to this auto group, not the PR model group or the main model. Resume, reload,
+and `/tree` retain it; new sessions, forks, and clones get new groups. This is log correlation,
+not a change to conversation context or SDK routing/cache IDs. Other providers and aliases
+are unchanged, and deterministic/cache-only decisions still make no model calls. Existing
+logs are not migrated.
+
 ### File-modification authorization
 
 For `edit` and `write`, the classifier reviews the operation, target/resolved paths, and user task

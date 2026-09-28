@@ -44,6 +44,8 @@ Each refresh is an additional model call and is not part of the primary agent's 
 
 The sidebar is an **inference from the visible session record**, not the worker model's hidden reasoning and not proof that work is correct or complete. On timeout, malformed output, or provider failure, the previous successful inference remains visible as stale and the main agent continues unaffected.
 
+When the observer provider is exactly `litellm`, refreshes share the LiteLLM log session `pi-<encoded Pi session ID>-activity` via `x-litellm-trace-id`, separate from the main model and other auxiliary flows. Resume, reload, and `/tree` retain the group; new sessions, forks, and clones get new groups. This does not change SDK routing/cache IDs or send prior summaries as a shared server-side conversation. Other providers and aliases are unchanged; existing logs are not migrated.
+
 ## Summary style
 
 Every field is a terse affirmative fragment about the work, with the subject dropped: `Adding PairSuccessFlow UI test fixtures`, not `The agent is adding UI test fixtures`. The observer never reports on the record it read, never hedges, and never states what did not happen. Work that is written but unverified surfaces as an affirmative next action instead:

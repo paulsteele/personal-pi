@@ -890,7 +890,7 @@ describe("sidebar snapshot and layout", () => {
 		expect(rows[0]).toBe("Observer unavailable");
 		expect(rows).toContainEqual(expect.stringMatching(/^│ 󰔛 ~\s+READY · ┃ 󰄋 ┃\s+~ 󰓅 │$/));
 		expect(rows).toContainEqual(expect.stringMatching(/^╭─+ 0✓ · 0✕ ─+╮$/));
-		expect(rows).toContainEqual(expect.stringMatching(/^╰─+ 󰚩 0 · 󰀄 0 ─+╯$/));
+		expect(rows).toContainEqual(expect.stringMatching(/^╰─+ 󰚩 0 · 󰀄 0 · 󰅴 0 0✕ ─+╯$/));
 		for (const absent of ["RUN", "AGENT", "CTX", "GIT", "SESSION", "USE", "PLAN", "ALERTS"]) {
 			expect(rows).not.toContain(absent);
 		}

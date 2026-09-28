@@ -38,8 +38,15 @@ const finding: Finding = {
 };
 async function run(
 	verdict: "confirmed" | "missing" | "bad-quote",
-	withProposalUI = false,
-	approveWithMissingReading = false,
+	{
+		withProposalUI = false,
+		approveWithMissingReading = false,
+		piSessionId = "pr-session",
+	}: {
+		withProposalUI?: boolean;
+		approveWithMissingReading?: boolean;
+		piSessionId?: string;
+	} = {},
 ) {
 	const repo = await fixture();
 	roots.push(repo.root);
@@ -108,7 +115,11 @@ async function run(
 		};
 	}
 	const controller = new AbortController();
-	const ctx = { modelRegistry: {}, ui: h.ui } as ExtensionContext;
+	const ctx = {
+		modelRegistry: {},
+		ui: h.ui,
+		sessionManager: { getSessionId: () => piSessionId },
+	} as unknown as ExtensionContext;
 	const workUI = createWorkUI(ctx, controller.signal, () => controller.abort());
 	const result = await review({
 		ctx,
@@ -124,6 +135,17 @@ async function run(
 	await snapshot.dispose?.();
 	return { result, seen, ui: h.state };
 }
+it("shares the Pi owner across stages and repeated runs while separating a fork", async () => {
+	for (const piSessionId of ["saved-owner", "saved-owner", "fork-owner"]) {
+		vi.mocked(runWorker).mockClear();
+		await run("confirmed", { withProposalUI: true, piSessionId });
+		const calls = vi.mocked(runWorker).mock.calls.map(([options]) => options);
+		expect(calls.length).toBeGreaterThan(2);
+		expect(new Set(calls.map((options) => options.piSessionId))).toEqual(new Set([piSessionId]));
+		expect(new Set(calls.map((options) => options.sessionId)).size).toBe(calls.length);
+	}
+});
+
 it("bounds resident preparation and reports automatic checks separately from slot waits", async () => {
 	const repo = await fixture();
 	roots.push(repo.root);
@@ -443,7 +465,7 @@ it.each(["missing", "bad-quote"] as const)("never reports a pass for %s verifica
 	expect(result.ledger).toMatchObject([{ id: "F1", verdict: "inconclusive" }]);
 });
 it("closes the proposal spinner before asking which specialists to run", async () => {
-	const { result, seen, ui } = await run("confirmed", true);
+	const { result, seen, ui } = await run("confirmed", { withProposalUI: true });
 	expect(result.status).toBe("complete");
 	expect(result.declined).toContain("Extra lens");
 	expect(seen).not.toContain("extra");
@@ -453,7 +475,7 @@ it("closes the proposal spinner before asking which specialists to run", async (
 });
 
 it("does not restore missing inherited documents when a proposed specialist is approved", async () => {
-	const { result, seen } = await run("confirmed", true, true);
+	const { result, seen } = await run("confirmed", { withProposalUI: true, approveWithMissingReading: true });
 	expect(seen).toContain("extra");
 	expect(result.status).toBe("complete");
 	expect(result.contextNotes?.join(" ")).toContain("deleted-rules.md");

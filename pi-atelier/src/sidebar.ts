@@ -21,7 +21,7 @@ import {
 	type ToolActivity,
 } from "./run-activity.js";
 import type { SidebarPanelData } from "./sidebar-panels.js";
-import type { QualityActivity, QualityHeader } from "./quality-activity.js";
+import type { QualityActivity, QualityHeader, QualityReviewCounts } from "./quality-activity.js";
 import { createSplitPaneController, type SplitPaneController } from "./split-pane.js";
 import { type AtelierState, type ProgressObserverSnapshot, type WorkspacePulseState } from "./types.js";
 import type { WorkspacePulseData } from "./workspace-pulse.js";
@@ -455,7 +455,7 @@ function trackDashboardRow(
 
 function trackRail(
 	position: "top" | "bottom",
-	content: string,
+	content: string | readonly string[],
 	width: number,
 	palette: AtelierPalette,
 	leftGlyph = "",
@@ -472,23 +472,43 @@ function trackRail(
 		? `${palette.paint("dim", " ")}${rightGlyph}${palette.paint("dim", ` ─${rightCorner}`)}`
 		: palette.paint("dim", rightCorner);
 	const centerWidth = Math.max(0, safeWidth - visibleWidth(rawPrefix) - visibleWidth(rawSuffix));
-	const safeContent = truncateToWidth(content ? ` ${content} ` : "", centerWidth, "");
+	let contentAlternatives: string[];
+	if (typeof content === "string") {
+		contentAlternatives = [content ? ` ${content} ` : ""];
+	} else {
+		const paddedAlternatives = content.map((text) => ` ${text} `);
+		const narrowWidthFallback = content.at(-1) ?? "";
+		contentAlternatives = [...paddedAlternatives, narrowWidthFallback];
+	}
+	const fittedContent =
+		contentAlternatives.find((text) => visibleWidth(text) <= centerWidth) ?? contentAlternatives.at(-1) ?? "";
+	const safeContent = truncateToWidth(fittedContent, centerWidth, "");
 	const remaining = Math.max(0, centerWidth - visibleWidth(safeContent));
 	const leftFill = Math.floor(remaining / 2);
 	const rail = (length: number) => (length > 0 ? palette.paint("dim", "─".repeat(length)) : "");
 	return `${prefix}${rail(leftFill)}${safeContent}${rail(remaining - leftFill)}${suffix}`;
 }
 
-function trackCounts(auto: SidebarSnapshot["autoModeState"], palette: AtelierPalette): string {
-	return `${palette.paint("permissionAuto", `󰚩 ${finiteCount(auto?.allowed ?? 0)}`)} ${palette.paint(
-		"dim",
-		"·",
-	)} ${palette.paint("permissionHuman", `󰀄 ${finiteCount(auto?.asked ?? 0)}`)}`;
+function trackCounts(
+	auto: SidebarSnapshot["autoModeState"],
+	quality: QualityReviewCounts | undefined,
+	palette: AtelierPalette,
+): readonly string[] {
+	const badges = [
+		palette.paint("permissionAuto", `${PERMISSION_SOURCE_ICON.auto} ${finiteCount(auto?.allowed ?? 0)}`),
+		palette.paint("permissionHuman", `${PERMISSION_SOURCE_ICON.human} ${finiteCount(auto?.asked ?? 0)}`),
+		`${palette.paint("permissionAuto", `${QUALITY_ICON} ${finiteCount(quality?.checkCount ?? 0)}`)} ${palette.paint(
+			(quality?.rejectionCount ?? 0) > 0 ? "error" : "dim",
+			`${finiteCount(quality?.rejectionCount ?? 0)}✕`,
+		)}`,
+	];
+	return [badges.join(` ${palette.paint("dim", "·")} `), badges.join(" ")];
 }
 
 function activityTrackRows(
 	activity: RunActivitySnapshot,
 	auto: SidebarSnapshot["autoModeState"],
+	quality: QualityReviewCounts | undefined,
 	palette: AtelierPalette,
 	theme: ThemeLike,
 	width: number,
@@ -556,7 +576,7 @@ function activityTrackRows(
 			palette,
 			safeWidth - 4,
 		)}${palette.paint("dim", " │")}`,
-		trackRail("bottom", trackCounts(auto, palette), safeWidth, palette, bottomLeft, bottomRight),
+		trackRail("bottom", trackCounts(auto, quality, palette), safeWidth, palette, bottomLeft, bottomRight),
 	];
 }
 
@@ -653,7 +673,17 @@ function activityBandRows(
 		const header = `${QUALITY_ICON} quality · ${quality.modelId}`;
 		rows.push(centeredTrackContent(palette.paint("accent", header), leadWidth, " "));
 	}
-	rows.push(...activityTrackRows(activity, snapshot.autoModeState, palette, theme, leadWidth, now));
+	rows.push(
+		...activityTrackRows(
+			activity,
+			snapshot.autoModeState,
+			snapshot.qualityHeader,
+			palette,
+			theme,
+			leadWidth,
+			now,
+		),
+	);
 	for (const tool of tools) rows.push(...toolActivityRows(tool, continuationWidth, palette, now));
 	for (const permission of activity.standalonePermissions ?? []) {
 		rows.push(...standalonePermissionRows(permission, continuationWidth, palette));

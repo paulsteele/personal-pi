@@ -50,7 +50,9 @@ async function fixture(review: (options: any) => Promise<ReviewResult>, calls: s
   const uiContext = { setStatus() {}, notify() {}, setWidget() {}, setWorkingMessage() {}, setWorkingVisible() {}, setWorkingIndicator() {} } as unknown as ExtensionUIContext;
   await session.bindExtensions({ mode: "tui", uiContext, onError: (error) => errors.push(error.error) });
   let turn = 0;
-  session.agent.streamFunction = (_model, context) => {
+  session.agent.streamFunction = (_model, context, options) => {
+    expect(options?.sessionId).toBe(session.sessionId);
+    expect(options?.headers?.["x-litellm-trace-id"]).toBeUndefined();
     calls.push(`main:${++turn}`);
     expect(JSON.stringify(context)).toContain("Code clarity policy");
     expect(JSON.stringify(context)).not.toContain(QUALITY_CHECK_ENTRY);
@@ -78,7 +80,7 @@ test("real Pi waits for the post-write verdict before the next primary request",
     expect(h.errors).toEqual([]);
     expect(JSON.stringify(h.session.messages)).toContain("Code clarity policy");
     expect(h.activity.getSnapshot().recentTools[0]).toMatchObject({ id: "write-1", quality: { phase: "approved" } });
-    expect(h.qualityHeaders.at(-1)).toMatchObject({ phase: "approved", modelId: "synthetic/fixture" });
+    expect(h.qualityHeaders.at(-1)).toMatchObject({ phase: "approved", modelId: "synthetic/fixture", checkCount: 1, rejectionCount: 0 });
     const feedback = h.session.sessionManager.getBranch().find((entry) => entry.type === "custom_message" && entry.customType === "code-quality:feedback");
     expect(feedback).toMatchObject({ details: { outcome: "approved" }, content: expect.stringContaining("Quality approved") });
   } finally { h.session.dispose(); }
@@ -99,7 +101,7 @@ test("unresolved finalization waits for five review exchanges before human arbit
     expect(h.errors).toEqual([]);
     expect(JSON.stringify(h.session.messages)).toContain("user approved");
     expect(h.activity.getSnapshot().recentTools[0]).toMatchObject({ id: "w", quality: { phase: "user_approved" } });
-    expect(h.qualityHeaders.at(-1)?.phase).toBe("user_approved");
+    expect(h.qualityHeaders.at(-1)).toMatchObject({ phase: "user_approved", checkCount: 6, rejectionCount: 6 });
   } finally { h.session.dispose(); }
 }, 20000);
 
@@ -116,9 +118,11 @@ function qualityCaseFromMainAgentFeedback(context: Context): { caseId: string; r
 
 test("a real Pi disagreement returns to the reviewer and can resolve without an operator", async () => {
   const calls: string[] = [];
+  const ownerSessionIds: string[] = [];
   const objection = "The name identifies the coordinate rather than a count.";
   const h = await fixture(async (options) => {
     calls.push("review");
+    ownerSessionIds.push(options.piSessionId);
     if (options.request.objection) {
       expect(options.request.objection).toBe(objection);
       return approved();
@@ -133,9 +137,10 @@ test("a real Pi disagreement returns to the reviewer and can resolve without an 
   try {
     await h.session.prompt("Write code.");
     expect(calls).toEqual(["main:1", "review", "main:2", "review", "main:3"]);
+    expect(ownerSessionIds).toEqual([h.session.sessionId, h.session.sessionId]);
     expect(h.errors).toEqual([]);
     expect(readFileSync(join(h.cwd, "a.ts"), "utf8")).toBe("const x = 1;\n");
-    expect(h.qualityHeaders.at(-1)?.phase).toBe("approved");
+    expect(h.qualityHeaders.at(-1)).toMatchObject({ phase: "approved", checkCount: 2, rejectionCount: 1 });
   } finally { h.session.dispose(); }
 }, 20000);
 
@@ -157,7 +162,7 @@ test("five unsuccessful real Pi disagreements reach the operator only after the 
       "main:5", "review", "main:6", "review", "human", "main:7",
     ]);
     expect(h.errors).toEqual([]);
-    expect(h.qualityHeaders.at(-1)?.phase).toBe("user_approved");
+    expect(h.qualityHeaders.at(-1)).toMatchObject({ phase: "user_approved", checkCount: 6, rejectionCount: 6 });
   } finally { h.session.dispose(); }
 }, 20000);
 

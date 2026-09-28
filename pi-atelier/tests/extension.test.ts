@@ -234,8 +234,10 @@ async function waitForWorkspacePulseInspection(h: ReturnType<typeof harness>): P
 }
 
 describe("extension registration", () => {
-	it("discovers the current Quality header and ignores stale or foreign header updates", async () => {
+	it("discovers quality check totals and ignores stale or foreign header updates", async () => {
 		const h = harness();
+		let discoveredCount = 7;
+		let discoveredRejections = 2;
 		h.pi.events.on("code-quality:activity:discover", () => {
 			h.pi.events.emit("code-quality:status", {
 				version: 1,
@@ -243,16 +245,22 @@ describe("extension registration", () => {
 				revision: 4,
 				phase: "ready",
 				modelId: "test/reviewer",
+				checkCount: discoveredCount,
+				rejectionCount: discoveredRejections,
 			});
 		});
+		const renderedText = () => renderOverlayText(h).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 		await start(h);
-		expect(renderOverlayText(h)).toContain("󰅴 quality · test/reviewer");
+		expect(renderedText()).toContain("󰅴 quality · test/reviewer");
+		expect(renderedText()).toContain("󰚩 0 · 󰀄 0 · 󰅴 7 2✕");
 		h.pi.events.emit("code-quality:status", {
 			version: 1,
 			sessionId: "other",
 			revision: 5,
 			phase: "paused",
 			modelId: "test/wrong",
+			checkCount: 99,
+			rejectionCount: 99,
 		});
 		h.pi.events.emit("code-quality:status", {
 			version: 1,
@@ -260,10 +268,29 @@ describe("extension registration", () => {
 			revision: 3,
 			phase: "disabled",
 			modelId: "test/stale",
+			checkCount: 99,
+			rejectionCount: 99,
 		});
 		expect(renderOverlayText(h)).toContain("󰅴 quality · test/reviewer");
 		expect(renderOverlayText(h)).not.toContain("test/wrong");
 		expect(renderOverlayText(h)).not.toContain("test/stale");
+		expect(renderedText()).toContain("󰚩 0 · 󰀄 0 · 󰅴 7 2✕");
+		h.pi.events.emit("code-quality:status", {
+			version: 1,
+			sessionId: "session-a",
+			revision: 5,
+			phase: "checking",
+			modelId: "test/reviewer",
+			checkCount: 8,
+			rejectionCount: 3,
+		});
+		expect(renderedText()).toContain("󰚩 0 · 󰀄 0 · 󰅴 8 3✕");
+		await h.handlers.get("agent_start")?.({}, h.ctx);
+		expect(renderedText()).toContain("󰚩 0 · 󰀄 0 · 󰅴 8 3✕");
+		discoveredCount = 2;
+		discoveredRejections = 1;
+		await h.handlers.get("session_tree")?.({}, h.ctx);
+		expect(renderedText()).toContain("󰚩 0 · 󰀄 0 · 󰅴 2 1✕");
 		await h.handlers.get("session_shutdown")?.({}, h.ctx);
 		expect(h.getEventBusHandlerCount("code-quality:status")).toBe(0);
 	});

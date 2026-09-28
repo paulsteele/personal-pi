@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -11,8 +12,15 @@ import { runWorker as executeWorker } from "./worker.js";
 import { review as executeReview } from "./runner.js";
 export const runWorker: typeof executeWorker = (options) =>
 	executeWorker({ ...options, permissions: options.permissions ?? testAccess() });
-export const review: typeof executeReview = (options) =>
-	executeReview({ ...options, permissions: options.permissions ?? testPermissions() });
+export const review: typeof executeReview = (options) => {
+	const sessionManager =
+		options.ctx.sessionManager ?? SessionManager.inMemory("/fixture", { id: "pr-session" });
+	return executeReview({
+		...options,
+		ctx: { ...options.ctx, sessionManager },
+		permissions: options.permissions ?? testPermissions(),
+	});
+};
 import {
 	PermissionScope,
 	ReviewPermissions,

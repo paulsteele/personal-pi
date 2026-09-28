@@ -37,12 +37,17 @@ export interface QualityActivityStatus {
 	reviewAttempt?: number;
 }
 
+export interface QualityReviewCounts {
+	checkCount: number;
+	rejectionCount: number;
+}
+
 export interface QualityActivityPublisher {
 	reset(sessionId: string): void;
 	begin(toolCallId: string): void;
 	finishCollection(): void;
 	update(status: QualityActivityStatus): void;
-	updateHeader(status: QualityActivityStatus, modelId: string): void;
+	updateHeader(status: QualityActivityStatus, modelId: string, counts: QualityReviewCounts): void;
 	finishTool(toolCallId: string, phase: QualityActivityPhase): void;
 	requestDecision(kind: QualityDecisionKind): () => void;
 	dispose(): void;
@@ -55,7 +60,7 @@ export interface QualityActivityEvent extends QualityActivityStatus {
 	revision: number;
 }
 
-export interface QualityHeaderEvent extends QualityActivityStatus {
+export interface QualityHeaderEvent extends QualityActivityStatus, QualityReviewCounts {
 	version: 1;
 	sessionId: string;
 	revision: number;
@@ -161,18 +166,27 @@ export function createQualityActivityPublisher(events: ActivityTransport): Quali
 			)
 				batch.clear();
 		},
-		updateHeader(status: QualityActivityStatus, modelId: string) {
+		updateHeader(status: QualityActivityStatus, modelId: string, counts: QualityReviewCounts) {
 			if (disposed || !sessionId) return;
 			const publishedModelId = modelId.slice(0, 240);
 			if (
 				header?.phase === status.phase &&
 				header.modelId === publishedModelId &&
+				header.checkCount === counts.checkCount &&
+				header.rejectionCount === counts.rejectionCount &&
 				header.correctionAttempt === status.correctionAttempt &&
 				header.correctionLimit === status.correctionLimit &&
 				header.reviewAttempt === status.reviewAttempt
 			)
 				return;
-			header = { ...status, version: 1, sessionId, modelId: publishedModelId, revision: ++revision };
+			header = {
+				...status,
+				version: 1,
+				sessionId,
+				modelId: publishedModelId,
+				...counts,
+				revision: ++revision,
+			};
 			try {
 				events.emit(QUALITY_STATUS_CHANNEL, { ...header });
 			} catch {}

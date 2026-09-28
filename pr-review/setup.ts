@@ -116,6 +116,7 @@ export async function setup(
 	mode: "normal" | "edit" | "regenerate" = "normal",
 	openPermissions?: () => ReviewPermissions,
 ): Promise<string> {
+	const piSessionId = ctx.sessionManager.getSessionId();
 	const prior = await loadProfile(root, repo.id);
 	const paths = draftPaths(root, repo);
 	const pending = await readStored(root, paths.draft),
@@ -185,6 +186,7 @@ export async function setup(
 				schema: DiscoverySubmission,
 				system: systemPrompt(prompts, "discover"),
 				input: { files: files.slice(0, 1000), totalFiles: files.length, legacySkill },
+				piSessionId,
 				tools,
 				permissions: discoveryAccess,
 				signal,
@@ -219,6 +221,7 @@ export async function setup(
 				schema: ProfileDraft,
 				system: systemPrompt(prompts, "profile"),
 				input: { discovery: discovery.value, answers, previousProfile: prior?.profile },
+				piSessionId,
 				tools: snapshotTools(profileView),
 				permissions: profileAccess,
 				dependencies: discoveryAccess.dependencies,

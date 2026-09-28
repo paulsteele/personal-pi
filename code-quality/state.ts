@@ -146,6 +146,24 @@ export class CaseStore {
 		}
 	}
 }
+export function countRejectedReviews(entries: readonly unknown[]): number {
+	const previousPhaseByCase = new Map<string, string>();
+	let rejectionCount = 0;
+	for (const entry of entries) {
+		if (!entry || typeof entry !== "object") continue;
+		const item = entry as { type?: string; customType?: string; data?: unknown };
+		if (item.type !== "custom" || item.customType !== STATE_ENTRY) continue;
+		const ref = item.data as Partial<StateReference> | undefined;
+		if (ref?.version !== 1 || typeof ref.id !== "string" || typeof ref.phase !== "string") continue;
+		const receivedRejection =
+			previousPhaseByCase.get(ref.id) === "reviewing" &&
+			(ref.phase === "correcting" || ref.phase === "human");
+		if (receivedRejection) rejectionCount++;
+		previousPhaseByCase.set(ref.id, ref.phase);
+	}
+	return rejectionCount;
+}
+
 export function latestReference(entries: readonly unknown[]): StateReference | undefined {
 	for (const entry of [...entries].reverse()) {
 		if (!entry || typeof entry !== "object") continue;

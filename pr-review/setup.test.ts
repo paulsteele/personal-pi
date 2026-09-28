@@ -26,7 +26,12 @@ async function harness() {
 	await saveModel(root, "fake", "independent", "off");
 	const draft = { ...testDraft, requiredReading: ["AGENTS.md"], freshnessSources: ["AGENTS.md"] };
 	const ui = { select: vi.fn(), editor: vi.fn(), confirm: vi.fn().mockResolvedValue(false) };
-	const ctx = { ui, modelRegistry: {} } as unknown as ExtensionContext;
+	const piSessionId = "pr-session";
+	const ctx = {
+		ui,
+		modelRegistry: {},
+		sessionManager: { getSessionId: () => piSessionId },
+	} as unknown as ExtensionContext;
 	const generate = () => {
 		vi.mocked(runWorker).mockResolvedValueOnce({
 			ok: true,
@@ -65,6 +70,8 @@ it("prints an editable draft path and activates only through explicit approval",
 	expect(profile.draft.summary).toBe("Human edited summary");
 	expect(profile.sourceHashes).toEqual({});
 	expect(runWorker).toHaveBeenCalledTimes(2);
+	const ownerSessionIds = vi.mocked(runWorker).mock.calls.map(([options]) => options.piSessionId);
+	expect(ownerSessionIds).toEqual(["pr-session", "pr-session"]);
 });
 it("does not regenerate an approved profile when files change; edit is model-free", async () => {
 	const h = await harness();

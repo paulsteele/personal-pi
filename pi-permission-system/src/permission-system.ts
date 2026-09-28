@@ -455,6 +455,7 @@ async function modelDecision(
   toolCallId: string | null,
   options?: { request: ToolReviewRequest; state: ReviewState; actor?: DelegatedActor },
 ): Promise<ModelReviewResult> {
+  const piSessionId = ctx.sessionManager.getSessionId();
   const signal = options?.request.signal ?? ctx.signal;
   const config = options?.state.config ?? runtime.config;
   const cwd = options?.request.cwd ?? ctx.cwd;
@@ -514,6 +515,7 @@ async function modelDecision(
     return unavailable;
   }
   const response = await classify({
+    piSessionId,
     caller: ctx.modelRegistry,
     model: model!,
     facts,

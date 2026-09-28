@@ -147,6 +147,7 @@ export function buildPrompt(
 }
 
 export async function classify(options: {
+  piSessionId?: string | undefined;
   caller: Pick<ExtensionContext["modelRegistry"], "complete">;
   model: Model<Api>;
   facts: ReviewFacts;
@@ -154,6 +155,21 @@ export async function classify(options: {
   config: Config["auto"];
   signal?: AbortSignal;
 }): Promise<ClassifyResult> {
+  const headers =
+    options.model.provider === "litellm" && options.piSessionId !== undefined
+      ? { "x-litellm-trace-id": `pi-${encodeURIComponent(options.piSessionId)}-auto` }
+      : undefined;
+  const modelHeadersWithoutTraceId =
+    headers && options.model.headers
+      ? Object.fromEntries(
+          Object.entries(options.model.headers).filter(
+            ([name]) => name.toLowerCase() !== "x-litellm-trace-id",
+          ),
+        )
+      : undefined;
+  const requestModel = modelHeadersWithoutTraceId
+    ? { ...options.model, headers: modelHeadersWithoutTraceId }
+    : options.model;
   const timeout = new AbortController();
   let timedOut = false;
   let modelCalled = false;
@@ -177,7 +193,7 @@ export async function classify(options: {
       modelCalled = true;
       const response = await Promise.race([
         options.caller.complete(
-          options.model,
+          requestModel,
           {
             systemPrompt: buildSystemPrompt(options.facts),
             messages: [
@@ -188,7 +204,7 @@ export async function classify(options: {
             ],
             tools: [tool],
           },
-          { signal },
+          { signal, ...(headers ? { headers } : {}) },
         ),
         abortPromise,
       ]);

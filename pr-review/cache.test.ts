@@ -25,11 +25,11 @@ const measured: Usage = {
 };
 const submit = { name: "submit_result", args: { complete: true, limitations: [], findings: [] } };
 type Action = { name: string; args: unknown };
-function scripted(actions: Action[], window = 100000) {
+function scripted(actions: Action[], window = 100000, provider = "fake") {
 	const calls: Array<{ context: Context; options: SimpleStreamOptions; summary: boolean }> = [];
 	let at = 0;
 	const model = {
-		provider: "fake",
+		provider,
 		id: "test",
 		api: "openai-responses",
 		reasoning: false,
@@ -79,7 +79,7 @@ it("shares documentation prefixes while placing distinct lenses before any inlin
 	const prompts: string[] = [],
 		ids: string[] = [];
 	for (const lens of ["security", "correctness"]) {
-		const script = scripted([submit]);
+		const script = scripted([submit], 100000, "litellm");
 		const coverage = new CoverageLedger(["doc:rules.md", "diff:a.ts"]);
 		const result = await runWorker({
 			registry: script.registry,
@@ -92,6 +92,7 @@ it("shares documentation prefixes while placing distinct lenses before any inlin
 				assignedFiles: ["a.ts"],
 			},
 			assignment: { id: lens, focus: `Find ${lens} defects` },
+			piSessionId: "parent",
 			coverage,
 			sharedResources: resources([["doc:rules.md", "Shared guidance λ\n".repeat(300)]]),
 			resources: resources([["diff:a.ts", "DIFF-MARKER"]]),
@@ -103,6 +104,7 @@ it("shares documentation prefixes while placing distinct lenses before any inlin
 		const call = script.calls[0]!;
 		expect(call.options.cacheRetention).toBeUndefined();
 		ids.push(call.options.sessionId!);
+		expect(call.options.headers?.["x-litellm-trace-id"]).toBe("pi-parent-pr");
 		const inputMessage = call.context.messages.find((message) => message.role === "user")!;
 		const text = (inputMessage.content as Array<{ text: string }>)[0]!.text;
 		expect(text.indexOf("Shared guidance")).toBeLessThan(text.indexOf('"lens"'));
@@ -115,7 +117,7 @@ it("shares documentation prefixes while placing distinct lenses before any inlin
 	expect(ids[0]).not.toBe(ids[1]);
 });
 it("preserves routing and accounts for failed requests and continuations without changing retention", async () => {
-	const script = scripted([{ name: "$error", args: {} }, submit]);
+	const script = scripted([{ name: "$error", args: {} }, submit], 100000, "litellm");
 	const result = await runWorker({
 		registry: script.registry,
 		config: testConfig,
@@ -123,10 +125,15 @@ it("preserves routing and accounts for failed requests and continuations without
 		system: "Policy",
 		input: {},
 		sessionId: "stable-task",
+		piSessionId: "parent",
 		recover: async () => {},
 	});
 	expect(result.ok).toBe(true);
 	expect(script.calls.map((c) => c.options.sessionId)).toEqual(["stable-task", "stable-task"]);
+	expect(script.calls.map((c) => c.options.headers?.["x-litellm-trace-id"])).toEqual([
+		"pi-parent-pr",
+		"pi-parent-pr",
+	]);
 	expect(script.calls.every((c) => c.options.cacheRetention === undefined)).toBe(true);
 	expect(result.usage.cacheRead).toBe(measured.cacheRead * 2);
 	expect(result.usage.byRequest?.first.requests).toBe(1);
@@ -140,7 +147,7 @@ it("keeps the lens before paged diffs, restores it after compaction, and isolate
 	for (let cursor = 0; cursor < JSON.stringify(input).length; cursor += 8000)
 		actions.push({ name: "read_task_input", args: { cursor } });
 	actions.push(submit);
-	const script = scripted(actions, 14000);
+	const script = scripted(actions, 14000, "litellm");
 	const result = await runWorker({
 		registry: script.registry,
 		config: testConfig,
@@ -149,6 +156,7 @@ it("keeps the lens before paged diffs, restores it after compaction, and isolate
 		input,
 		assignment: lens,
 		sessionId: "paged-task",
+		piSessionId: "parent",
 		tools: [
 			{
 				name: "read_diff",
@@ -165,6 +173,9 @@ it("keeps the lens before paged diffs, restores it after compaction, and isolate
 	const ordinary = script.calls.filter((c) => !c.summary),
 		summaries = script.calls.filter((c) => c.summary);
 	expect(summaries.length).toBeGreaterThan(0);
+	expect(script.calls.every((call) => call.options.headers?.["x-litellm-trace-id"] === "pi-parent-pr")).toBe(
+		true,
+	);
 	for (const call of ordinary) {
 		expect(call.options.sessionId).toBe("paged-task");
 		expect(call.options.cacheRetention).toBeUndefined();

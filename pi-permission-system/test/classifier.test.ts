@@ -14,7 +14,7 @@ const auto = {
 type Complete = (
   model: Model<Api>,
   context: Context,
-  options?: Pick<StreamOptions, "signal">,
+  options?: StreamOptions,
 ) => Promise<AssistantMessage>;
 const model: Model<Api> = {
   id: "reviewer",
@@ -71,6 +71,49 @@ const facts = {
 const context = { cwd: "/repo", gitRemotes: [], recentUserTurns: [] };
 
 afterEach(() => vi.useRealTimers());
+
+it("retains the auto trace through malformed-response retries", async () => {
+  const complete = vi
+    .fn<Complete>()
+    .mockResolvedValueOnce(assistantResponse([]))
+    .mockResolvedValueOnce(assistantResponse([]))
+    .mockResolvedValueOnce(verdictResponse("allow"));
+  const result = await classify({
+    caller: { complete },
+    model: { ...model, provider: "litellm" },
+    piSessionId: "parent",
+    facts,
+    context,
+    config: auto,
+  });
+  expect(result.kind).toBe("allow");
+  expect(complete.mock.calls.map((call) => call[2]?.headers)).toEqual([
+    { "x-litellm-trace-id": "pi-parent-auto" },
+    { "x-litellm-trace-id": "pi-parent-auto" },
+    { "x-litellm-trace-id": "pi-parent-auto" },
+  ]);
+});
+
+it.each([
+  { provider: "litellm", piSessionId: undefined },
+  { provider: "openai", piSessionId: "parent" },
+  { provider: "litellm-alias", piSessionId: "parent" },
+])(
+  "omits auto tracking for $provider with owner $piSessionId",
+  async ({ provider, piSessionId }) => {
+    const complete = vi.fn<Complete>().mockResolvedValue(verdictResponse("allow"));
+    await classify({
+      caller: { complete },
+      model: { ...model, provider },
+      piSessionId,
+      facts,
+      context,
+      config: auto,
+    });
+    expect(complete.mock.calls[0]![2]?.headers).toBeUndefined();
+    expect(complete.mock.calls[0]![2]?.sessionId).toBeUndefined();
+  },
+);
 
 it("renders configured environment hints and risk markers", () => {
   const prompt = buildPrompt(

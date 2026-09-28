@@ -20,7 +20,7 @@ import {
 	type Finding,
 } from "./proposal.js";
 import { POLICY, review, type ReviewResult } from "./reviewer.js";
-import { CaseStore, latestReference, STATE_ENTRY } from "./state.js";
+import { CaseStore, countRejectedReviews, latestReference, STATE_ENTRY } from "./state.js";
 import type {
 	QualityActivityPhase,
 	QualityActivityPublisher,
@@ -83,6 +83,8 @@ export class QualityController {
 	private activityContext?: ExtensionContext;
 	private activityOverride?: QualityActivityPhase;
 	private reviewAttempt?: number;
+	private checkCount = 0;
+	private rejectionCount = 0;
 	private readonly activityCalls = new Map<
 		string,
 		{ path?: string; phase?: QualityActivityPhase; blocked: boolean }
@@ -158,7 +160,10 @@ export class QualityController {
 				? { reviewAttempt: this.reviewAttempt }
 				: {}),
 		};
-		this.ports.activity.updateHeader(status, this.modelKey());
+		this.ports.activity.updateHeader(status, this.modelKey(), {
+			checkCount: this.checkCount,
+			rejectionCount: this.rejectionCount,
+		});
 		this.ports.activity.update(status);
 	}
 	private status(ctx: ExtensionContext, text?: string): void {
@@ -204,6 +209,11 @@ export class QualityController {
 		this.activityContext = ctx;
 		this.activityOverride = undefined;
 		this.reviewAttempt = undefined;
+		const branch = ctx.sessionManager.getBranch();
+		this.checkCount = branch.filter(
+			(entry) => entry.type === "custom" && entry.customType === QUALITY_CHECK_ENTRY,
+		).length;
+		this.rejectionCount = countRejectedReviews(branch);
 		this.activityCalls.clear();
 		this.ports.activity?.reset(this.sessionId);
 		this.cwd = canonicalPath(ctx.cwd);
@@ -513,6 +523,7 @@ export class QualityController {
 		this.activityOverride = undefined;
 		this.reviewAttempt = undefined;
 		const generation = this.generation;
+		const piSessionId = ctx.sessionManager.getSessionId();
 		try {
 			await this.reconcile(ctx);
 			this.finishActivityCollection();
@@ -575,12 +586,14 @@ export class QualityController {
 			state.phase = "reviewing";
 			this.persist();
 			this.pi.appendEntry(QUALITY_CHECK_ENTRY, { caseId: state.id });
+			this.checkCount += 1;
 			this.status(ctx, CHECKING_QUALITY_LABEL);
 			const findings: Finding[] = [];
 			const edits: ProposedEdit[] = [];
 			const reasons: string[] = [];
 			for (const chunk of chunks) {
 				const response = await (this.ports.review ?? review)({
+					piSessionId,
 					registry: ctx.modelRegistry,
 					config: this.config,
 					request: {
@@ -626,6 +639,7 @@ export class QualityController {
 				proposed,
 			};
 			recordVerdict(state, verdict, responseRound);
+			if (verdict.verdict === "needs_work") this.rejectionCount += 1;
 			this.persist();
 			this.status(ctx);
 			if (verdict.verdict === "needs_work" && state.attempts >= state.limit) return await this.arbitrate(ctx);
@@ -807,7 +821,7 @@ export class QualityController {
 			}
 			requestReconsideration(state, args.rationale);
 			this.persist();
-			return "Disagreement recorded for the reviewer. It will be reconsidered at this batch boundary; operator arbitration waits until five unresolved rounds.";
+			return `Disagreement queued for reviewer reconsideration:\n\n${args.rationale}`;
 		}
 		const paths = (args.paths ?? []).map((path) => canonicalPath(resolve(ctx.cwd, path)));
 		if (!paths.length) throw new Error("Provide helper/test paths for scope expansion");

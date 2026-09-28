@@ -99,7 +99,7 @@ it("keeps attention consumers non-authoritative", () => {
 
 it("replays a standalone header without requiring a tool call", () => {
 	const h = harness();
-	h.publisher.updateHeader({ phase: "ready" }, "provider/model");
+	h.publisher.updateHeader({ phase: "ready" }, "provider/model", { checkCount: 0, rejectionCount: 0 });
 	expect(h.received).toEqual([]);
 	expect(h.headers).toHaveLength(1);
 	expect(h.headers[0]).toEqual({
@@ -108,6 +108,8 @@ it("replays a standalone header without requiring a tool call", () => {
 		revision: 1,
 		phase: "ready",
 		modelId: "provider/model",
+		checkCount: 0,
+		rejectionCount: 0,
 	});
 	h.headers.length = 0;
 	h.events.emit(QUALITY_ACTIVITY_DISCOVER_CHANNEL, { version: 1, sessionId: "session-a" });
@@ -118,10 +120,30 @@ it("replays a standalone header without requiring a tool call", () => {
 it("deduplicates long header model IDs after applying the published bound", () => {
 	const h = harness();
 	const longModelId = "m".repeat(300);
-	h.publisher.updateHeader({ phase: "ready" }, longModelId);
-	h.publisher.updateHeader({ phase: "ready" }, longModelId);
+	h.publisher.updateHeader({ phase: "ready" }, longModelId, { checkCount: 0, rejectionCount: 0 });
+	h.publisher.updateHeader({ phase: "ready" }, longModelId, { checkCount: 0, rejectionCount: 0 });
 	expect(h.headers).toHaveLength(1);
 	expect(h.headers[0]?.modelId).toHaveLength(240);
+});
+
+it("publishes changed review totals even when status is unchanged and replays the latest totals", () => {
+	const h = harness();
+	h.publisher.updateHeader({ phase: "checking" }, "provider/model", { checkCount: 1, rejectionCount: 0 });
+	h.publisher.updateHeader({ phase: "checking" }, "provider/model", { checkCount: 1, rejectionCount: 0 });
+	h.publisher.updateHeader({ phase: "checking" }, "provider/model", { checkCount: 2, rejectionCount: 0 });
+	h.publisher.updateHeader({ phase: "checking" }, "provider/model", { checkCount: 2, rejectionCount: 1 });
+	expect(h.headers.map(({ checkCount, rejectionCount }) => ({ checkCount, rejectionCount }))).toEqual([
+		{ checkCount: 1, rejectionCount: 0 },
+		{ checkCount: 2, rejectionCount: 0 },
+		{ checkCount: 2, rejectionCount: 1 },
+	]);
+	const latestHeader = h.headers.at(-1);
+	h.headers.length = 0;
+	h.events.emit(QUALITY_ACTIVITY_DISCOVER_CHANNEL, { version: 1, sessionId: "session-a" });
+	expect(h.headers).toEqual([latestHeader]);
+	h.publisher.reset("session-b");
+	h.publisher.updateHeader({ phase: "ready" }, "provider/model", { checkCount: 0, rejectionCount: 0 });
+	expect(h.headers.at(-1)).toMatchObject({ sessionId: "session-b", checkCount: 0, rejectionCount: 0 });
 });
 
 it("later header changes do not rewrite completed call history", () => {
@@ -130,7 +152,7 @@ it("later header changes do not rewrite completed call history", () => {
 	h.publisher.finishCollection();
 	h.publisher.update({ phase: "approved" });
 	h.received.length = 0;
-	h.publisher.updateHeader({ phase: "disabled" }, "provider/model");
+	h.publisher.updateHeader({ phase: "disabled" }, "provider/model", { checkCount: 1, rejectionCount: 0 });
 	h.publisher.update({ phase: "disabled" });
 	expect(h.received).toEqual([]);
 	expect(h.headers.at(-1)?.phase).toBe("disabled");

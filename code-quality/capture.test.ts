@@ -5,7 +5,7 @@ import { afterEach, expect, it } from "vitest";
 import { DEFAULT_CONFIG } from "./config.js";
 import { readSnapshot, canonicalPath, buildReviewChunks, CoverageError } from "./capture.js";
 import { newCase, recordVerdict, resolveCase, proposalApplied } from "./case.js";
-import { CaseStore, latestReference, STATE_ENTRY } from "./state.js";
+import { CaseStore, countRejectedReviews, latestReference, STATE_ENTRY } from "./state.js";
 import { validateVerdict } from "./proposal.js";
 const dirs: string[] = [];
 function fixture() {
@@ -184,6 +184,47 @@ it("counts five corrections after initial rejection, and user choices are exact"
 	state.files[0]!.after = "good";
 	expect(proposalApplied(state)).toBe(true);
 });
+function casePhaseEntry(id: string, phase: string) {
+	return { type: "custom", customType: STATE_ENTRY, data: { version: 1, id, phase } };
+}
+
+it("counts rejection transitions across cases without counting repeated persistence or approvals", () => {
+	expect(
+		countRejectedReviews([
+			casePhaseEntry("first", "reviewing"),
+			casePhaseEntry("first", "correcting"),
+			casePhaseEntry("first", "correcting"),
+			casePhaseEntry("first", "captured"),
+			casePhaseEntry("first", "reviewing"),
+			casePhaseEntry("first", "human"),
+			casePhaseEntry("first", "human"),
+			casePhaseEntry("first", "correcting"),
+			casePhaseEntry("first", "reviewing"),
+			casePhaseEntry("first", "closed"),
+			casePhaseEntry("second", "reviewing"),
+			casePhaseEntry("second", "correcting"),
+		]),
+	).toBe(3);
+});
+
+it("does not count interrupted reviews, manual resolution, or unrelated entries as rejections", () => {
+	expect(
+		countRejectedReviews([
+			casePhaseEntry("first", "reviewing"),
+			casePhaseEntry("first", "paused"),
+			casePhaseEntry("first", "human"),
+			casePhaseEntry("first", "correcting"),
+			casePhaseEntry("first", "reviewing"),
+			casePhaseEntry("first", "captured"),
+			casePhaseEntry("first", "human"),
+			null,
+			{ type: "custom", customType: "another-extension", data: { phase: "correcting" } },
+			{ type: "custom", customType: STATE_ENTRY, data: null },
+			{ type: "custom", customType: STATE_ENTRY, data: { version: 2, id: "first", phase: "correcting" } },
+		]),
+	).toBe(0);
+});
+
 it("persists private, hashed branch-local state and fails on missing/corrupt state", () => {
 	const { dir, cwd, path } = fixture();
 	const store = new CaseStore(join(dir, "agent"), cwd);

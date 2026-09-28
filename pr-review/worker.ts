@@ -6,6 +6,7 @@ import {
 	type AssistantMessage,
 	type Model,
 	type Api,
+	type ProviderHeaders,
 } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type Static, type TSchema } from "typebox";
@@ -78,6 +79,23 @@ function failure(
 		},
 	};
 }
+function prRequestIdentity(model: Model<Api>, headers: ProviderHeaders, piSessionId?: string) {
+	if (model.provider !== "litellm" || piSessionId === undefined) return { model, headers };
+	const removeLiteLLMTraceId = <Value extends string | null | undefined>(
+		headers: Record<string, Value>,
+	): Record<string, Value> =>
+		Object.fromEntries(
+			Object.entries(headers).filter(([headerName]) => headerName.toLowerCase() !== "x-litellm-trace-id"),
+		);
+	return {
+		model: model.headers ? { ...model, headers: removeLiteLLMTraceId(model.headers) } : model,
+		headers: {
+			...removeLiteLLMTraceId(headers),
+			"x-litellm-trace-id": `pi-${encodeURIComponent(piSessionId)}-pr`,
+		},
+	};
+}
+
 /** Public registry bridge. Only an individual request has a liveness timeout, never the whole worker. */
 export function registryStream(
 	registry: Registry,
@@ -85,6 +103,7 @@ export function registryStream(
 	request?: () => void,
 	response?: (message: AssistantMessage) => void,
 	permission?: { scope: PermissionScope; wait: PermissionWait; denied(error: PermissionBlocked): void },
+	piSessionId?: string,
 ): StreamFn {
 	return (model, context, options) => {
 		const output = createAssistantMessageEventStream();
@@ -123,12 +142,16 @@ export function registryStream(
 				if (closed || signal.aborted) return fail();
 				const provider = registry.getProvider(model.provider);
 				if (!auth.ok || !provider) return fail();
-				const effective = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
+				const identity = prRequestIdentity(
+					auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model,
+					{ ...auth.headers, ...options?.headers },
+					piSessionId,
+				);
 				const requestOptions = {
 					...options,
 					signal,
 					...(auth.apiKey ? { apiKey: auth.apiKey } : {}),
-					headers: { ...auth.headers, ...options?.headers },
+					headers: identity.headers,
 					env: { ...auth.env, ...options?.env },
 					timeoutMs: normalizeConfig(config).requestTimeoutMs,
 					maxRetries: 1,
@@ -143,7 +166,7 @@ export function registryStream(
 				}
 				if (closed || signal.aborted) return fail();
 				armTimer();
-				const stream = provider.streamSimple(effective, context, requestOptions);
+				const stream = provider.streamSimple(identity.model, context, requestOptions);
 				for await (const event of stream) {
 					if (closed) break;
 					timer?.refresh();
@@ -180,6 +203,7 @@ export function registryStream(
 	};
 }
 export async function runWorker<T extends TSchema>(options: {
+	piSessionId?: string | undefined;
 	registry: Registry;
 	config: Config;
 	schema: T;
@@ -252,6 +276,7 @@ export async function runWorker<T extends TSchema>(options: {
 				permissionFailure = error;
 			},
 		},
+		options.piSessionId,
 	);
 	let submitted = false,
 		invalidSubmission = false,

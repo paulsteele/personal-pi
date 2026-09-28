@@ -65,10 +65,73 @@ it("validates standalone header data without requiring a tool call", () => {
 		phase: "ready",
 		revision: 1,
 		modelId: "test/reviewer",
+		checkCount: 0,
+		rejectionCount: 0,
 	});
 	expect(parseQualityHeader({ ...header, modelId: "x".repeat(241) })).toBeUndefined();
 	expect(parseQualityHeader({ ...header, modelId: "bad\u001b[31m" })).toBeUndefined();
 	expect(parseQualityActivity(header)).toBeUndefined();
+});
+
+it("validates review totals separately from the bounded per-request attempt counter", () => {
+	const header = {
+		version: 1,
+		sessionId: "session",
+		phase: "checking",
+		revision: 10,
+		modelId: "test/reviewer",
+		checkCount: 150,
+		rejectionCount: 23,
+	};
+	expect(parseQualityHeader(header)).toMatchObject({ checkCount: 150, rejectionCount: 23 });
+	for (const checkCount of [-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, "2", null]) {
+		expect(parseQualityHeader({ ...header, checkCount })).toBeUndefined();
+		expect(parseQualityHeader({ ...header, rejectionCount: checkCount })).toBeUndefined();
+	}
+});
+
+it.each([28, 44])("shows all track counts at %s columns in every phase", (width) => {
+	const tracker = createRunActivityTracker({ cwd: "/repo" });
+	const theme = {
+		fg: (_role: string, text: string) => text,
+		bold: (text: string) => text,
+		italic: (text: string) => text,
+	};
+	for (const phase of ["idle", "running", "settled"] as const) {
+		if (phase === "running") {
+			tracker.startRun(0);
+			tracker.startTurn(0);
+		} else if (phase === "settled") tracker.settle(100);
+		const snapshot = buildSidebarSnapshot({
+			state: createInertAtelierState(null),
+			cwd: "/repo",
+			branchEntryCount: 0,
+			extensionStatuses: [],
+			runActivity: tracker.getSnapshot(),
+			autoModeState: { enabled: true, usable: true, modelId: "test/auto", allowed: 3, asked: 2 },
+			qualityHeader: {
+				sessionId: "session",
+				phase: "approved",
+				revision: 20,
+				modelId: "test/reviewer",
+				checkCount: 17,
+				rejectionCount: 3,
+			},
+		});
+		const lines = renderActivityLines(snapshot, theme, width, 12, false, 100);
+		const lowerRail = lines.find((line) => line.startsWith("│ ╰"))!;
+		expect(lowerRail).toMatch(/󰚩 3 (?:· )?󰀄 2 (?:· )?󰅴 17 3✕/);
+		if (width === 44) expect(lowerRail).toContain("󰚩 3 · 󰀄 2 · 󰅴 17 3✕");
+		const coloredRail = renderActivityLines(snapshot, { ...theme, name: "dark" }, width, 12, true, 100).find(
+			(line) => line.includes("╰"),
+		)!;
+		expect(coloredRail).toContain("\u001b[38;2;255;93;115m3✕\u001b[39m");
+		if (phase === "running") {
+			expect(lowerRail).toContain("󰲧");
+			expect(lowerRail).toContain("󰲠");
+		}
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+	}
 });
 
 it("places the Quality header immediately below auto and above the activity track", () => {
@@ -78,7 +141,14 @@ it("places the Quality header immediately below auto and above the activity trac
 		branchEntryCount: 0,
 		extensionStatuses: [],
 		autoModeState: { enabled: true, usable: true, modelId: "test/auto", allowed: 0, asked: 0 },
-		qualityHeader: { sessionId: "session", phase: "ready", revision: 1, modelId: "test/reviewer" },
+		qualityHeader: {
+			sessionId: "session",
+			phase: "ready",
+			revision: 1,
+			modelId: "test/reviewer",
+			checkCount: 0,
+			rejectionCount: 0,
+		},
 	});
 	const theme = {
 		fg: (_role: string, text: string) => text,
@@ -106,7 +176,14 @@ it.each(["checking", "approved", "needs_work", "user_approved", "disabled"] as c
 			cwd: "/repo",
 			branchEntryCount: 0,
 			extensionStatuses: [],
-			qualityHeader: { sessionId: "session", phase, revision: 1, modelId: "test/reviewer" },
+			qualityHeader: {
+				sessionId: "session",
+				phase,
+				revision: 1,
+				modelId: "test/reviewer",
+				checkCount: 0,
+				rejectionCount: 0,
+			},
 		});
 		const theme = {
 			fg: (_role: string, text: string) => text,
@@ -229,7 +306,7 @@ it.each([28, 44])("keeps classifier and quality badges on the same tool row at %
 	} else {
 		expect(plainRow).toMatch(/^│ edit a\.ts\s+󰚩 ✓  󰅴 ✓ done <1s$/);
 	}
-	expect(lines.filter((line) => line.includes("󰅴"))).toHaveLength(1);
+	expect(lines.filter((line) => line.includes("󰅴 ✓"))).toHaveLength(1);
 	for (const line of lines) {
 		expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 	}

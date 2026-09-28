@@ -54,6 +54,7 @@ function harness(mode: "tui" | "print" = "tui") {
 			getAvailable: vi.fn().mockReturnValue([model, { provider: "openai", id: "small" }]),
 		},
 		sessionManager: {
+			getSessionId: vi.fn().mockReturnValue("observer-session"),
 			buildContextEntries: vi.fn().mockReturnValue(entries),
 			getLeafId: vi.fn().mockReturnValue("leaf-1"),
 		},
@@ -72,6 +73,55 @@ const flush = async () => {
 };
 
 describe("progress observer extension", () => {
+	it("retains the saved owner across refresh, resume, reload, and tree navigation", async () => {
+		const h = harness();
+		for (const reason of ["startup", "resume", "reload"]) {
+			await h.handlers.get("session_start")?.({ reason }, h.ctx);
+			await h.commands.get("observer").handler("refresh", h.ctx);
+			await flush();
+		}
+		await h.handlers.get("session_tree")?.({}, h.ctx);
+		await flush();
+		expect(h.complete.mock.calls.length).toBeGreaterThanOrEqual(4);
+		expect(h.complete.mock.calls.map((call) => call[2].headers["x-litellm-trace-id"])).toEqual(
+			Array(h.complete.mock.calls.length).fill("pi-observer-session-activity"),
+		);
+		await h.handlers.get("session_shutdown")?.({}, h.ctx);
+	});
+
+	it.each(["new", "fork", "clone", "switch"])(
+		"captures a fresh owner on %s without relabeling a pending observation",
+		async (reason) => {
+			const h = harness();
+			let resolvePendingObservation!: (value: unknown) => void;
+			h.complete.mockImplementationOnce(
+				() =>
+					new Promise((resolve) => {
+						resolvePendingObservation = resolve;
+					}),
+			);
+			await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+			await h.commands.get("observer").handler("refresh", h.ctx);
+			await flush();
+			h.ctx.sessionManager.getSessionId.mockReturnValue("replacement-session");
+			await h.handlers.get("session_start")?.({ reason }, h.ctx);
+			await h.commands.get("observer").handler("refresh", h.ctx);
+			await flush();
+			resolvePendingObservation({ content: [], stopReason: "stop" });
+			await flush();
+			expect(h.complete.mock.calls[0]![2].headers).toEqual({
+				"x-litellm-trace-id": "pi-observer-session-activity",
+			});
+			expect(
+				h.complete.mock.calls
+					.slice(1)
+					.every((call) => call[2].headers["x-litellm-trace-id"] === "pi-replacement-session-activity"),
+			).toBe(true);
+			expect(h.complete.mock.calls.length).toBeGreaterThan(1);
+			await h.handlers.get("session_shutdown")?.({}, h.ctx);
+		},
+	);
+
 	it("runs fire-and-forget at the first four-turn lap boundary and publishes ready state", async () => {
 		const h = harness();
 		await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);

@@ -29,7 +29,12 @@ export interface QualityActivityEvent extends QualityActivity {
 	toolCallId: string;
 }
 
-export interface QualityHeader extends QualityActivity {
+export interface QualityReviewCounts {
+	checkCount: number;
+	rejectionCount: number;
+}
+
+export interface QualityHeader extends QualityActivity, QualityReviewCounts {
 	sessionId: string;
 	modelId: string;
 }
@@ -120,7 +125,8 @@ export function parseQualityActivity(value: unknown): QualityActivityEvent | und
 export function parseQualityHeader(value: unknown): QualityHeader | undefined {
 	const status = parseStatus(value);
 	if (!status) return;
-	const modelId = (value as Record<string, unknown>).modelId;
+	const { modelId, checkCount = 0, rejectionCount = 0 } = value as Record<string, unknown>;
+	if (!nonnegativeInteger(checkCount) || !nonnegativeInteger(rejectionCount)) return;
 	if (
 		typeof modelId !== "string" ||
 		modelId.length === 0 ||
@@ -128,5 +134,5 @@ export function parseQualityHeader(value: unknown): QualityHeader | undefined {
 		/[\u0000-\u001f\u007f-\u009f]/.test(modelId)
 	)
 		return;
-	return { ...status, modelId };
+	return { ...status, modelId, checkCount, rejectionCount };
 }

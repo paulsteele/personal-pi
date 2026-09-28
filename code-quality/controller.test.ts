@@ -13,6 +13,8 @@ import {
 	createQualityActivityPublisher,
 	QUALITY_ACTIVITY_CHANNEL,
 	QUALITY_ATTENTION_CHANNEL,
+	QUALITY_STATUS_CHANNEL,
+	type QualityHeaderEvent,
 	type QualityAttentionEvent,
 	type QualityActivityEvent,
 } from "./activity.js";
@@ -21,12 +23,14 @@ const dirs: string[] = [];
 afterEach(() => {
 	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
-function harness() {
+function harness(piSessionId = "session") {
 	const activityEvents: QualityActivityEvent[] = [];
 	const attentionEvents: QualityAttentionEvent[] = [];
+	const qualityHeaders: QualityHeaderEvent[] = [];
 	const captureActivityEvent = (channel: string, event: unknown) => {
 		if (channel === QUALITY_ACTIVITY_CHANNEL) activityEvents.push(event as QualityActivityEvent);
 		if (channel === QUALITY_ATTENTION_CHANNEL) attentionEvents.push(event as QualityAttentionEvent);
+		if (channel === QUALITY_STATUS_CHANNEL) qualityHeaders.push(event as QualityHeaderEvent);
 	};
 	const activity = createQualityActivityPublisher({
 		on: () => () => {},
@@ -49,7 +53,7 @@ function harness() {
 		cwd,
 		mode: "tui",
 		signal: undefined,
-		sessionManager: { getSessionId: () => "session", getBranch: () => entries },
+		sessionManager: { getSessionId: () => piSessionId, getBranch: () => entries },
 		ui: { setStatus: vi.fn(), notify: vi.fn(), confirm: vi.fn().mockResolvedValue(true) },
 		abort: vi.fn(),
 		modelRegistry: {},
@@ -74,6 +78,7 @@ function harness() {
 		runtime,
 		activityEvents,
 		attentionEvents,
+		qualityHeaders,
 		path: join(cwd, "a.ts"),
 	};
 }
@@ -89,12 +94,30 @@ async function edit(h: ReturnType<typeof harness>, text: string) {
 	writeFileSync(h.path, text);
 	return h.runtime.boundary(h.ctx, "completed");
 }
+it("uses the Pi owner rather than quality case IDs across edits and restored runtimes", async () => {
+	const h = harness("saved-owner");
+	await edit(h, "const count = 1;");
+	await edit(h, "const count = 2;");
+	h.runtime.start(h.ctx);
+	await edit(h, "const count = 3;");
+	const fork = harness("fork-owner");
+	await edit(fork, "const count = 4;");
+	expect(h.review.mock.calls.map(([options]) => options.piSessionId)).toEqual([
+		"saved-owner",
+		"saved-owner",
+		"saved-owner",
+	]);
+	expect(fork.review.mock.calls[0]![0].piSessionId).toBe("fork-owner");
+});
+
 it("logs checking once per review and attaches compact approval metadata", async () => {
 	const h = harness();
 	h.review.mockImplementation(async (options) => {
 		expect(h.pi.appendEntry).toHaveBeenCalledWith(QUALITY_CHECK_ENTRY, { caseId: h.runtime.state!.id });
+		expect(h.qualityHeaders.at(-1)?.checkCount).toBe(1);
 		options.onAttempt?.(1);
 		options.onAttempt?.(2);
+		expect(h.qualityHeaders.at(-1)?.checkCount).toBe(1);
 		return approved();
 	});
 	const result = await edit(h, "const count = 1;");
@@ -109,6 +132,50 @@ it("logs checking once per review and attaches compact approval metadata", async
 		},
 	]);
 	expect(h.ctx.ui.setStatus).toHaveBeenLastCalledWith("code-quality", "approved");
+	expect(h.qualityHeaders.at(-1)?.rejectionCount).toBe(0);
+});
+
+it("restores quality check totals from the active branch without carrying abandoned reviews", async () => {
+	const h = harness();
+	expect(h.qualityHeaders.at(-1)?.checkCount).toBe(0);
+	await edit(h, "const count = 1;");
+	expect(h.qualityHeaders.at(-1)?.checkCount).toBe(1);
+	const firstReviewBranch = [...h.entries];
+	await edit(h, "const count = 2;");
+	expect(h.qualityHeaders.at(-1)?.checkCount).toBe(2);
+	h.runtime.start(h.ctx);
+	expect(h.qualityHeaders.at(-1)?.checkCount).toBe(2);
+	h.entries.splice(0, h.entries.length, ...firstReviewBranch);
+	h.runtime.start(h.ctx);
+	expect(h.qualityHeaders.at(-1)?.checkCount).toBe(1);
+	h.entries.length = 0;
+	h.runtime.start(h.ctx);
+	expect(h.qualityHeaders.at(-1)?.checkCount).toBe(0);
+});
+
+it("restores rejection totals across review rounds, closed cases, and branch navigation", async () => {
+	const h = harness();
+	expect(h.qualityHeaders.at(-1)?.rejectionCount).toBe(0);
+	h.review.mockResolvedValueOnce(namingRejection(h.path, "x"));
+	await edit(h, "x");
+	expect(h.qualityHeaders.at(-1)).toMatchObject({ checkCount: 1, rejectionCount: 1 });
+	h.runtime.start(h.ctx);
+	expect(h.qualityHeaders.at(-1)?.rejectionCount).toBe(1);
+	await disagree(h, "This is a coordinate name.");
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.qualityHeaders.at(-1)).toMatchObject({ checkCount: 2, rejectionCount: 1 });
+	const approvedBranch = [...h.entries];
+	h.review.mockResolvedValueOnce(namingRejection(h.path, "y"));
+	await edit(h, "y");
+	expect(h.qualityHeaders.at(-1)).toMatchObject({ checkCount: 3, rejectionCount: 2 });
+	h.runtime.start(h.ctx);
+	expect(h.qualityHeaders.at(-1)?.rejectionCount).toBe(2);
+	h.entries.splice(0, h.entries.length, ...approvedBranch);
+	h.runtime.start(h.ctx);
+	expect(h.qualityHeaders.at(-1)).toMatchObject({ checkCount: 2, rejectionCount: 1 });
+	h.entries.length = 0;
+	h.runtime.start(h.ctx);
+	expect(h.qualityHeaders.at(-1)).toMatchObject({ checkCount: 0, rejectionCount: 0 });
 });
 
 it("numbers rejection log lines from one", async () => {
@@ -127,6 +194,7 @@ it("numbers rejection log lines from one", async () => {
 		content: expect.stringContaining(h.runtime.state!.id),
 	});
 	expect(h.ctx.ui.setStatus).toHaveBeenLastCalledWith("code-quality", "handling rejection 2");
+	expect(h.qualityHeaders.at(-1)).toMatchObject({ checkCount: 2, rejectionCount: 2 });
 });
 
 it("does not label an explicitly waived failed review as approved", async () => {
@@ -140,6 +208,9 @@ it("does not label an explicitly waived failed review as approved", async () => 
 	const result = await edit(h, "const count = 1;");
 	expect(result?.entries?.[0]).toMatchObject({ details: { outcome: "waived" } });
 	expect(h.ctx.ui.setStatus).toHaveBeenLastCalledWith("code-quality", "waived");
+	expect(h.qualityHeaders.at(-1)).toMatchObject({ checkCount: 1, rejectionCount: 0 });
+	h.runtime.start(h.ctx);
+	expect(h.qualityHeaders.at(-1)?.rejectionCount).toBe(0);
 });
 
 it("brackets a pending failure decision with attention events", async () => {
@@ -225,6 +296,7 @@ it("publishes one batch verdict to all corresponding edit/write IDs", async () =
 	h.runtime.finishTool("write-a", false);
 	h.runtime.finishTool("write-b", false);
 	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.qualityHeaders.at(-1)?.checkCount).toBe(1);
 	const approvals = h.activityEvents.filter((event) => event.phase === "approved");
 	expect(approvals).toEqual([
 		{
@@ -252,6 +324,7 @@ it("shows quality exclusions and blocked calls without claiming they were review
 	await h.runtime.beforeTool("write", { path: "" }, h.ctx, "invalid");
 	h.runtime.finishTool("invalid", true);
 	expect(h.activityEvents.at(-1)).toMatchObject({ toolCallId: "invalid", phase: "blocked" });
+	expect(h.qualityHeaders.at(-1)?.checkCount).toBe(0);
 });
 
 it("old preparation cannot publish activity into a replacement session", async () => {
@@ -348,6 +421,9 @@ it("arbitrates only after five disagreements and verifies exact user-approved ap
 	expect(h.runtime.state?.phase).toBe("applying");
 	await edit(h, "const count = 1;");
 	expect(h.runtime.state?.resolution).toBe("user_approved");
+	expect(h.qualityHeaders.at(-1)).toMatchObject({ checkCount: 6, rejectionCount: 6 });
+	h.runtime.start(h.ctx);
+	expect(h.qualityHeaders.at(-1)?.rejectionCount).toBe(6);
 	expect(h.review).toHaveBeenCalledTimes(6);
 	expect(h.review.mock.calls[1]![0].request.objection).toBe("Short name is sufficient");
 	expect(readFileSync(h.path, "utf8")).toBe("const count = 1;");
@@ -366,8 +442,8 @@ function namingRejection(path: string, currentText: string): ReviewResult {
 	};
 }
 
-async function disagree(h: ReturnType<typeof harness>, rationale: string): Promise<void> {
-	await h.runtime.respond(
+async function disagree(h: ReturnType<typeof harness>, rationale: string): Promise<string> {
+	return h.runtime.respond(
 		{
 			action: "disagree",
 			caseId: h.runtime.state!.id,
@@ -378,11 +454,14 @@ async function disagree(h: ReturnType<typeof harness>, rationale: string): Promi
 	);
 }
 
-it("lets the reviewer approve a disagreement without contacting the operator", async () => {
+it("echoes the disagreement and lets the reviewer approve it without operator arbitration", async () => {
 	const h = harness();
 	h.review.mockResolvedValueOnce(namingRejection(h.path, "x"));
 	await edit(h, "x");
-	await disagree(h, "The name is the coordinate used in the surrounding formula.");
+	const response = await disagree(h, "The name is the coordinate used in the surrounding formula.");
+	expect(response).toBe(
+		"Disagreement queued for reviewer reconsideration:\n\nThe name is the coordinate used in the surrounding formula.",
+	);
 	expect(h.runtime.state?.phase).toBe("captured");
 	expect(h.runtime.state?.attempts).toBe(0);
 	const result = await h.runtime.boundary(h.ctx, "completed");
@@ -432,7 +511,9 @@ it("restores pending reconsideration after a provider failure without spending a
 	});
 	await h.runtime.boundary(h.ctx, "completed");
 	expect(h.runtime.state).toMatchObject({ attempts: 0, reconsiderationPending: true, phase: "paused" });
+	expect(h.qualityHeaders.at(-1)).toMatchObject({ checkCount: 2, rejectionCount: 1 });
 	h.runtime.start(h.ctx);
+	expect(h.qualityHeaders.at(-1)?.rejectionCount).toBe(1);
 	expect(h.runtime.state?.objection).toBe("This is the coordinate's domain name.");
 	await h.runtime.command("retry", h.ctx);
 	await h.runtime.boundary(h.ctx, "completed");
@@ -459,6 +540,7 @@ it("counts a reconsideration across file groups only after every group returns a
 	await disagree(h, "These are the coordinate names.");
 	await h.runtime.boundary(h.ctx, "completed");
 	expect(h.review).toHaveBeenCalledTimes(4);
+	expect(h.qualityHeaders.at(-1)).toMatchObject({ checkCount: 2, rejectionCount: 2 });
 	expect(h.runtime.state?.attempts).toBe(1);
 	expect(h.review.mock.calls[2]![0].request.objection).toBe("These are the coordinate names.");
 	expect(h.review.mock.calls[3]![0].request.objection).toBe("These are the coordinate names.");

@@ -65,15 +65,57 @@ it("rejects ambiguous, overlapping and out-of-scope proposals", () => {
 		validateVerdict({ ...rejection, edits: [{ ...rejection.edits[0], file: "../bad" }] }, [file]),
 	).toThrow();
 });
-function registry(complete: ReturnType<typeof vi.fn>): ReviewerRegistry {
+function registry(complete: ReturnType<typeof vi.fn>, provider = "test"): ReviewerRegistry {
 	return {
-		find: () => ({ provider: "test", id: "m", contextWindow: 100_000, maxTokens: 8000 }),
+		find: () => ({ provider, id: "m", contextWindow: 100_000, maxTokens: 8000 }),
 		hasConfiguredAuth: () => true,
 		complete,
 	} as unknown as ReviewerRegistry;
 }
 const config = { ...DEFAULT_CONFIG, provider: "test", model: "m" };
 const request = { files: [file], input: JSON.stringify(file), notes: [] };
+it("keeps one quality trace across provider failure and validation repair", async () => {
+	vi.useFakeTimers();
+	const complete = vi
+		.fn()
+		.mockRejectedValueOnce(new Error("offline"))
+		.mockResolvedValueOnce({ stopReason: "stop", content: [] })
+		.mockResolvedValueOnce({
+			stopReason: "toolUse",
+			content: [{ type: "toolCall", name: "submit_quality_verdict", arguments: approval }],
+		});
+	const pending = review({
+		registry: registry(complete, "litellm"),
+		config: { ...config, provider: "litellm" },
+		request,
+		piSessionId: "parent",
+	});
+	await vi.runAllTimersAsync();
+	expect((await pending).kind).toBe("verdict");
+	expect(complete.mock.calls.map((call) => call[2].headers)).toEqual([
+		{ "x-litellm-trace-id": "pi-parent-quality" },
+		{ "x-litellm-trace-id": "pi-parent-quality" },
+		{ "x-litellm-trace-id": "pi-parent-quality" },
+	]);
+});
+it.each([
+	{ provider: "litellm", piSessionId: undefined },
+	{ provider: "openai", piSessionId: "parent" },
+	{ provider: "litellm-alias", piSessionId: "parent" },
+])("omits quality tracking for $provider with owner $piSessionId", async ({ provider, piSessionId }) => {
+	const complete = vi.fn().mockResolvedValue({
+		stopReason: "toolUse",
+		content: [{ type: "toolCall", name: "submit_quality_verdict", arguments: approval }],
+	});
+	await review({
+		registry: registry(complete, provider),
+		config: { ...config, provider },
+		request,
+		piSessionId,
+	});
+	expect(complete.mock.calls[0]![2].headers).toBeUndefined();
+	expect(complete.mock.calls[0]![2].sessionId).toBeUndefined();
+});
 it("does not call a model without an explicit selection", async () => {
 	const complete = vi.fn();
 	expect((await review({ registry: registry(complete), config: DEFAULT_CONFIG, request })).kind).toBe(
