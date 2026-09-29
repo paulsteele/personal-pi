@@ -17,6 +17,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Decision, QualityUI } from "./controller.js";
 import type { QualityCase } from "./case.js";
+import { diagnosticLabel } from "./lsp-diagnostics.js";
 import { CHECKING_QUALITY_LABEL, qualityFeedbackLabel } from "./feedback.js";
 
 function plain(value: string): string {
@@ -30,6 +31,14 @@ export function reviewText(state: QualityCase): string {
 		`Case ${state.id}`,
 		`Reviewer: ${plain(state.verdict?.rationale ?? "")}`,
 	];
+	if (state.lsp?.findings.length) {
+		parts.push(
+			"LSP diagnostics — all severities require resolution",
+			...state.lsp.findings.map((finding) => plain(diagnosticLabel(finding))),
+		);
+		for (const file of state.files)
+			parts.push(`${plain(file.path)} — current code\n${plain(file.after ?? "(deleted)")}`);
+	}
 	if (state.objection) parts.push(`Agent disagreement: ${plain(state.objection)}`);
 	for (const finding of state.verdict?.findings ?? [])
 		parts.push(`${plain(finding.file)}:${finding.line} [${finding.rule}] ${plain(finding.rationale)}`);
@@ -64,14 +73,19 @@ export class ArbitrationPanel implements Component {
 	private wrapped: string[] = [];
 	private lastWidth = 0;
 	private focusedValue = false;
-	private readonly labels = ["Accept original", "Accept proposed", "Allow another five cycles"];
-	private readonly choices = ["original", "proposed", "continue"] as const;
+	private readonly labels: string[];
+	private readonly choices: Decision["choice"][];
 	constructor(
 		private tui: TUI,
 		private theme: Theme,
 		private state: QualityCase,
 		private done: (decision: Decision | undefined) => void,
 	) {
+		const hasProposal = Boolean(state.verdict?.edits.length);
+		this.labels = hasProposal
+			? ["Accept original", "Accept proposed", "Allow another five cycles"]
+			: ["Accept original", "Allow another five cycles"];
+		this.choices = hasProposal ? ["original", "proposed", "continue"] : ["original", "continue"];
 		this.editor = new Editor(tui, {
 			borderColor: (text) => theme.fg("border", text),
 			selectList: {
@@ -148,8 +162,9 @@ export class ArbitrationPanel implements Component {
 			this.done({ choice: this.choices[this.selected]!, note: "" });
 			return;
 		}
-		if (matchesKey(data, Key.up)) this.selected = (this.selected + 2) % 3;
-		if (matchesKey(data, Key.down)) this.selected = (this.selected + 1) % 3;
+		if (matchesKey(data, Key.up))
+			this.selected = (this.selected + this.choices.length - 1) % this.choices.length;
+		if (matchesKey(data, Key.down)) this.selected = (this.selected + 1) % this.choices.length;
 		if (matchesKey(data, "n")) {
 			this.mode = "notes";
 			this.editor.focused = this.focused;

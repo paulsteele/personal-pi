@@ -19,12 +19,25 @@ for (const required of [
 	"reviewer.ts",
 	"proposal.ts",
 	"ui.ts",
+	"lsp-client.ts",
+	"lsp-manager.ts",
+	"lsp-broker.ts",
+	"lsp-broker-protocol.ts",
+	"lsp-broker-registry.ts",
+	"lsp-broker-host.mjs",
+	"lsp-process-guard.mjs",
+	"lsp-profile.ts",
+	"lsp-presets.ts",
+	"lsp-setup.ts",
+	"lsp-install.ts",
+	"lsp-commands.ts",
+	"lsp-diagnostics.ts",
 	"policy.md",
 	"examples.md",
 	"README.md",
 ])
 	if (!files.has(required)) throw new Error(`Missing packaged file: ${required}`);
 for (const path of files)
-	if (/\.test\.|vitest|biome|tsconfig|calibrate/.test(path))
+	if (/\.test\.|vitest|biome|tsconfig|calibrate|fixtures\/|lsp-probe/.test(path))
 		throw new Error(`Unexpected development file: ${path}`);
 console.log(`Quality package contents verified (${files.size} files)`);

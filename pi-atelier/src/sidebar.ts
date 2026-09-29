@@ -671,7 +671,35 @@ function activityBandRows(
 	if (snapshot.qualityHeader) {
 		const quality = snapshot.qualityHeader;
 		const header = `${QUALITY_ICON} quality · ${quality.modelId}`;
-		rows.push(centeredTrackContent(palette.paint("accent", header), leadWidth, " "));
+		const phaseSymbols = {
+			connecting: "⟳",
+			starting: "⟳",
+			loading: "⟳",
+			checking: "⟳",
+			ready: "●",
+			failed: "✕",
+			stopping: "○",
+			stopped: "○",
+			disabled: "○",
+			unconfigured: "○",
+		};
+		const serverLabels = (quality.lsp ?? []).map((server) => {
+			const symbol = phaseSymbols[server.phase];
+			const sharing = server.clients > 1 ? ` ×${server.clients}` : "";
+			const name = server.id === server.name ? server.name : `${server.id} (${server.name})`;
+			return `${name} ${symbol} ${server.queued ? "queued" : server.phase}${sharing}`;
+		});
+		let line = header;
+		for (const label of serverLabels) {
+			const candidateLine = `${line} · ${label}`;
+			const fitsCurrentLine = visibleWidth(candidateLine) <= leadWidth;
+			if (fitsCurrentLine) line = candidateLine;
+			else {
+				rows.push(centeredTrackContent(palette.paint("accent", line), leadWidth, " "));
+				line = truncateToWidth(`  ${label}`, leadWidth);
+			}
+		}
+		rows.push(centeredTrackContent(palette.paint("accent", line), leadWidth, " "));
 	}
 	rows.push(
 		...activityTrackRows(

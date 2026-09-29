@@ -33,6 +33,28 @@ const Snapshot = Type.Object({
 	before: Type.Union([Text, Type.Null()]),
 	after: Type.Union([Text, Type.Null()]),
 });
+const LspPosition = Type.Object({
+	line: Type.Integer({ minimum: 0 }),
+	character: Type.Integer({ minimum: 0 }),
+});
+const LspAssessmentSchema = Type.Object({
+	findings: Type.Array(
+		Type.Object({
+			file: Text,
+			serverId: Text,
+			provider: OptionalText,
+			severity: Type.Optional(Type.Integer({ minimum: 1, maximum: 4 })),
+			code: Type.Optional(Type.Union([Type.String(), Type.Number()])),
+			message: Text,
+			tags: Type.Optional(Type.Array(Type.Number())),
+			range: Type.Object({ start: LspPosition, end: LspPosition }),
+		}),
+	),
+	revision: Text,
+	configuration: Text,
+	workspaceRevision: Type.Integer({ minimum: 0 }),
+	generation: Text,
+});
 const CaseSchema = Type.Object({
 	version: Type.Literal(1),
 	id: Text,
@@ -52,6 +74,9 @@ const CaseSchema = Type.Object({
 	pendingPaths: Type.Array(Text),
 	scope: Type.Array(Text),
 	objection: OptionalText,
+	lsp: Type.Optional(LspAssessmentSchema),
+	lspWaived: Type.Optional(Type.Boolean()),
+	lspRequired: Type.Optional(Type.Boolean()),
 	reason: OptionalText,
 	verdict: Type.Optional(
 		Type.Object({

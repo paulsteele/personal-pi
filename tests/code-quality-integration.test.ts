@@ -12,18 +12,30 @@ import type { ReviewResult } from "../code-quality/reviewer.ts";
 import { parseQualityActivity, parseQualityHeader, type QualityHeader } from "../pi-atelier/src/quality-activity.ts";
 import { createRunActivityTracker } from "../pi-atelier/src/run-activity.ts";
 import { QUALITY_CHECK_ENTRY } from "../code-quality/feedback.ts";
+import { approveLspDraft, loadLspDraft, resolveLspProject, saveLspDraft } from "../code-quality/lsp-profile.ts";
 
 const directories: string[] = [];
 afterEach(() => { for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true }); });
 const approved = (): ReviewResult => ({ kind: "verdict", value: { verdict: "approved", rationale: "Clear", findings: [], edits: [], proposed: {} }, metrics: { requests: 1, latencyMs: 1, usages: [] } });
 
-async function fixture(review: (options: any) => Promise<ReviewResult>, calls: string[], denied = false, uiOverride: Partial<QualityUI> = {}, script?: (turn: number, context: Context) => unknown[]) {
+async function configureFixtureLsp(agentDir: string, cwd: string) {
+  const project = await resolveLspProject(cwd, agentDir);
+  await saveLspDraft(agentDir, project, { version: 1, projectId: project.id, enabled: true, routes: [{
+    id: "fixture", root: ".", preset: "custom", command: process.execPath,
+    args: [join(import.meta.dir, "../code-quality/fixtures/lsp-probe-server.mjs")], version: "1",
+    extensions: { ".txt": "plaintext" }, env: {}, settings: {}, initializationOptions: {}, startupTimeoutMs: 10000, diagnosticTimeoutMs: 2000,
+  }] });
+  await approveLspDraft(agentDir, project, (await loadLspDraft(agentDir, project))!.revision);
+}
+
+async function fixture(review: (options: any) => Promise<ReviewResult>, calls: string[], denied = false, uiOverride: Partial<QualityUI> = {}, script?: (turn: number, context: Context) => unknown[], lspOptions: { configureLsp?: boolean } = {}) {
   const root = canonicalPath(mkdtempSync(join(tmpdir(), "pi-quality-integration-"))); directories.push(root);
   const cwd = join(root, "repo"), agentDir = join(root, "agent"); mkdirSync(cwd); mkdirSync(agentDir);
   const activity = createRunActivityTracker({ cwd });
   const qualityHeaders: QualityHeader[] = [];
   saveConfig(agentDir, { provider: "synthetic", model: "fixture" });
-  const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+  if (lspOptions.configureLsp) await configureFixtureLsp(agentDir, cwd);
+  const settingsManager = SettingsManager.inMemory({ defaultProjectTrust: "always", compaction: { enabled: false }, retry: { enabled: false } });
   const ui: QualityUI = { arbitrate: async () => ({ choice: "original", note: "Fixture decision" }), coverage: async () => undefined, failure: async () => undefined, ...uiOverride };
   const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, extensionFactories: [
     (pi) => { if (denied) pi.on("tool_call", (event) => event.toolName === "write" ? { block: true, reason: "Synthetic permission denial" } : undefined); },
@@ -64,6 +76,29 @@ async function fixture(review: (options: any) => Promise<ReviewResult>, calls: s
   };
   return { session, cwd, errors, activity, qualityHeaders };
 }
+
+test("real Pi receives LSP warnings on the write result and fixes them before readability review", async () => {
+  const calls: string[] = [];
+  const h = await fixture(async () => { calls.push("review"); return approved(); }, calls, false, {}, (turn, context) => {
+    if (turn === 1) return [{ type: "toolCall", id: "lsp-broken", name: "write", arguments: { path: "example.txt", content: "2" } }];
+    if (turn === 2) {
+      expect(calls).toEqual(["main:1", "main:2"]);
+      expect(JSON.stringify(context)).toContain("fixture/warning");
+      expect(JSON.stringify(context)).toContain("file was written");
+      return [{ type: "toolCall", id: "lsp-fixed", name: "write", arguments: { path: "example.txt", content: "clean" } }];
+    }
+    return [{ type: "text", text: "Done" }];
+  }, { configureLsp: true });
+  try {
+    await h.session.prompt("Write and validate the fixture.");
+    expect(h.errors).toEqual([]);
+    expect(calls).toEqual(["main:1", "main:2", "review", "main:3"]);
+    expect(h.qualityHeaders.at(-1)).toMatchObject({ phase: "approved", checkCount: 2, rejectionCount: 1, lsp: [{ id: "fixture" }] });
+  } finally {
+    await h.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    h.session.dispose();
+  }
+}, 30000);
 
 test("real Pi waits for the post-write verdict before the next primary request", async () => {
   const calls: string[] = []; let release!: (result: ReviewResult) => void;

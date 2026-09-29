@@ -7,8 +7,10 @@ import { canonicalPath } from "./capture.js";
 import { QualityController, type QualityUI } from "./controller.js";
 import { saveConfig } from "./config.js";
 import { revision } from "./case.js";
+import { digest } from "./proposal.js";
 import { review as runReview, type ReviewResult } from "./reviewer.js";
 import { QUALITY_CHECK_ENTRY } from "./feedback.js";
+import type { LspCheckResult } from "./lsp-diagnostics.js";
 import {
 	createQualityActivityPublisher,
 	QUALITY_ACTIVITY_CHANNEL,
@@ -94,6 +96,192 @@ async function edit(h: ReturnType<typeof harness>, text: string) {
 	writeFileSync(h.path, text);
 	return h.runtime.boundary(h.ctx, "completed");
 }
+it.each([1, 2, 3, 4, undefined])(
+	"routes LSP severity %s through the shared case before model review",
+	async (severity) => {
+		const h = harness();
+		const check = vi.fn(
+			async (): Promise<LspCheckResult> => ({
+				kind: "checked",
+				findings: [
+					{
+						file: h.path,
+						serverId: "fixture",
+						severity: severity as 1 | 2 | 3 | 4 | undefined,
+						message: "Resolve this diagnostic",
+						range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+					},
+				],
+				generation: "server",
+				workspaceRevision: 0,
+				hashes: {},
+				elapsedMs: 1,
+			}),
+		);
+		h.runtime.ports.lsp = { check, revision: 0, configRevision: "profile" };
+		await edit(h, "const count = 1;");
+		expect(h.review).not.toHaveBeenCalled();
+		expect(h.runtime.state).toMatchObject({
+			phase: "correcting",
+			attempts: 0,
+			lsp: { findings: [{ message: "Resolve this diagnostic" }] },
+		});
+		const caseId = h.runtime.state!.id;
+		check.mockResolvedValue({
+			kind: "checked",
+			findings: [],
+			generation: "server",
+			workspaceRevision: 0,
+			hashes: {},
+			elapsedMs: 1,
+		});
+		await edit(h, "const count = 2;");
+		expect(h.review).toHaveBeenCalledTimes(1);
+		expect(h.runtime.state).toMatchObject({ id: caseId, phase: "closed", attempts: 1 });
+	},
+);
+
+it("preserves correction rounds when LSP is unavailable and the operator waives only LSP", async () => {
+	const h = harness();
+	h.ctx.ui.select = vi.fn().mockResolvedValue("Waive LSP for this case");
+	h.runtime.ports.lsp = {
+		revision: 0,
+		configRevision: "profile",
+		check: vi.fn(async () => ({ kind: "unavailable" as const, reason: "Server crashed" })),
+	};
+	await edit(h, "const count = 1;");
+	expect(h.runtime.state).toMatchObject({ phase: "closed", attempts: 0, lspWaived: true });
+	expect(h.review).toHaveBeenCalledTimes(1);
+});
+
+it("requires an explicit LSP waiver after coverage disappears from a pending case", async () => {
+	const h = harness();
+	const check = vi.fn(
+		async (): Promise<LspCheckResult | undefined> => ({ kind: "stale", reason: "Concurrent edit" }),
+	);
+	h.runtime.ports.lsp = { revision: 0, configRevision: "profile", check };
+	await edit(h, "const count = 1;");
+	expect(h.runtime.state?.lspRequired).toBe(true);
+	check.mockResolvedValue(undefined);
+	h.ctx.ui.select = vi.fn().mockResolvedValue("Waive LSP for this case");
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.ctx.ui.select).toHaveBeenCalledTimes(1);
+	expect(h.runtime.state).toMatchObject({ phase: "closed", lspWaived: true, attempts: 0 });
+});
+
+it("restores LSP findings and their correction counter from the active branch", async () => {
+	const h = harness();
+	const informationFinding = {
+		file: h.path,
+		serverId: "fixture",
+		severity: 3 as const,
+		message: "Information remains",
+		range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+	};
+	const checkedResult = {
+		kind: "checked" as const,
+		findings: [informationFinding],
+		generation: "server",
+		workspaceRevision: 0,
+		hashes: {},
+		elapsedMs: 1,
+	};
+	h.runtime.ports.lsp = { revision: 0, configRevision: "profile", check: vi.fn(async () => checkedResult) };
+	await edit(h, "const count = 1;");
+	await edit(h, "const count = 2;");
+	const caseId = h.runtime.state!.id;
+	h.runtime.start(h.ctx);
+	expect(h.runtime.state).toMatchObject({
+		id: caseId,
+		attempts: 1,
+		lspRequired: true,
+		lsp: { findings: [{ severity: 3 }] },
+	});
+	expect(h.qualityHeaders.at(-1)?.rejectionCount).toBe(2);
+});
+
+it("keeps LSP findings after applying an exact operator-approved readability proposal", async () => {
+	const h = harness();
+	await edit(h, "const count = 1;");
+	const state = h.runtime.state!;
+	state.phase = "applying";
+	state.attempts = state.limit;
+	state.resolution = undefined;
+	state.approvedTargets = { [h.path]: digest("const count = 1;") };
+	h.runtime.ports.lsp = {
+		revision: 0,
+		configRevision: "profile",
+		check: vi.fn(async () => ({
+			kind: "checked" as const,
+			findings: [
+				{
+					file: h.path,
+					serverId: "fixture",
+					severity: 2 as const,
+					message: "Warning from approved patch",
+					range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+				},
+			],
+			generation: "server",
+			workspaceRevision: 0,
+			hashes: {},
+			elapsedMs: 1,
+		})),
+	};
+	vi.mocked(h.ui.arbitrate).mockResolvedValue({ choice: "continue", note: "Fix this warning" });
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.ui.arbitrate).toHaveBeenCalledTimes(1);
+	expect(state).toMatchObject({
+		phase: "correcting",
+		attempts: 5,
+		limit: 10,
+		lsp: { findings: [{ severity: 2 }] },
+	});
+	expect(state.approvedTargets).toBeUndefined();
+});
+
+it("arbitrates LSP findings without a proposal after five unsuccessful responses", async () => {
+	const h = harness();
+	h.runtime.ports.lsp = {
+		revision: 0,
+		configRevision: "profile",
+		check: vi.fn(async () => ({
+			kind: "checked" as const,
+			findings: [
+				{
+					file: h.path,
+					serverId: "fixture",
+					severity: 4 as const,
+					message: "Hint remains",
+					range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+				},
+			],
+			generation: "server",
+			workspaceRevision: 0,
+			hashes: {},
+			elapsedMs: 1,
+		})),
+	};
+	vi.mocked(h.ui.arbitrate).mockResolvedValue({ choice: "original", note: "Accept this hint" });
+	await edit(h, "const count = 1;");
+	for (let response = 0; response < 5; response++) {
+		expect(h.ui.arbitrate).not.toHaveBeenCalled();
+		await h.runtime.respond(
+			{
+				action: "disagree",
+				caseId: h.runtime.state!.id,
+				revision: revision(h.runtime.state!),
+				rationale: "Intentional",
+			},
+			h.ctx,
+		);
+		await h.runtime.boundary(h.ctx, "completed");
+	}
+	expect(h.ui.arbitrate).toHaveBeenCalledTimes(1);
+	expect(h.runtime.state).toMatchObject({ phase: "closed", resolution: "user_approved", attempts: 5 });
+	expect(h.review).not.toHaveBeenCalled();
+});
+
 it("uses the Pi owner rather than quality case IDs across edits and restored runtimes", async () => {
 	const h = harness("saved-owner");
 	await edit(h, "const count = 1;");

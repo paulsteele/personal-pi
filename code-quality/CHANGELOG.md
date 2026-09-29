@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add project-configured LSP diagnostics before readability review. All reported severities use the existing correction rounds and operator arbitration; warnings and hints are not filtered out.
+- Add guided private setup, pinned server installations with approval, doctor/status/restart controls, and worktree-shared profiles for C#, TypeScript/JavaScript, Python, Rust, and Go.
+- Share warm LSP processes through a local broker, retaining per-Pi cases and shutting down after the last client disconnects. Show server names, lifecycle state, and sharing counts in Atelier's quality row.
+- Add real-server compatibility probes, packed-loader checks, and regression tests for stale diagnostics, cancellation, restart, creator crashes, and no-proposal arbitration. Real-server validation currently covers macOS arm64.
+
 ## 1.4.2 — 2026-09-28
 
 - Notify the desktop when quality dialogs require a human decision: arbitration, file-review authorization, failure recovery, correction-scope approval, reviewer selection, and waivers. Clear matching notices when dialogs end or sessions retire; keep ordinary agent-handled rejections silent and source data out of notifications.

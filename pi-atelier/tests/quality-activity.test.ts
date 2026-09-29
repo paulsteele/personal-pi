@@ -58,6 +58,46 @@ it("accepts the sixth request when verdict repair shares the provider retry budg
 	expect(parseQualityHeader({ ...status, modelId: "test/reviewer", reviewAttempt: 7 })).toBeUndefined();
 });
 
+it("shows configured shared LSP names and states alongside the analyzer", () => {
+	const qualityHeader = parseQualityHeader({
+		version: 1,
+		sessionId: "session",
+		phase: "ready",
+		revision: 1,
+		modelId: "test/reviewer",
+		lsp: [
+			{ id: "roslyn", name: "roslyn", root: ".", phase: "ready", clients: 2, secret: "ignored" },
+			{ id: "typescript", name: "typescript", root: "frontend", phase: "checking", clients: 1 },
+		],
+	});
+	expect(qualityHeader).toBeDefined();
+	if (!qualityHeader) throw new Error("Expected configured quality header");
+	expect(qualityHeader.lsp?.[0]).not.toHaveProperty("secret");
+	const snapshot = buildSidebarSnapshot({
+		state: createInertAtelierState(null),
+		cwd: "/repo",
+		branchEntryCount: 0,
+		extensionStatuses: [],
+		qualityHeader,
+	});
+	const theme: Parameters<typeof renderActivityLines>[1] = {
+		fg: (_: string, text: string) => text,
+		bold: (text: string) => text,
+		italic: (text: string) => text,
+	};
+	const height = 12;
+	const colorEnabled = false;
+	const now = 100;
+	for (const width of [35, 100]) {
+		const lines = renderActivityLines(snapshot, theme, width, height, colorEnabled, now);
+		const text = lines.join("\n");
+		expect(text).toContain("test/reviewer");
+		expect(text).toContain("roslyn ● ready ×2");
+		expect(text).toContain("typescript ⟳ checking");
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+	}
+});
+
 it("validates standalone header data without requiring a tool call", () => {
 	const header = { version: 1, sessionId: "session", phase: "ready", revision: 1, modelId: "test/reviewer" };
 	expect(parseQualityHeader(header)).toEqual({

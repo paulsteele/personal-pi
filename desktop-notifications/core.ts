@@ -48,6 +48,8 @@ const QUALITY_DECISION_NOTICES = {
 	scope: { subtitle: "Quality scope needs approval", body: "Approve or decline the requested correction scope expansion." },
 	model: { subtitle: "Quality reviewer selection needed", body: "Select the model for quality review." },
 	waiver: { subtitle: "Quality waiver needs confirmation", body: "Confirm or decline waiving the pending quality gate." },
+	lsp_setup: { subtitle: "Language server setup needs attention", body: "Configure, validate, or approve a language server installation." },
+	lsp_failure: { subtitle: "Language server needs attention", body: "Retry, reconfigure, or explicitly waive the pending LSP check." },
 } satisfies Record<string, AskUserNotification>;
 
 type QualityDecisionKind = keyof typeof QUALITY_DECISION_NOTICES;

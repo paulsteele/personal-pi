@@ -1,9 +1,19 @@
+import type { LspServerStatus } from "./lsp-diagnostics.js";
+
 export const QUALITY_ACTIVITY_CHANNEL = "code-quality:activity";
 export const QUALITY_STATUS_CHANNEL = "code-quality:status";
 export const QUALITY_ACTIVITY_DISCOVER_CHANNEL = "code-quality:activity:discover";
 export const MAX_QUALITY_ACTIVITY_CALLS = 96;
 export const QUALITY_ATTENTION_CHANNEL = "code-quality:attention";
-export type QualityDecisionKind = "arbitration" | "coverage" | "failure" | "scope" | "model" | "waiver";
+export type QualityDecisionKind =
+	| "arbitration"
+	| "coverage"
+	| "failure"
+	| "scope"
+	| "model"
+	| "waiver"
+	| "lsp_setup"
+	| "lsp_failure";
 export interface QualityAttentionEvent {
 	version: 1;
 	sessionId: string;
@@ -49,6 +59,7 @@ export interface QualityActivityPublisher {
 	update(status: QualityActivityStatus): void;
 	updateHeader(status: QualityActivityStatus, modelId: string, counts: QualityReviewCounts): void;
 	finishTool(toolCallId: string, phase: QualityActivityPhase): void;
+	updateLsp(servers: LspServerStatus[]): void;
 	requestDecision(kind: QualityDecisionKind): () => void;
 	dispose(): void;
 }
@@ -65,6 +76,7 @@ export interface QualityHeaderEvent extends QualityActivityStatus, QualityReview
 	sessionId: string;
 	revision: number;
 	modelId: string;
+	lsp?: Array<Pick<LspServerStatus, "id" | "name" | "root" | "phase" | "clients" | "queued">>;
 }
 
 interface ActivityTransport {
@@ -78,6 +90,7 @@ export function createQualityActivityPublisher(events: ActivityTransport): Quali
 	let collecting = false;
 	let disposed = false;
 	let header: QualityHeaderEvent | undefined;
+	let lsp: QualityHeaderEvent["lsp"];
 	const latest = new Map<string, QualityActivityEvent>();
 	const batch = new Set<string>();
 	let decisionSequence = 0;
@@ -140,6 +153,7 @@ export function createQualityActivityPublisher(events: ActivityTransport): Quali
 			for (const requestId of decisions.keys()) finishDecision(requestId);
 			sessionId = nextSessionId;
 			header = undefined;
+			lsp = undefined;
 			latest.clear();
 			batch.clear();
 			collecting = false;
@@ -184,9 +198,28 @@ export function createQualityActivityPublisher(events: ActivityTransport): Quali
 				version: 1,
 				sessionId,
 				modelId: publishedModelId,
+				...(lsp ? { lsp } : {}),
 				...counts,
 				revision: ++revision,
 			};
+			try {
+				events.emit(QUALITY_STATUS_CHANNEL, { ...header });
+			} catch {}
+		},
+		updateLsp(servers) {
+			if (disposed || !sessionId) return;
+			const nextLsp = servers.map(({ id, name, root, phase, clients, queued }) => ({
+				id: id.slice(0, 80),
+				name: name.slice(0, 80),
+				root: root.slice(0, 240),
+				phase,
+				clients,
+				...(queued === undefined ? {} : { queued }),
+			}));
+			if (JSON.stringify(nextLsp) === JSON.stringify(lsp)) return;
+			lsp = nextLsp;
+			if (!header) return;
+			header = { ...header, lsp, revision: ++revision };
 			try {
 				events.emit(QUALITY_STATUS_CHANNEL, { ...header });
 			} catch {}

@@ -35,6 +35,34 @@ function harness() {
 	return { events, received, headers, publisher };
 }
 
+it("replays LSP process state without replacing model identity or exposing diagnostics", () => {
+	const h = harness();
+	h.publisher.updateHeader({ phase: "ready" }, "test/reviewer", { checkCount: 3, rejectionCount: 1 });
+	h.publisher.updateLsp([
+		{
+			id: "roslyn",
+			name: "roslyn",
+			root: ".",
+			phase: "checking",
+			clients: 2,
+			generation: "private-generation",
+			reason: "private-diagnostic",
+		},
+	]);
+	expect(h.headers.at(-1)).toMatchObject({
+		modelId: "test/reviewer",
+		checkCount: 3,
+		rejectionCount: 1,
+		lsp: [{ id: "roslyn", phase: "checking", clients: 2 }],
+	});
+	expect(h.headers.at(-1)?.lsp?.[0]).not.toHaveProperty("generation");
+	expect(h.headers.at(-1)?.lsp?.[0]).not.toHaveProperty("reason");
+	h.events.emit(QUALITY_ACTIVITY_DISCOVER_CHANNEL, { version: 1, sessionId: "session-a" });
+	expect(h.headers.at(-1)?.lsp?.[0]?.clients).toBe(2);
+	h.publisher.updateHeader({ phase: "approved" }, "test/reviewer", { checkCount: 4, rejectionCount: 1 });
+	expect(h.headers.at(-1)?.lsp?.[0]?.phase).toBe("checking");
+});
+
 it("publishes matching attention start/end events once", () => {
 	const h = harness();
 	const attention: QualityAttentionEvent[] = [];

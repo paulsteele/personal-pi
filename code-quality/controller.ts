@@ -6,6 +6,7 @@ import {
 	newCase,
 	proposalApplied,
 	recordVerdict,
+	recordLspRejection,
 	requestReconsideration,
 	resolveCase,
 	revision,
@@ -20,6 +21,8 @@ import {
 	type Finding,
 } from "./proposal.js";
 import { POLICY, review, type ReviewResult } from "./reviewer.js";
+import type { LspManager } from "./lsp-manager.js";
+import { diagnosticLabel } from "./lsp-diagnostics.js";
 import { CaseStore, countRejectedReviews, latestReference, STATE_ENTRY } from "./state.js";
 import type {
 	QualityActivityPhase,
@@ -57,6 +60,7 @@ export interface RuntimePorts {
 	ui: QualityUI;
 	review?: typeof review;
 	activity?: QualityActivityPublisher;
+	lsp?: Pick<LspManager, "check" | "revision" | "configRevision"> & Partial<Pick<LspManager, "restart">>;
 }
 interface MutationPreparation {
 	result: { block: true; reason: string } | undefined;
@@ -65,7 +69,7 @@ interface MutationPreparation {
 }
 
 const PROTOCOL =
-	"Quality review is enforced after edit/write batches in TUI mode. Resolve needs_work before unrelated implementation. Apply corrections using ordinary file tools. To disagree call quality_response(disagree) with the current case/revision and your rationale; the reviewer will reconsider it. Corrections and disagreements share five response-and-review rounds after the initial rejection. Resolve the disagreement with the reviewer before reaching out to the operator; automatic arbitration occurs only after those rounds remain unresolved. Do not ask the operator to settle readability feedback early. Only the user can waive. Request extra helper/test paths with quality_response(request_scope). Do not evade the gate through bash, subagents, configuration changes, or custom file tools. User-approved proposals must be applied exactly before continuing. Approval covers style, not correctness.";
+	"Quality review is enforced after edit/write batches in TUI mode. Resolve needs_work before unrelated implementation. Apply corrections using ordinary file tools. To disagree call quality_response(disagree) with the current case/revision and your rationale; the reviewer will reconsider it. Corrections and disagreements share five response-and-review rounds after the initial rejection. Resolve the disagreement with the reviewer before reaching out to the operator; automatic arbitration occurs only after those rounds remain unresolved. Do not ask the operator to settle readability feedback early. Only the user can waive. Request extra helper/test paths with quality_response(request_scope). Do not evade the gate through bash, subagents, configuration changes, or custom file tools. User-approved proposals must be applied exactly before continuing. Readability approval covers style, not correctness. Configured LSP diagnostics of every severity enter this same correction flow before readability review. LSP disagreements rerun diagnostics; only the operator can waive them.";
 
 export class QualityController {
 	config: QualityConfig = { ...DEFAULT_CONFIG };
@@ -117,6 +121,14 @@ export class QualityController {
 	}
 	get pending(): boolean {
 		return Boolean(this.blockedReason || (this.state && this.state.phase !== "closed"));
+	}
+	waiveLsp(): void {
+		if (this.state && this.state.phase !== "closed") {
+			this.state.lspWaived = true;
+			this.state.lsp = undefined;
+			this.state.phase = "captured";
+			this.persist();
+		}
 	}
 	get active(): boolean {
 		return this.config.enabled;
@@ -468,6 +480,8 @@ export class QualityController {
 	}
 	private feedback(): string {
 		const state = this.state!;
+		if (state.lsp?.findings.length)
+			return `${this.summary()}\nLSP quality findings (all severities must be resolved):\n${state.lsp.findings.map(diagnosticLabel).join("\n")}\nResolve this case before unrelated work. Corrections and disagreements use the shared round budget. quality_response(disagree) reruns LSP diagnostics; only the operator can waive them.`;
 		return `${this.summary()}\n${state.verdict ? JSON.stringify({ verdict: state.verdict.verdict, rationale: state.verdict.rationale, findings: state.verdict.findings, edits: state.verdict.edits }) : (state.reason ?? "Review pending")}\nResolve the case before unrelated work. If you disagree, call quality_response with caseId, revision and rationale so the reviewer can reconsider. Corrections and disagreements share the round budget; do not ask the operator to settle the finding before that budget is exhausted. Do not self-waive.`;
 	}
 	private result(content: string, continueRun = true, details?: QualityFeedbackDetails): BoundaryResult {
@@ -494,7 +508,7 @@ export class QualityController {
 			return { outcome };
 		}
 		if (state?.phase === "applying") return { outcome: "applying" };
-		if (state?.verdict?.verdict === "needs_work")
+		if (state?.verdict?.verdict === "needs_work" || state?.lsp?.findings.length)
 			return { outcome: "rejected", rejection: state.attempts + 1 };
 		return { outcome: "retrying" };
 	}
@@ -548,6 +562,8 @@ export class QualityController {
 			}
 			if (state.phase === "applying") {
 				if (proposalApplied(state)) {
+					const lspOutcome = await this.checkLsp(ctx, false);
+					if (lspOutcome) return lspOutcome;
 					state.phase = "closed";
 					state.resolution = "user_approved";
 					this.persist();
@@ -575,13 +591,20 @@ export class QualityController {
 			if (state.phase === "correcting" && !this.captureChanged) return;
 			const responseRound = state.correctionPending || state.reconsiderationPending === true;
 			this.captureChanged = false;
-			if (state.files.every((file) => file.before === file.after)) {
+			if (
+				state.files.every((file) => file.before === file.after) &&
+				!state.lspRequired &&
+				!state.lsp?.findings.length
+			) {
 				state.phase = "closed";
 				state.resolution = "unchanged";
 				this.persist();
 				this.status(ctx);
 				return;
 			}
+			const lspOutcome = await this.checkLsp(ctx, responseRound);
+			if (lspOutcome) return lspOutcome;
+			const lspRevision = this.ports.lsp?.revision;
 			const chunks = buildReviewChunks(state.files, this.config, this.cwd);
 			state.phase = "reviewing";
 			this.persist();
@@ -610,6 +633,16 @@ export class QualityController {
 				});
 				if (!this.valid(ctx, generation) || this.signal(ctx).aborted) return;
 				this.pi.appendEntry("code-quality:usage", { caseId: state.id, ...response.metrics });
+				if (!state.lspWaived && lspRevision !== this.ports.lsp?.revision) {
+					state.phase = "captured";
+					state.lsp = undefined;
+					this.persist();
+					return this.result(
+						"LSP workspace changed during readability review; fresh checks are required.",
+						true,
+						{ outcome: "stale" },
+					);
+				}
 				if (!this.checkFresh(ctx))
 					return this.result(
 						"Quality snapshot changed during review; inspect the current code before continuing.",
@@ -643,9 +676,16 @@ export class QualityController {
 			this.persist();
 			this.status(ctx);
 			if (verdict.verdict === "needs_work" && state.attempts >= state.limit) return await this.arbitrate(ctx);
+			let approvalDescription = "Style only; correctness not certified.";
+			if (state.lsp)
+				approvalDescription =
+					"Configured LSP diagnostics clean; readability approved. Not a build/correctness certification.";
+			if (state.lspWaived)
+				approvalDescription =
+					"Readability approved; LSP explicitly waived by the operator. Not a clean LSP verdict.";
 			return this.result(
 				verdict.verdict === "approved"
-					? `Quality approved: ${state.files.length} file(s), snapshot ${revision(state)}. Style only; correctness not certified.`
+					? `Quality approved: ${state.files.length} file(s), snapshot ${revision(state)}. ${approvalDescription}`
 					: this.feedback(),
 				verdict.verdict !== "approved",
 			);
@@ -668,6 +708,101 @@ export class QualityController {
 			}
 		}
 	}
+	private async checkLsp(ctx: ExtensionContext, responseRound: boolean): Promise<BoundaryResult | undefined> {
+		const lsp = this.ports.lsp;
+		const state = this.state!;
+		if (state.lspWaived) return;
+		if (!lsp) {
+			if (state.lspRequired) {
+				this.pause(ctx, "Required LSP checking is unavailable; restore it or explicitly waive this case.");
+				return this.result("Required LSP coverage is unavailable.", false, { outcome: "awaiting_user" });
+			}
+			return;
+		}
+		const generation = this.generation;
+		const expected = revision(state);
+		let checked = await lsp
+			.check(state.files, this.signal(ctx))
+			.catch((error) => ({ kind: "unavailable" as const, reason: String(error) }));
+		if (!this.valid(ctx, generation) || this.signal(ctx).aborted)
+			return this.result("LSP check interrupted; review remains pending.", false, { outcome: "retrying" });
+		if (!checked && (state.lspRequired || state.lsp))
+			checked = {
+				kind: "unavailable",
+				reason: "LSP coverage changed for this pending case; restore configuration or explicitly waive it.",
+			};
+		if (!checked) return;
+		state.lspRequired = true;
+		this.persist();
+		if (!this.checkFresh(ctx) || revision(state) !== expected || checked.kind === "stale") {
+			state.phase = "captured";
+			state.lsp = undefined;
+			this.persist();
+			return this.result("LSP snapshot changed; fresh diagnostics are required before review.", true, {
+				outcome: "stale",
+			});
+		}
+		if (checked.kind !== "checked") {
+			const choice = await this.awaitDecision(ctx, "lsp_failure", () =>
+				ctx.ui.select(
+					`LSP unavailable: ${checked.reason}`,
+					["Retry LSP check", "Reconfigure with /quality lsp setup", "Waive LSP for this case"],
+					{ signal: this.signal(ctx) },
+				),
+			);
+			if (!this.valid(ctx, generation) || this.signal(ctx).aborted)
+				return this.result("LSP recovery interrupted.", false);
+			if (!this.checkFresh(ctx) || revision(state) !== expected) {
+				state.phase = "captured";
+				this.persist();
+				return this.result("Code changed during LSP recovery; review the new snapshot.", true, {
+					outcome: "stale",
+				});
+			}
+			if (choice === "Waive LSP for this case") {
+				state.lspWaived = true;
+				state.lsp = undefined;
+				this.persist();
+				return;
+			}
+			if (choice === "Retry LSP check") {
+				await lsp.restart?.(undefined, this.signal(ctx));
+				if (!this.valid(ctx, generation) || this.signal(ctx).aborted)
+					return this.result("LSP restart interrupted.", false);
+				state.phase = "captured";
+				this.persist();
+				return this.result("Retrying configured LSP checks.", true, { outcome: "retrying" });
+			}
+			this.pause(ctx, checked.reason);
+			return this.result("LSP recovery paused. Use /quality lsp setup or /quality retry.", false, {
+				outcome: "awaiting_user",
+			});
+		}
+		const assessment = {
+			findings: checked.findings,
+			revision: expected,
+			configuration: lsp.configRevision,
+			workspaceRevision: lsp.revision,
+			generation: checked.generation,
+		};
+		state.lsp = assessment;
+		if (!checked.findings.length) {
+			this.persist();
+			return;
+		}
+		state.approvedTargets = undefined;
+		state.phase = "reviewing";
+		this.persist();
+		this.pi.appendEntry(QUALITY_CHECK_ENTRY, { caseId: state.id, source: "lsp" });
+		this.checkCount++;
+		recordLspRejection(state, assessment, responseRound);
+		this.rejectionCount++;
+		this.persist();
+		this.status(ctx);
+		if (state.attempts >= state.limit) return this.arbitrate(ctx);
+		return this.result(this.feedback(), true);
+	}
+
 	private async arbitrate(ctx: ExtensionContext): Promise<BoundaryResult | undefined> {
 		const state = this.state!;
 		state.phase = "human";
@@ -675,8 +810,8 @@ export class QualityController {
 		this.status(ctx);
 		const expected = revision(state);
 		const generation = this.generation;
-		if (!state.verdict?.edits.length) {
-			this.pause(ctx, "No current proposal to compare; use /quality retry for fresh review");
+		if (!state.verdict?.edits.length && !state.lsp?.findings.length) {
+			this.pause(ctx, "No current findings to review; use /quality retry");
 			return;
 		}
 		const choice = await this.awaitDecision(ctx, "arbitration", () =>
@@ -687,8 +822,12 @@ export class QualityController {
 			this.pause(ctx, "Quality arbitration cancelled; /quality resolve to reopen");
 			return;
 		}
-		if (!this.checkFresh(ctx) || revision(state) !== expected) {
-			this.pause(ctx, "Code changed while deciding; review again");
+		const lspWorkspaceChanged =
+			state.lsp !== undefined &&
+			this.ports.lsp !== undefined &&
+			state.lsp.workspaceRevision !== this.ports.lsp.revision;
+		if (!this.checkFresh(ctx) || revision(state) !== expected || lspWorkspaceChanged) {
+			this.pause(ctx, "Code or LSP workspace changed while deciding; review again");
 			return;
 		}
 		resolveCase(state, choice.choice, choice.note);
@@ -700,7 +839,7 @@ export class QualityController {
 			);
 		return this.result(
 			choice.choice === "original"
-				? "Quality: user approved the current code for this case."
+				? `Quality: user approved the current code for this case.${state.lsp?.findings.length ? " Outstanding LSP diagnostics accepted; readability may not have run. This is not a clean diagnostic verdict." : ""}`
 				: this.feedback(),
 			choice.choice !== "original",
 		);
@@ -821,7 +960,9 @@ export class QualityController {
 			}
 			requestReconsideration(state, args.rationale);
 			this.persist();
-			return `Disagreement queued for reviewer reconsideration:\n\n${args.rationale}`;
+			return state.lsp?.findings.length
+				? `Disagreement queued for fresh LSP diagnostics under the shared round budget:\n\n${args.rationale}`
+				: `Disagreement queued for reviewer reconsideration:\n\n${args.rationale}`;
 		}
 		const paths = (args.paths ?? []).map((path) => canonicalPath(resolve(ctx.cwd, path)));
 		if (!paths.length) throw new Error("Provide helper/test paths for scope expansion");
@@ -918,7 +1059,10 @@ export class QualityController {
 			ctx.ui.notify("No pending quality case", "info");
 			return;
 		}
-		this.state.phase = action === "resolve" && this.state.verdict?.edits.length ? "human" : "captured";
+		this.state.phase =
+			action === "resolve" && (this.state.verdict?.edits.length || this.state.lsp?.findings.length)
+				? "human"
+				: "captured";
 		this.persist();
 		this.pi.sendMessage(
 			{

@@ -34,9 +34,39 @@ export interface QualityReviewCounts {
 	rejectionCount: number;
 }
 
+const QUALITY_LSP_PHASES = [
+	"connecting",
+	"starting",
+	"loading",
+	"ready",
+	"checking",
+	"stopping",
+	"stopped",
+	"failed",
+	"disabled",
+	"unconfigured",
+] as const;
+function validLspText(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= 240 &&
+		!/[\u0000-\u001f\u007f-\u009f]/.test(value)
+	);
+}
+export interface QualityLspServer {
+	id: string;
+	name: string;
+	root: string;
+	phase: (typeof QUALITY_LSP_PHASES)[number];
+	clients: number;
+	queued?: boolean;
+}
+
 export interface QualityHeader extends QualityActivity, QualityReviewCounts {
 	sessionId: string;
 	modelId: string;
+	lsp?: QualityLspServer[];
 }
 
 const MAX_REVIEW_REQUESTS_WITH_REPAIR = 6;
@@ -122,6 +152,26 @@ export function parseQualityActivity(value: unknown): QualityActivityEvent | und
 	return validIdentifier(toolCallId) ? { ...status, toolCallId } : undefined;
 }
 
+function parseQualityLspServer(value: unknown): QualityLspServer | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return;
+	const server = value as Record<string, unknown>;
+	if (!validLspText(server.id) || !validLspText(server.name) || !validLspText(server.root)) return;
+	if (!(QUALITY_LSP_PHASES as readonly unknown[]).includes(server.phase)) return;
+	if (
+		!nonnegativeInteger(server.clients) ||
+		(server.queued !== undefined && typeof server.queued !== "boolean")
+	)
+		return;
+	return {
+		id: server.id,
+		name: server.name,
+		root: server.root,
+		phase: server.phase as QualityLspServer["phase"],
+		clients: server.clients,
+		...(server.queued === undefined ? {} : { queued: server.queued }),
+	};
+}
+
 export function parseQualityHeader(value: unknown): QualityHeader | undefined {
 	const status = parseStatus(value);
 	if (!status) return;
@@ -134,5 +184,16 @@ export function parseQualityHeader(value: unknown): QualityHeader | undefined {
 		/[\u0000-\u001f\u007f-\u009f]/.test(modelId)
 	)
 		return;
-	return { ...status, modelId, checkCount, rejectionCount };
+	const rawLsp = (value as Record<string, unknown>).lsp;
+	let lsp: QualityLspServer[] | undefined;
+	if (rawLsp !== undefined) {
+		if (!Array.isArray(rawLsp) || rawLsp.length > 32) return;
+		lsp = [];
+		for (const value of rawLsp) {
+			const server = parseQualityLspServer(value);
+			if (!server) return;
+			lsp.push(server);
+		}
+	}
+	return { ...status, modelId, checkCount, rejectionCount, ...(lsp === undefined ? {} : { lsp }) };
 }

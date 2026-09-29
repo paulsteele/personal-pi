@@ -1,8 +1,16 @@
 import { randomUUID } from "node:crypto";
 import type { SnapshotFile } from "./capture.js";
 import { digest, type ValidatedVerdict } from "./proposal.js";
+import type { LspFinding } from "./lsp-diagnostics.js";
 
 export type Phase = "captured" | "reviewing" | "correcting" | "human" | "paused" | "applying" | "closed";
+export interface LspAssessment {
+	findings: LspFinding[];
+	revision: string;
+	configuration: string;
+	workspaceRevision: number;
+	generation: string;
+}
 export interface QualityCase {
 	version: 1;
 	id: string;
@@ -20,6 +28,9 @@ export interface QualityCase {
 	pendingPaths: string[];
 	scope: string[];
 	verdict?: ValidatedVerdict;
+	lsp?: LspAssessment;
+	lspWaived?: boolean;
+	lspRequired?: boolean;
 	objection?: string;
 	reason?: string;
 	approvedTargets?: Record<string, string>;
@@ -62,6 +73,21 @@ export function recordVerdict(state: QualityCase, verdict: ValidatedVerdict, res
 		state.resolution = "model_approved";
 	} else state.phase = state.attempts >= state.limit ? "human" : "correcting";
 }
+export function recordLspRejection(
+	state: QualityCase,
+	assessment: LspAssessment,
+	responseRound: boolean,
+): void {
+	if (responseRound && state.reviewed) state.attempts++;
+	state.reviewed = true;
+	state.correctionPending = false;
+	state.reconsiderationPending = false;
+	state.lsp = assessment;
+	state.verdict = undefined;
+	state.reason = undefined;
+	state.phase = state.attempts >= state.limit ? "human" : "correcting";
+}
+
 export function requestReconsideration(state: QualityCase, objection?: string): void {
 	if (state.attempts >= state.limit) {
 		state.phase = "human";

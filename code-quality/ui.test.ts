@@ -14,7 +14,7 @@ function fixture() {
 		verdict: "needs_work",
 		rationale: "Name the count",
 		findings: [],
-		edits: [],
+		edits: [{ file: "/repo/a.ts", oldText: "const x = 1;", newText: "const count = 1;" }],
 		proposed: { "/repo/a.ts": "const count = 1;" },
 	};
 	state.objection = "A short name is sufficient";
@@ -73,6 +73,37 @@ it("does not turn malformed or legacy metadata into an approval", () => {
 	expect(qualityFeedbackLabel({ outcome: "surprise" })).toBe("quality");
 	expect(qualityFeedbackLabel({ outcome: "rejected", rejection: NaN })).toBe("handling rejection");
 	expect(qualityFeedbackLabel({ outcome: "rejected", rejection: -1 })).toBe("handling rejection");
+});
+
+it("omits accept-proposed when only LSP hints are available", () => {
+	const state = newCase("/repo", "test/reviewer");
+	state.files = [{ path: "/repo/a.ts", before: "", after: "const unused = 1;" }];
+	const lspHint = {
+		file: "/repo/a.ts",
+		serverId: "typescript",
+		severity: 4 as const,
+		message: "Unused declaration",
+		range: { start: { line: 0, character: 6 }, end: { line: 0, character: 12 } },
+	};
+	state.lsp = {
+		findings: [lspHint],
+		revision: "r",
+		configuration: "c",
+		workspaceRevision: 0,
+		generation: "g",
+	};
+	const done = vi.fn();
+	const panel = new ArbitrationPanel(
+		{ terminal: { rows: 40 }, requestRender() {} } as never,
+		{ fg: (_: string, text: string) => text } as never,
+		state,
+		done,
+	);
+	expect(panel.render(100).join("\n")).not.toContain("Accept proposed");
+	expect(reviewText(state)).toContain("typescript/hint");
+	panel.handleInput("\u001b[B");
+	panel.handleInput("\r");
+	expect(done).toHaveBeenCalledWith({ choice: "continue", note: "" });
 });
 
 it("shows the current/proposed diff and both rationales at narrow widths", () => {

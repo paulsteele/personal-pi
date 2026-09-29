@@ -12,14 +12,18 @@
 	],
 	"files": [
 		"*.ts",
+		"lsp-broker-host.mjs",
+		"lsp-process-guard.mjs",
 		"policy.md",
 		"examples.md",
 		"README.md",
+		"lsp-compatibility.md",
 		"CHANGELOG.md",
 		"!*.test.ts",
 		"!test-fixtures.ts",
 		"!vitest.config.ts",
-		"!calibrate.ts"
+		"!calibrate.ts",
+		"!lsp-probe.ts"
 	],
 	"pi": {
 		"extensions": [
@@ -28,12 +32,19 @@
 	},
 	"scripts": {
 		"test": "vitest run",
+		"test:lsp-compatibility": "QUALITY_LSP_PROBE=1 vitest run lsp-compatibility.test.ts",
+		"test:lsp-tui": "node lsp-tui-smoke.mjs",
 		"typecheck": "tsc --noEmit",
 		"lint": "biome lint .",
 		"format": "biome format --write .",
 		"format:check": "biome format .",
 		"check:pack": "node verify-pack.mjs",
 		"calibrate": "bun calibrate.ts"
+	},
+	"dependencies": {
+		"chokidar": "4.0.3",
+		"jiti": "2.7.0",
+		"vscode-languageserver-protocol": "3.18.4"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "0.87.x",
