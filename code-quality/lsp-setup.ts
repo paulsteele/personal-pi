@@ -1,5 +1,7 @@
-import { readdir } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { lstat, readdir, realpath } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
+import { promisify } from "node:util";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { canonicalPath, inside } from "./capture.js";
 import { installLsp, installationPlan, installedManagedExecutable } from "./lsp-install.js";
@@ -38,23 +40,95 @@ export interface ProjectDiscovery {
 	truncated: boolean;
 }
 
-export async function discoverLspFiles(root: string, signal: AbortSignal): Promise<ProjectDiscovery> {
+const DISCOVERY_ENTRY_LIMIT = 10000;
+const EXCLUDED_DISCOVERY_DIRECTORIES = new Set([
+	".git",
+	"node_modules",
+	"bin",
+	"obj",
+	"target",
+	".venv",
+	"venv",
+	"vendor",
+]);
+
+async function discoverGitFiles(root: string, signal: AbortSignal): Promise<ProjectDiscovery | undefined> {
+	let stdout: string;
+	try {
+		({ stdout } = await promisify(execFile)(
+			"git",
+			["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+			{
+				cwd: root,
+				signal,
+				timeout: 10000,
+				maxBuffer: 16 * 1024 * 1024,
+				env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+			},
+		));
+	} catch {
+		signal.throwIfAborted();
+		return undefined;
+	}
+	const candidates = [...new Set(stdout.split("\0").filter(Boolean))].sort();
+	const files: string[] = [];
+	let inspected = 0;
+	for (const file of candidates) {
+		signal.throwIfAborted();
+		const parentDirectories = file.split("/").slice(0, -1);
+		if (parentDirectories.some((directory) => EXCLUDED_DISCOVERY_DIRECTORIES.has(directory))) {
+			continue;
+		}
+		if (++inspected > DISCOVERY_ENTRY_LIMIT) {
+			return { files, truncated: true };
+		}
+		const path = resolve(root, file);
+		try {
+			const isRegularFile = (await lstat(path)).isFile();
+			const isCanonicalPath = isRegularFile && (await realpath(path)) === path;
+			if (isCanonicalPath) {
+				files.push(file);
+			}
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code !== "ENOENT" && code !== "ENOTDIR") {
+				throw error;
+			}
+		}
+	}
+	return { files, truncated: false };
+}
+
+async function discoverDirectoryFiles(root: string, signal: AbortSignal): Promise<ProjectDiscovery> {
 	const files: string[] = [];
 	const directories = [root];
-	const excluded = new Set([".git", "node_modules", "bin", "obj", "target", ".venv", "venv", "vendor"]);
 	let inspected = 0;
-	while (directories.length) {
+	for (let index = 0; index < directories.length; index++) {
 		signal.throwIfAborted();
-		const directory = directories.pop()!;
+		const directory = directories[index]!;
 		for (const entry of await readdir(directory, { withFileTypes: true })) {
-			if (++inspected > 10000) return { files, truncated: true };
-			if (entry.isSymbolicLink()) continue;
+			signal.throwIfAborted();
+			if (++inspected > DISCOVERY_ENTRY_LIMIT) {
+				return { files: files.sort(), truncated: true };
+			}
+			if (entry.isSymbolicLink()) {
+				continue;
+			}
 			const path = join(directory, entry.name);
-			if (entry.isDirectory() && !excluded.has(entry.name)) directories.push(path);
-			else if (entry.isFile()) files.push(relative(root, path));
+			if (entry.isDirectory() && !EXCLUDED_DISCOVERY_DIRECTORIES.has(entry.name)) {
+				directories.push(path);
+			} else if (entry.isFile()) {
+				files.push(relative(root, path));
+			}
 		}
 	}
 	return { files: files.sort(), truncated: false };
+}
+
+export async function discoverLspFiles(root: string, signal: AbortSignal): Promise<ProjectDiscovery> {
+	signal.throwIfAborted();
+	const workspace = canonicalPath(root);
+	return (await discoverGitFiles(workspace, signal)) ?? discoverDirectoryFiles(workspace, signal);
 }
 
 export function routeSummary(route: LspRoute): string {

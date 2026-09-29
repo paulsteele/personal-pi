@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.2 — 2026-09-29
+
+- Fix LSP source discovery stopping inside dependency trees before reaching application source. Use sorted Git-listed files with standard ignore rules, and breadth-first traversal when Git discovery is unavailable.
+- Report scan-limit exhaustion separately from a workspace with no matching source, including the workspace and expected extensions in validation errors.
+- Add regression tests for large dependency trees, nested workspaces, ignored and deleted files, symlinks, cancellation, and validation after a partial scan.
+
 ## 1.5.1 — 2026-09-29
 
 - Fix LSP setup failing on existing shared installations: reuse receipt-verified servers and discover unreceipted executables, including .NET tools installed directly in the version/platform directory. Preserve existing installations and require per-project validation and approval.

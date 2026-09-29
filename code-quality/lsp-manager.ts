@@ -191,16 +191,22 @@ export class LspManager {
 
 	async validate(route: LspRoute, project: LspProject, signal: AbortSignal): Promise<LspValidation> {
 		const root = canonicalPath(resolve(project.root, route.root));
-		if (!inside(project.root, root)) return { ready: false, summary: "Workspace outside project" };
+		if (!inside(project.root, root)) {
+			return { ready: false, summary: "Workspace outside project" };
+		}
 		const discovery = await discoverLspFiles(root, signal);
 		const file = discovery.files.find((file) =>
 			Object.keys(route.extensions).some((extension) => file.endsWith(extension)),
 		);
-		if (!file)
+		if (!file) {
+			const extensions = Object.keys(route.extensions).join(", ");
 			return {
 				ready: false,
-				summary: "No representative source file found; select a workspace containing source",
+				summary: discovery.truncated
+					? `Source discovery reached its scan limit in ${root} before finding a file matching ${extensions}; narrow the workspace root in /quality lsp setup edit, then retry approval`
+					: `No representative source file matching ${extensions} found in ${root}; select a workspace containing source`,
 			};
+		}
 		const connection = await attachBroker(
 			this.agentDir,
 			root,
