@@ -3,7 +3,13 @@ import { join, relative, resolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { canonicalPath, inside } from "./capture.js";
 import { installLsp, installationPlan, installedManagedExecutable } from "./lsp-install.js";
-import { findExecutable, LSP_PRESETS, presetRoute, type LspPresetDefinition } from "./lsp-presets.js";
+import {
+	findExecutable,
+	findUnverifiedPresetExecutable,
+	LSP_PRESETS,
+	presetRoute,
+	type LspPresetDefinition,
+} from "./lsp-presets.js";
 import { selectLspLanguages, type LspLanguageChoice } from "./lsp-setup-ui.js";
 import { chooseCsharpProject, chooseWorkspaceRoot, nextRouteId } from "./lsp-setup-defaults.js";
 import {
@@ -96,7 +102,7 @@ async function chooseAdvancedRoute(
 	let route: LspRoute;
 	if (preset) {
 		const managed = await installedManagedExecutable(agentDir, preset);
-		const detected = managed ?? (await findExecutable(preset.executable, project.root));
+		const detected = managed ?? (await findUnverifiedPresetExecutable(agentDir, preset, project.root));
 		const executableChoice = await ctx.ui.select(
 			`${preset.label}\n${preset.installationNotice}`,
 			[...(detected ? [`Use ${detected}`] : []), "Choose executable path", "Install pinned server privately"],
@@ -209,7 +215,8 @@ async function configureDetectedServer(
 		if (!projectPath) return undefined;
 	}
 	const managed = await installedManagedExecutable(agentDir, preset);
-	const installedExecutable = managed ?? (await findExecutable(preset.executable, project.root));
+	const installedExecutable =
+		managed ?? (await findUnverifiedPresetExecutable(agentDir, preset, project.root));
 	const executablePath =
 		installedExecutable ??
 		(await installLsp(

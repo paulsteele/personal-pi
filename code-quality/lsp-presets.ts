@@ -153,6 +153,25 @@ export async function findExecutable(
 	return undefined;
 }
 
+export async function findUnverifiedPresetExecutable(
+	agentDir: string,
+	preset: LspPresetDefinition,
+	cwd: string,
+): Promise<string | undefined> {
+	const directory = managedToolDirectory(agentDir, preset);
+	const candidates = [managedExecutable(directory, preset)];
+	if (preset.installation === "dotnet") {
+		candidates.push(join(directory, preset.executable));
+	}
+	for (const candidate of candidates) {
+		const executable = await findExecutable(candidate, directory);
+		if (executable) {
+			return executable;
+		}
+	}
+	return findExecutable(preset.executable, cwd);
+}
+
 export function presetRoute(
 	preset: LspPresetDefinition,
 	command: string,

@@ -1,6 +1,6 @@
 {
 	"name": "@paulsteele/pi-pr-review",
-	"version": "1.5.0",
+	"version": "1.5.1",
 	"private": true,
 	"description": "Code-owned PR reviews with versioned methodology and private repository context",
 	"type": "module",

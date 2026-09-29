@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.1 — 2026-09-29
+
+- Fix LSP setup failing on existing shared installations: reuse receipt-verified servers and discover unreceipted executables, including .NET tools installed directly in the version/platform directory. Preserve existing installations and require per-project validation and approval.
+- Recheck for completed installations after approval so concurrent setup can reuse them instead of reporting a destination conflict.
+
 ## 1.5.0 — 2026-09-29
 
 - Add project-configured LSP diagnostics before readability review. All reported severities use the existing correction rounds and operator arbitration; warnings and hints are not filtered out.

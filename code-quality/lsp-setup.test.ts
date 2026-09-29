@@ -1,6 +1,6 @@
-import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, it, vi } from "vitest";
 import { approveLspSetup, discoverLspFiles, setupLsp, type LspSetupPorts } from "./lsp-setup.js";
@@ -45,6 +45,21 @@ async function setupFixture(confirmations: boolean[]) {
 		selectLanguages: vi.fn(async () => undefined),
 	};
 	return { ctx, ports, agentDir, project, route, confirm };
+}
+
+async function unreceiptedServerFixture(presetId: string, layout: "managed" | "tool-root") {
+	const fixture = await setupFixture([true]);
+	const preset = presetById(presetId);
+	const directory = managedToolDirectory(fixture.agentDir, preset);
+	const launcher =
+		layout === "tool-root" ? join(directory, preset.executable) : managedExecutable(directory, preset);
+	await mkdir(dirname(launcher), { recursive: true });
+	const executable = join(dirname(launcher), "server-target");
+	await writeFile(executable, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+	await symlink("server-target", launcher);
+	await writeFile(join(fixture.project.root, "App.cs"), "class App {}\n");
+	await writeFile(join(fixture.project.root, "App.csproj"), "<Project />\n");
+	return { ...fixture, preset, directory, executable: await realpath(executable) };
 }
 
 it("leaves the draft unchanged when the setup picker is cancelled", async () => {
@@ -210,6 +225,146 @@ it("uses selected languages with automatic executable, root, and route name", as
 	expect(fixture.ctx.ui.select).not.toHaveBeenCalled();
 	expect(fixture.confirm).toHaveBeenCalledTimes(1);
 	expect(fixture.ctx.ui.notify).not.toHaveBeenCalled();
+});
+
+it("shares a receipt-verified installation across independently approved project profiles", async () => {
+	const fixture = await setupFixture([true, true]);
+	const preset = { ...presetById("pyright"), prerequisites: [] };
+	const plan = installationPlan(fixture.agentDir, preset);
+	const run = vi.fn(async () => {
+		const executable = managedExecutable(plan.staging, preset);
+		await mkdir(dirname(executable), { recursive: true });
+		await writeFile(executable, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+	});
+	await installations.installLsp(
+		plan,
+		{ approve: async () => true, progress: vi.fn(), run },
+		new AbortController().signal,
+	);
+	const receiptPath = join(plan.destination, "installation.json");
+	const receipt = await readFile(receiptPath, "utf8");
+	const install = vi.spyOn(installations, "installLsp");
+	fixture.ports.selectLanguages = vi.fn(async () => ({ action: "continue" as const, selected: [preset.id] }));
+	const secondRoot = join(dirname(fixture.project.root), "second-project");
+	await mkdir(secondRoot);
+	const secondProject = await resolveLspProject(secondRoot, fixture.agentDir);
+
+	for (const project of [fixture.project, secondProject]) {
+		await writeFile(join(project.root, "app.py"), "pass\n");
+		const result = await setupLsp(
+			{ ...fixture.ctx, cwd: project.root },
+			fixture.agentDir,
+			project,
+			"setup",
+			fixture.ports,
+			new AbortController().signal,
+		);
+		expect(result?.profile).toMatchObject({
+			projectId: project.id,
+			enabled: true,
+			routes: [{ command: managedExecutable(plan.destination, preset), version: preset.version }],
+		});
+		expect(fixture.ports.validate).toHaveBeenCalledWith(
+			expect.objectContaining({ command: managedExecutable(plan.destination, preset) }),
+			project,
+			expect.any(AbortSignal),
+		);
+		expect((await loadLspProfile(fixture.agentDir, project))?.revision).toBe(result?.revision);
+	}
+	expect(secondProject.id).not.toBe(fixture.project.id);
+	expect(fixture.confirm).toHaveBeenCalledTimes(2);
+	expect(fixture.confirm).toHaveBeenNthCalledWith(
+		1,
+		"Validate and enable LSP checking?",
+		expect.any(String),
+		expect.any(Object),
+	);
+	expect(fixture.confirm).toHaveBeenNthCalledWith(
+		2,
+		"Validate and enable LSP checking?",
+		expect.any(String),
+		expect.any(Object),
+	);
+	expect(install).not.toHaveBeenCalled();
+	expect(run).toHaveBeenCalledTimes(1);
+	expect(await readFile(receiptPath, "utf8")).toBe(receipt);
+});
+
+it.each([
+	{ presetId: "roslyn", layout: "tool-root" as const },
+	{ presetId: "roslyn", layout: "managed" as const },
+	{ presetId: "pyright", layout: "managed" as const },
+])(
+	"reuses an unreceipted $presetId executable in the $layout layout as external",
+	async ({ presetId, layout }) => {
+		const fixture = await unreceiptedServerFixture(presetId, layout);
+		const install = vi.spyOn(installations, "installLsp");
+		fixture.ports.selectLanguages = vi.fn(async () => ({
+			action: "continue" as const,
+			selected: [presetId],
+		}));
+		const result = await setupLsp(
+			fixture.ctx,
+			fixture.agentDir,
+			fixture.project,
+			"setup",
+			fixture.ports,
+			new AbortController().signal,
+		);
+		expect(result?.profile.routes).toEqual([
+			expect.objectContaining({
+				command: fixture.executable,
+				version: `external; preset tested with ${fixture.preset.version}`,
+			}),
+		]);
+		expect(fixture.ports.validate).toHaveBeenCalledWith(
+			expect.objectContaining({ command: fixture.executable }),
+			fixture.project,
+			expect.any(AbortSignal),
+		);
+		expect(fixture.confirm).toHaveBeenCalledExactlyOnceWith(
+			"Validate and enable LSP checking?",
+			expect.stringContaining(fixture.executable),
+			expect.any(Object),
+		);
+		expect(install).not.toHaveBeenCalled();
+		await expect(lstat(join(fixture.directory, "installation.json"))).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+	},
+);
+
+it("offers an unreceipted Roslyn tool-root executable in advanced setup", async () => {
+	const fixture = await unreceiptedServerFixture("roslyn", "tool-root");
+	const install = vi.spyOn(installations, "installLsp");
+	fixture.ports.selectLanguages = vi.fn(async () => ({ action: "advanced" as const, selected: [] }));
+	fixture.ctx.ui.select = vi
+		.fn()
+		.mockResolvedValueOnce("Add a server with custom options")
+		.mockResolvedValueOnce(`${fixture.preset.label} (detected)`)
+		.mockResolvedValueOnce(`Use ${fixture.executable}`);
+	fixture.ctx.ui.input = vi.fn().mockResolvedValue(".");
+	const result = await setupLsp(
+		fixture.ctx,
+		fixture.agentDir,
+		fixture.project,
+		"setup",
+		fixture.ports,
+		new AbortController().signal,
+	);
+	expect(fixture.ctx.ui.select).toHaveBeenNthCalledWith(
+		3,
+		expect.any(String),
+		expect.arrayContaining([`Use ${fixture.executable}`]),
+		expect.any(Object),
+	);
+	expect(result?.profile.routes[1]).toMatchObject({
+		command: fixture.executable,
+		version: `external; preset tested with ${fixture.preset.version}`,
+		project: "App.csproj",
+	});
+	expect(fixture.confirm).toHaveBeenCalledTimes(1);
+	expect(install).not.toHaveBeenCalled();
 });
 
 it("offers a private installation only when a selected server is missing", async () => {

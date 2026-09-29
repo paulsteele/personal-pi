@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -50,6 +50,87 @@ it("publishes an executable only after the complete installation succeeds", asyn
 	expect(executable).toBe(managedExecutable(fixture.plan.destination, fixture.preset));
 	expect(await installedManagedExecutable(fixture.agentDir, fixture.preset)).toBeTruthy();
 	expect(fixture.run).toHaveBeenCalledTimes(1);
+});
+
+it("reuses a receipt-verified installation without approval, prerequisites, or install commands", async () => {
+	const fixture = await installFixture();
+	const executable = await installLsp(fixture.plan, fixture.ports, new AbortController().signal);
+	const receiptPath = join(fixture.plan.destination, "installation.json");
+	const receipt = await readFile(receiptPath, "utf8");
+	const repeatPlan = installationPlan(fixture.agentDir, {
+		...fixture.preset,
+		prerequisites: ["missing-lsp-install-prerequisite"],
+	});
+	const repeatPorts: InstallPorts = {
+		approve: vi.fn(async () => false),
+		progress: vi.fn(),
+		run: vi.fn(),
+	};
+
+	expect(await installLsp(repeatPlan, repeatPorts, new AbortController().signal)).toBe(executable);
+	expect(repeatPorts.approve).not.toHaveBeenCalled();
+	expect(repeatPorts.run).not.toHaveBeenCalled();
+	expect(await readFile(receiptPath, "utf8")).toBe(receipt);
+	await expect(lstat(repeatPlan.staging)).rejects.toMatchObject({ code: "ENOENT" });
+	await expect(lstat(`${repeatPlan.destination}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("reuses an installation completed while another setup was awaiting approval", async () => {
+	const fixture = await installFixture();
+	const waitingPlan = installationPlan(fixture.agentDir, fixture.preset);
+	const waitingPorts: InstallPorts = {
+		approve: vi.fn(async () => {
+			await installLsp(fixture.plan, fixture.ports, new AbortController().signal);
+			return true;
+		}),
+		progress: vi.fn(),
+		run: vi.fn(),
+	};
+
+	expect(await installLsp(waitingPlan, waitingPorts, new AbortController().signal)).toBe(
+		managedExecutable(fixture.plan.destination, fixture.preset),
+	);
+	expect(waitingPorts.approve).toHaveBeenCalledTimes(1);
+	expect(waitingPorts.run).not.toHaveBeenCalled();
+	expect(fixture.run).toHaveBeenCalledTimes(1);
+	await expect(lstat(`${waitingPlan.destination}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it.each([
+	{ scenario: "missing receipt", receipt: undefined, hasExecutable: true },
+	{ scenario: "wrong version", receipt: { preset: "typescript", version: "0.0.0" }, hasExecutable: true },
+	{ scenario: "wrong preset", receipt: { preset: "pyright", version: "6.0.1" }, hasExecutable: true },
+	{
+		scenario: "missing executable",
+		receipt: { preset: "typescript", version: "6.0.1" },
+		hasExecutable: false,
+	},
+])("preserves an unverified destination with $scenario", async ({ receipt, hasExecutable }) => {
+	const fixture = await installFixture();
+	const executable = managedExecutable(fixture.plan.destination, fixture.preset);
+	await mkdir(dirname(executable), { recursive: true });
+	if (hasExecutable) {
+		await writeFile(executable, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+	}
+	const receiptPath = join(fixture.plan.destination, "installation.json");
+	if (receipt) {
+		await writeFile(receiptPath, JSON.stringify(receipt));
+	}
+
+	expect(await installedManagedExecutable(fixture.agentDir, fixture.preset)).toBeUndefined();
+	await expect(installLsp(fixture.plan, fixture.ports, new AbortController().signal)).rejects.toThrow(
+		`no receipt-verified executable: ${fixture.plan.destination}`,
+	);
+	expect(fixture.run).not.toHaveBeenCalled();
+	expect((await lstat(fixture.plan.destination)).isDirectory()).toBe(true);
+	if (hasExecutable) {
+		expect(await readFile(executable, "utf8")).toBe("#!/bin/sh\nexit 0\n");
+	}
+	if (receipt) {
+		expect(await readFile(receiptPath, "utf8")).toBe(JSON.stringify(receipt));
+	} else {
+		await expect(lstat(receiptPath)).rejects.toMatchObject({ code: "ENOENT" });
+	}
 });
 
 it("does not publish a partial installation when a command fails", async () => {

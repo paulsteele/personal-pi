@@ -198,6 +198,11 @@ export async function installLsp(
 ): Promise<string> {
 	await assertPrivateInstallPath(plan.destination);
 	await assertPrivateInstallPath(plan.staging);
+	signal.throwIfAborted();
+	const installed = await receiptVerifiedExecutable(plan.destination, plan.preset);
+	if (installed) {
+		return installed;
+	}
 	for (const tool of plan.preset.prerequisites) {
 		if (!(await findExecutable(tool, process.cwd())))
 			throw new Error(`Missing prerequisite ${tool}; install the SDK yourself or select an existing server`);
@@ -212,10 +217,14 @@ export async function installLsp(
 	});
 	try {
 		await lock.writeFile(JSON.stringify({ pid: process.pid }));
+		const installedWhileApproving = await receiptVerifiedExecutable(plan.destination, plan.preset);
+		if (installedWhileApproving) {
+			return installedWhileApproving;
+		}
 		try {
 			await lstat(plan.destination);
 			throw new Error(
-				"Managed language server destination already exists; select it or inspect the incomplete installation",
+				`Managed language server directory exists but has no receipt-verified executable: ${plan.destination}. Run /quality lsp setup to select an existing executable, or inspect the incomplete installation. Nothing was overwritten.`,
 			);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -247,13 +256,23 @@ export async function installedManagedExecutable(
 	agentDir: string,
 	preset: LspPresetDefinition,
 ): Promise<string | undefined> {
-	const directory = managedToolDirectory(agentDir, preset);
+	return receiptVerifiedExecutable(managedToolDirectory(agentDir, preset), preset);
+}
+
+async function receiptVerifiedExecutable(
+	directory: string,
+	preset: LspPresetDefinition,
+): Promise<string | undefined> {
 	try {
 		const receipt = JSON.parse(await readFile(join(directory, "installation.json"), "utf8"));
-		if (receipt.preset !== preset.id || receipt.version !== preset.version) return undefined;
+		if (receipt.preset !== preset.id || receipt.version !== preset.version) {
+			return undefined;
+		}
 		return await findExecutable(managedExecutable(directory, preset), directory);
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+			return undefined;
+		}
 		throw error;
 	}
 }
