@@ -129,6 +129,7 @@ export class LspManager {
 	async check(
 		files: { path: string; after: string | null }[],
 		signal: AbortSignal,
+		onStart?: () => void,
 	): Promise<LspCheckResult | undefined> {
 		await this.refreshConfiguration();
 		if (!this.project || !this.profile?.profile.enabled) return undefined;
@@ -144,7 +145,10 @@ export class LspManager {
 				grouped.set(route, group);
 			}
 		}
-		if (!grouped.size) return undefined;
+		if (!grouped.size) {
+			return undefined;
+		}
+		onStart?.();
 		if (!this.trusted) return { kind: "unavailable", reason: "Project is not trusted for LSP analysis" };
 		const checkedRoutes: {
 			connection: BrokerConnection;

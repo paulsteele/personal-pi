@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Show LSP and readability stages in the main transcript, updating each line with a pass/fail marker and preserving results across reloads and branch navigation.
+- Show reviewer rejection rationale and file/line findings without expanding feedback; keep full case details and proposed edits expandable.
+
 ## 1.5.3 — 2026-09-29
 
 - Fix shared LSP broker crashes from file-handle exhaustion in large macOS workspaces by using native recursive watching instead of per-file watchers. Keep dependency changes observable without excluding restored packages.

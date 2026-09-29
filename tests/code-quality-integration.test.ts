@@ -11,9 +11,11 @@ import type { QualityUI } from "../code-quality/controller.ts";
 import type { ReviewResult } from "../code-quality/reviewer.ts";
 import { parseQualityActivity, parseQualityHeader, type QualityHeader } from "../pi-atelier/src/quality-activity.ts";
 import { createRunActivityTracker } from "../pi-atelier/src/run-activity.ts";
-import { QUALITY_CHECK_ENTRY } from "../code-quality/feedback.ts";
+import { QUALITY_CHECK_ENTRY, QUALITY_CHECK_UPDATE_ENTRY } from "../code-quality/feedback.ts";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import { approveLspDraft, loadLspDraft, resolveLspProject, saveLspDraft } from "../code-quality/lsp-profile.ts";
 
+const logTheme = { fg: (_color: string, text: string) => text } as Theme;
 const directories: string[] = [];
 afterEach(() => { for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true }); });
 const approved = (): ReviewResult => ({ kind: "verdict", value: { verdict: "approved", rationale: "Clear", findings: [], edits: [], proposed: {} }, metrics: { requests: 1, latencyMs: 1, usages: [] } });
@@ -68,6 +70,7 @@ async function fixture(review: (options: any) => Promise<ReviewResult>, calls: s
     calls.push(`main:${++turn}`);
     expect(JSON.stringify(context)).toContain("Code clarity policy");
     expect(JSON.stringify(context)).not.toContain(QUALITY_CHECK_ENTRY);
+    expect(JSON.stringify(context)).not.toContain(QUALITY_CHECK_UPDATE_ENTRY);
     if (turn > 12) throw new Error("Unexpected continuation loop");
     const content = script ? script(turn, context) : turn === 1 ? [{ type: "toolCall", id: "write-1", name: "write", arguments: { path: "a.ts", content: "const count = 1;\n" } }] : [{ type: "text", text: "Done" }];
     if (turn === 2 && !denied && !script) expect(JSON.stringify(context)).toContain("Quality approved");
@@ -94,6 +97,18 @@ test("real Pi receives LSP warnings on the write result and fixes them before re
     expect(h.errors).toEqual([]);
     expect(calls).toEqual(["main:1", "main:2", "review", "main:3"]);
     expect(h.qualityHeaders.at(-1)).toMatchObject({ phase: "approved", checkCount: 2, rejectionCount: 1, lsp: [{ id: "fixture" }] });
+    const renderer = h.session.extensionRunner.getEntryRenderer(QUALITY_CHECK_ENTRY)!;
+    const checkLines = h.session.sessionManager.getBranch().flatMap((entry) => {
+      if (entry.type !== "custom" || entry.customType !== QUALITY_CHECK_ENTRY) {
+        return [];
+      }
+      return renderer(entry, { expanded: false }, logTheme)!.render(100).map((line) => line.trimEnd());
+    });
+    expect(checkLines).toEqual([
+      "quality check: lsp ✕",
+      "quality check: lsp ✓",
+      "quality check: readability ✓",
+    ]);
   } finally {
     await h.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
     h.session.dispose();
@@ -109,8 +124,16 @@ test("real Pi waits for the post-write verdict before the next primary request",
     expect(calls).toEqual(["main:1", "review"]);
     const checkingEntries = h.session.sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === QUALITY_CHECK_ENTRY);
     expect(checkingEntries).toHaveLength(1);
+    const checkingEntry = checkingEntries[0]!;
+    if (checkingEntry.type !== "custom") {
+      throw new Error("Expected a presentation-only checking entry");
+    }
+    const renderer = h.session.extensionRunner.getEntryRenderer(QUALITY_CHECK_ENTRY)!;
+    const component = renderer(checkingEntry, { expanded: false }, logTheme)!;
+    expect(component.render(100).map((line) => line.trimEnd())).toEqual(["quality check: readability"]);
     expect(readFileSync(join(h.cwd, "a.ts"), "utf8")).toBe("const count = 1;\n");
     release(approved()); await pending;
+    expect(component.render(100).map((line) => line.trimEnd())).toEqual(["quality check: readability ✓"]);
     expect(calls).toEqual(["main:1", "review", "main:2"]);
     expect(h.errors).toEqual([]);
     expect(JSON.stringify(h.session.messages)).toContain("Code clarity policy");
@@ -144,7 +167,7 @@ function qualityCaseFromMainAgentFeedback(context: Context): { caseId: string; r
   const messages = context.messages;
   for (const message of [...messages].reverse()) {
     const text = typeof message.content === "string" ? message.content
-      : Array.isArray(message.content) ? message.content.map((part) => part.text ?? "").join("\n") : "";
+      : Array.isArray(message.content) ? message.content.map((part) => part.type === "text" ? part.text : "").join("\n") : "";
     const match = /Quality case ([^;]+); revision ([^;]+);/.exec(text);
     if (match) return { caseId: match[1]!, revision: match[2]! };
   }

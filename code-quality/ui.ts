@@ -18,7 +18,13 @@ import {
 import type { Decision, QualityUI } from "./controller.js";
 import type { QualityCase } from "./case.js";
 import { diagnosticLabel } from "./lsp-diagnostics.js";
-import { CHECKING_QUALITY_LABEL, qualityFeedbackLabel } from "./feedback.js";
+import {
+	qualityCheckLabel,
+	qualityFeedbackLabel,
+	type QualityCheckData,
+	type QualityCheckStage,
+	type QualityFeedbackDetails,
+} from "./feedback.js";
 
 function plain(value: string): string {
 	return value
@@ -55,15 +61,39 @@ export function reviewText(state: QualityCase): string {
 export const feedbackRenderer: MessageRenderer = (message, options, theme) => {
 	const text = plain(typeof message.content === "string" ? message.content : JSON.stringify(message.content));
 	const label = qualityFeedbackLabel(message.details);
-	return new Text(
-		options.expanded ? `${theme.fg("accent", label)}\n${text}` : theme.fg("accent", label),
-		0,
-		0,
-	);
+	const details = message.details as QualityFeedbackDetails | undefined;
+	let body = options.expanded ? text : "";
+	if (!options.expanded && details?.outcome === "rejected") {
+		body = typeof details.rejectionText === "string" ? plain(details.rejectionText) : text;
+	}
+	return new Text(`${theme.fg("accent", label)}${body ? `\n${body}` : ""}`, 0, 0);
 };
 
-export const checkingRenderer: EntryRenderer = (_entry, _options, theme) =>
-	new Text(theme.fg("muted", CHECKING_QUALITY_LABEL), 0, 0);
+export function createCheckingRenderer(
+	checkDisplay: (checkId: string) => QualityCheckData | undefined,
+): EntryRenderer {
+	return (entry, _options, theme) => {
+		const data = entry.data as (Partial<QualityCheckData> & { source?: string }) | undefined;
+		const legacyStage: QualityCheckStage = { source: data?.source === "lsp" ? "lsp" : "readability" };
+		const text = new Text("", 0, 0);
+		return {
+			invalidate: () => text.invalidate(),
+			render(width) {
+				const check = data?.checkId ? checkDisplay(data.checkId) : undefined;
+				const stages = check?.stages ?? data?.stages ?? [legacyStage];
+				text.setText(
+					stages
+						.map((stage) => {
+							const color = !stage.outcome ? "muted" : stage.outcome === "passed" ? "success" : "error";
+							return theme.fg(color, qualityCheckLabel(stage));
+						})
+						.join("\n"),
+				);
+				return text.render(width);
+			},
+		};
+	};
+}
 
 export class ArbitrationPanel implements Component {
 	private selected = 0;

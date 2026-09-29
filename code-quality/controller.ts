@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { BoundaryResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_CONFIG, loadConfig, saveConfig, type QualityConfig } from "./config.js";
 import { buildReviewChunks, canonicalPath, CoverageError, readSnapshot } from "./capture.js";
@@ -31,8 +32,12 @@ import type {
 	QualityDecisionKind,
 } from "./activity.js";
 import {
-	CHECKING_QUALITY_LABEL,
 	QUALITY_CHECK_ENTRY,
+	QUALITY_CHECK_UPDATE_ENTRY,
+	qualityCheckLabel,
+	type QualityCheckData,
+	type QualityCheckSource,
+	type QualityCheckOutcome,
 	qualityFeedbackLabel,
 	type QualityFeedbackDetails,
 } from "./feedback.js";
@@ -89,6 +94,8 @@ export class QualityController {
 	private reviewAttempt?: number;
 	private checkCount = 0;
 	private rejectionCount = 0;
+	private activeCheck?: QualityCheckData;
+	private readonly checks = new Map<string, QualityCheckData>();
 	private readonly activityCalls = new Map<
 		string,
 		{ path?: string; phase?: QualityActivityPhase; blocked: boolean }
@@ -98,6 +105,63 @@ export class QualityController {
 		readonly agentDir: string,
 		readonly ports: RuntimePorts,
 	) {}
+
+	checkDisplay(checkId: string): QualityCheckData | undefined {
+		return this.checks.get(checkId);
+	}
+	private ensureCheckStageStarted(ctx: ExtensionContext, source: QualityCheckSource): void {
+		const previous = this.activeCheck;
+		if (previous?.stages.some((stage) => stage.source === source)) {
+			return;
+		}
+		const check: QualityCheckData = {
+			checkId: previous?.checkId ?? randomUUID(),
+			caseId: this.state!.id,
+			stages: [...(previous?.stages ?? []), { source }],
+		};
+		this.activeCheck = check;
+		this.checks.set(check.checkId, check);
+		if (!previous) {
+			this.checkCount += 1;
+		}
+		this.pi.appendEntry(previous ? QUALITY_CHECK_UPDATE_ENTRY : QUALITY_CHECK_ENTRY, check);
+		this.publishActivity();
+		ctx.ui.setStatus("code-quality", qualityCheckLabel({ source }));
+	}
+	private finishCurrentCheckStage(ctx: ExtensionContext, outcome: QualityCheckOutcome): void {
+		const active = this.activeCheck;
+		const currentStage = active?.stages.at(-1);
+		if (!active || !currentStage || currentStage.outcome) {
+			return;
+		}
+		const completed = { ...currentStage, outcome };
+		const check = { ...active, stages: [...active.stages.slice(0, -1), completed] };
+		this.activeCheck = check;
+		this.checks.set(check.checkId, check);
+		this.pi.appendEntry(QUALITY_CHECK_UPDATE_ENTRY, check);
+		ctx.ui.setStatus("code-quality", qualityCheckLabel(completed));
+	}
+	private restoreChecks(branch: ReturnType<ExtensionContext["sessionManager"]["getBranch"]>): void {
+		this.activeCheck = undefined;
+		this.checks.clear();
+		for (const entry of branch) {
+			if (
+				entry.type !== "custom" ||
+				![QUALITY_CHECK_ENTRY, QUALITY_CHECK_UPDATE_ENTRY].includes(entry.customType)
+			) {
+				continue;
+			}
+			const data = entry.data as Partial<QualityCheckData> | undefined;
+			if (typeof data?.checkId !== "string" || !Array.isArray(data.stages)) {
+				continue;
+			}
+			this.checks.set(data.checkId, {
+				checkId: data.checkId,
+				caseId: data.caseId ?? "",
+				stages: data.stages.map((stage) => ({ ...stage, outcome: stage.outcome ?? "interrupted" })),
+			});
+		}
+	}
 
 	private async awaitDecision<T>(
 		ctx: ExtensionContext,
@@ -147,6 +211,9 @@ export class QualityController {
 		if (this.activityOverride) return this.activityOverride;
 		if (this.blockedReason || this.configError) return "paused";
 		if (!this.config.enabled) return "disabled";
+		if (this.activeCheck?.stages.some((stage) => !stage.outcome)) {
+			return "checking";
+		}
 		const state = this.state;
 		if (state?.phase === "reviewing") return "checking";
 		if (state?.phase === "human") return "awaiting_user";
@@ -222,6 +289,7 @@ export class QualityController {
 		this.activityOverride = undefined;
 		this.reviewAttempt = undefined;
 		const branch = ctx.sessionManager.getBranch();
+		this.restoreChecks(branch);
 		this.checkCount = branch.filter(
 			(entry) => entry.type === "custom" && entry.customType === QUALITY_CHECK_ENTRY,
 		).length;
@@ -508,8 +576,17 @@ export class QualityController {
 			return { outcome };
 		}
 		if (state?.phase === "applying") return { outcome: "applying" };
-		if (state?.verdict?.verdict === "needs_work" || state?.lsp?.findings.length)
-			return { outcome: "rejected", rejection: state.attempts + 1 };
+		if (state?.verdict?.verdict === "needs_work" || state?.lsp?.findings.length) {
+			const rejectionText = state.lsp?.findings.length
+				? state.lsp.findings.map(diagnosticLabel).join("\n")
+				: [
+						state.verdict!.rationale,
+						...state.verdict!.findings.map(
+							(finding) => `${finding.file}:${finding.line} [${finding.rule}] ${finding.rationale}`,
+						),
+					].join("\n\n");
+			return { outcome: "rejected", rejection: state.attempts + 1, rejectionText };
+		}
 		return { outcome: "retrying" };
 	}
 	private finishActivityCollection(): void {
@@ -608,9 +685,7 @@ export class QualityController {
 			const chunks = buildReviewChunks(state.files, this.config, this.cwd);
 			state.phase = "reviewing";
 			this.persist();
-			this.pi.appendEntry(QUALITY_CHECK_ENTRY, { caseId: state.id });
-			this.checkCount += 1;
-			this.status(ctx, CHECKING_QUALITY_LABEL);
+			this.ensureCheckStageStarted(ctx, "readability");
 			const findings: Finding[] = [];
 			const edits: ProposedEdit[] = [];
 			const reasons: string[] = [];
@@ -628,12 +703,13 @@ export class QualityController {
 					signal: this.signal(ctx),
 					onAttempt: (attempt) => {
 						this.reviewAttempt = attempt;
-						this.status(ctx, CHECKING_QUALITY_LABEL);
+						this.publishActivity();
 					},
 				});
 				if (!this.valid(ctx, generation) || this.signal(ctx).aborted) return;
 				this.pi.appendEntry("code-quality:usage", { caseId: state.id, ...response.metrics });
 				if (!state.lspWaived && lspRevision !== this.ports.lsp?.revision) {
+					this.finishCurrentCheckStage(ctx, "stale");
 					state.phase = "captured";
 					state.lsp = undefined;
 					this.persist();
@@ -643,13 +719,18 @@ export class QualityController {
 						{ outcome: "stale" },
 					);
 				}
-				if (!this.checkFresh(ctx))
+				if (!this.checkFresh(ctx)) {
+					this.finishCurrentCheckStage(ctx, "stale");
 					return this.result(
 						"Quality snapshot changed during review; inspect the current code before continuing.",
 						true,
 						{ outcome: "stale" },
 					);
-				if (response.kind !== "verdict") return await this.reviewFailure(ctx, response);
+				}
+				if (response.kind !== "verdict") {
+					this.finishCurrentCheckStage(ctx, response.kind === "cancelled" ? "interrupted" : "failed");
+					return await this.reviewFailure(ctx, response);
+				}
 				findings.push(...response.value.findings);
 				edits.push(...response.value.edits);
 				reasons.push(response.value.rationale);
@@ -672,6 +753,7 @@ export class QualityController {
 				proposed,
 			};
 			recordVerdict(state, verdict, responseRound);
+			this.finishCurrentCheckStage(ctx, verdict.verdict === "approved" ? "passed" : "failed");
 			if (verdict.verdict === "needs_work") this.rejectionCount += 1;
 			this.persist();
 			this.status(ctx);
@@ -690,6 +772,9 @@ export class QualityController {
 				verdict.verdict !== "approved",
 			);
 		} catch (error) {
+			if (this.valid(ctx, generation)) {
+				this.finishCurrentCheckStage(ctx, this.signal(ctx).aborted ? "interrupted" : "failed");
+			}
 			if (error instanceof CoverageError && this.state && !this.signal(ctx).aborted) {
 				try {
 					return await this.resolveCoveragePause(ctx, error);
@@ -702,6 +787,8 @@ export class QualityController {
 			return;
 		} finally {
 			if (generation === this.generation) {
+				this.finishCurrentCheckStage(ctx, "interrupted");
+				this.activeCheck = undefined;
 				this.ports.activity?.finishCollection();
 				this.publishActivity();
 				this.operation = false;
@@ -714,6 +801,8 @@ export class QualityController {
 		if (state.lspWaived) return;
 		if (!lsp) {
 			if (state.lspRequired) {
+				this.ensureCheckStageStarted(ctx, "lsp");
+				this.finishCurrentCheckStage(ctx, "failed");
 				this.pause(ctx, "Required LSP checking is unavailable; restore it or explicitly waive this case.");
 				return this.result("Required LSP coverage is unavailable.", false, { outcome: "awaiting_user" });
 			}
@@ -722,7 +811,11 @@ export class QualityController {
 		const generation = this.generation;
 		const expected = revision(state);
 		let checked = await lsp
-			.check(state.files, this.signal(ctx))
+			.check(state.files, this.signal(ctx), () => {
+				if (this.valid(ctx, generation) && !this.signal(ctx).aborted) {
+					this.ensureCheckStageStarted(ctx, "lsp");
+				}
+			})
 			.catch((error) => ({ kind: "unavailable" as const, reason: String(error) }));
 		if (!this.valid(ctx, generation) || this.signal(ctx).aborted)
 			return this.result("LSP check interrupted; review remains pending.", false, { outcome: "retrying" });
@@ -732,9 +825,11 @@ export class QualityController {
 				reason: "LSP coverage changed for this pending case; restore configuration or explicitly waive it.",
 			};
 		if (!checked) return;
+		this.ensureCheckStageStarted(ctx, "lsp");
 		state.lspRequired = true;
 		this.persist();
 		if (!this.checkFresh(ctx) || revision(state) !== expected || checked.kind === "stale") {
+			this.finishCurrentCheckStage(ctx, "stale");
 			state.phase = "captured";
 			state.lsp = undefined;
 			this.persist();
@@ -743,6 +838,7 @@ export class QualityController {
 			});
 		}
 		if (checked.kind !== "checked") {
+			this.finishCurrentCheckStage(ctx, checked.kind === "cancelled" ? "interrupted" : "failed");
 			const choice = await this.awaitDecision(ctx, "lsp_failure", () =>
 				ctx.ui.select(
 					`LSP unavailable: ${checked.reason}`,
@@ -786,6 +882,7 @@ export class QualityController {
 			generation: checked.generation,
 		};
 		state.lsp = assessment;
+		this.finishCurrentCheckStage(ctx, checked.findings.length ? "failed" : "passed");
 		if (!checked.findings.length) {
 			this.persist();
 			return;
@@ -793,8 +890,6 @@ export class QualityController {
 		state.approvedTargets = undefined;
 		state.phase = "reviewing";
 		this.persist();
-		this.pi.appendEntry(QUALITY_CHECK_ENTRY, { caseId: state.id, source: "lsp" });
-		this.checkCount++;
 		recordLspRejection(state, assessment, responseRound);
 		this.rejectionCount++;
 		this.persist();

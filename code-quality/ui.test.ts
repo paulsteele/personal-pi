@@ -2,8 +2,14 @@ import { expect, it, vi } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 initTheme("dark", false);
-import { ArbitrationPanel, reviewText, qualityUI, feedbackRenderer, checkingRenderer } from "./ui.js";
-import { QUALITY_CHECK_ENTRY, qualityFeedbackLabel, type QualityFeedbackDetails } from "./feedback.js";
+import { ArbitrationPanel, reviewText, qualityUI, feedbackRenderer, createCheckingRenderer } from "./ui.js";
+import {
+	QUALITY_CHECK_ENTRY,
+	qualityFeedbackLabel,
+	type QualityCheckData,
+	type QualityCheckStage,
+	type QualityFeedbackDetails,
+} from "./feedback.js";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { newCase } from "./case.js";
 
@@ -28,8 +34,6 @@ const logTheme = { fg: (_color: string, text: string) => text } as Theme;
 
 it.each([
 	{ details: { outcome: "approved" }, expected: "approved" },
-	{ details: { outcome: "rejected", rejection: 1 }, expected: "handling rejection 1" },
-	{ details: { outcome: "rejected", rejection: 3 }, expected: "handling rejection 3" },
 	{ details: { outcome: "waived" }, expected: "waived" },
 ] satisfies Array<{ details: QualityFeedbackDetails; expected: string }>)(
 	"renders a single compact $expected line while retaining expanded feedback",
@@ -55,17 +59,107 @@ it.each([
 	},
 );
 
-it("shows a compact checking entry without model-facing prose", () => {
-	const entry = {
+it.each([
+	{ rejectionText: "Name the count\n/repo/a.ts:1 [names] x hides its purpose.", source: "readability" },
+	{ rejectionText: "/repo/a.ts:1:1 [typescript/warning] Unused declaration", source: "lsp" },
+])("shows $source rejection text without expanding protocol details", ({ rejectionText }) => {
+	const message = {
+		role: "custom" as const,
+		customType: "code-quality:feedback",
+		content: "Case case-id; revision snapshot-id; exact proposed edits; Do not self-waive.",
+		details: { outcome: "rejected", rejection: 2, rejectionText } satisfies QualityFeedbackDetails,
+		display: true,
+		timestamp: 0,
+	};
+	const collapsed = feedbackRenderer(message, { expanded: false, outputPad: 0 }, logTheme)!;
+	expect(
+		collapsed
+			.render(120)
+			.map((line) => line.trimEnd())
+			.join("\n"),
+	).toBe(`handling rejection 2\n${rejectionText}`);
+	const expanded = feedbackRenderer(message, { expanded: true, outputPad: 0 }, logTheme)!;
+	expect(expanded.render(120).join("\n")).toContain(message.content);
+});
+
+it("shows legacy rejection content and strips terminal control sequences", () => {
+	const message = {
+		role: "custom" as const,
+		customType: "code-quality:feedback",
+		content: "Reviewer: \u001b[31mName the count\u001b[0m",
+		details: { outcome: "rejected", rejection: 1 },
+		display: true,
+		timestamp: 0,
+	};
+	const component = feedbackRenderer(message, { expanded: false, outputPad: 0 }, logTheme)!;
+	expect(component.render(120).map((line) => line.trimEnd())).toEqual([
+		"handling rejection 1",
+		"Reviewer: Name the count",
+	]);
+});
+
+function checkingEntry(data: unknown) {
+	return {
 		type: "custom" as const,
 		customType: QUALITY_CHECK_ENTRY,
 		id: "checking",
 		parentId: null,
 		timestamp: new Date(0).toISOString(),
-		data: { caseId: "case-id" },
+		data,
 	};
-	const component = checkingRenderer(entry, { expanded: false }, logTheme)!;
-	expect(component.render(80).map((line) => line.trimEnd())).toEqual(["Checking Quality..."]);
+}
+
+it.each([
+	{ source: "lsp", outcome: undefined, expected: "quality check: lsp" },
+	{ source: "readability", outcome: "passed", expected: "quality check: readability ✓" },
+	{ source: "lsp", outcome: "failed", expected: "quality check: lsp ✕" },
+	{ source: "readability", outcome: "stale", expected: "quality check: readability ✕ (outdated)" },
+	{ source: "lsp", outcome: "interrupted", expected: "quality check: lsp ✕ (interrupted)" },
+] satisfies Array<QualityCheckStage & { expected: string }>)(
+	"renders $expected from persisted stage data",
+	({ source, outcome, expected }) => {
+		const renderer = createCheckingRenderer(() => undefined);
+		const entry = checkingEntry({ checkId: "check-id", caseId: "case-id", stages: [{ source, outcome }] });
+		const component = renderer(entry, { expanded: false }, logTheme)!;
+		expect(component.render(100).map((line) => line.trimEnd())).toEqual([expected]);
+	},
+);
+
+it("updates the existing checking component as each stage completes", () => {
+	let check: QualityCheckData = { checkId: "check-id", caseId: "case-id", stages: [{ source: "lsp" }] };
+	const renderer = createCheckingRenderer((id) => (id === check.checkId ? check : undefined));
+	const component = renderer(checkingEntry(check), { expanded: false }, logTheme)!;
+	expect(component.render(80).map((line) => line.trimEnd())).toEqual(["quality check: lsp"]);
+	check = { ...check, stages: [{ source: "lsp", outcome: "passed" }, { source: "readability" }] };
+	expect(component.render(80).map((line) => line.trimEnd())).toEqual([
+		"quality check: lsp ✓",
+		"quality check: readability",
+	]);
+	check = {
+		...check,
+		stages: [
+			{ source: "lsp", outcome: "passed" },
+			{ source: "readability", outcome: "failed" },
+		],
+	};
+	expect(component.render(80).map((line) => line.trimEnd())).toEqual([
+		"quality check: lsp ✓",
+		"quality check: readability ✕",
+	]);
+	for (const width of [12, 35, 80]) {
+		for (const line of component.render(width)) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+		}
+	}
+});
+
+it.each([
+	{ data: { caseId: "case-id" }, expected: "quality check: readability" },
+	{ data: { caseId: "case-id", source: "lsp" }, expected: "quality check: lsp" },
+])("labels legacy checking entries without inventing a verdict", ({ data, expected }) => {
+	const renderer = createCheckingRenderer(() => undefined);
+	const component = renderer(checkingEntry(data), { expanded: false }, logTheme)!;
+	expect(component.render(80).map((line) => line.trimEnd())).toEqual([expected]);
 });
 
 it("does not turn malformed or legacy metadata into an approval", () => {

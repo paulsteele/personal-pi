@@ -9,7 +9,7 @@ import { saveConfig } from "./config.js";
 import { revision } from "./case.js";
 import { digest } from "./proposal.js";
 import { review as runReview, type ReviewResult } from "./reviewer.js";
-import { QUALITY_CHECK_ENTRY } from "./feedback.js";
+import { QUALITY_CHECK_ENTRY, QUALITY_CHECK_UPDATE_ENTRY, type QualityCheckData } from "./feedback.js";
 import type { LspCheckResult } from "./lsp-diagnostics.js";
 import {
 	createQualityActivityPublisher,
@@ -119,7 +119,11 @@ it.each([1, 2, 3, 4, undefined])(
 			}),
 		);
 		h.runtime.ports.lsp = { check, revision: 0, configRevision: "profile" };
-		await edit(h, "const count = 1;");
+		const rejected = await edit(h, "const count = 1;");
+		expect(rejected?.entries?.[0]).toMatchObject({
+			details: { outcome: "rejected", rejectionText: expect.stringContaining("Resolve this diagnostic") },
+		});
+		expect(h.ctx.ui.setStatus).toHaveBeenCalledWith("code-quality", "quality check: lsp ✕");
 		expect(h.review).not.toHaveBeenCalled();
 		expect(h.runtime.state).toMatchObject({
 			phase: "correcting",
@@ -298,10 +302,15 @@ it("uses the Pi owner rather than quality case IDs across edits and restored run
 	expect(fork.review.mock.calls[0]![0].piSessionId).toBe("fork-owner");
 });
 
-it("logs checking once per review and attaches compact approval metadata", async () => {
+it("logs one readability stage across provider retries and marks its approval", async () => {
 	const h = harness();
 	h.review.mockImplementation(async (options) => {
-		expect(h.pi.appendEntry).toHaveBeenCalledWith(QUALITY_CHECK_ENTRY, { caseId: h.runtime.state!.id });
+		expect(h.pi.appendEntry).toHaveBeenCalledWith(QUALITY_CHECK_ENTRY, {
+			checkId: expect.any(String),
+			caseId: h.runtime.state!.id,
+			stages: [{ source: "readability" }],
+		});
+		expect(h.ctx.ui.setStatus).toHaveBeenLastCalledWith("code-quality", "quality check: readability");
 		expect(h.qualityHeaders.at(-1)?.checkCount).toBe(1);
 		options.onAttempt?.(1);
 		options.onAttempt?.(2);
@@ -319,8 +328,122 @@ it("logs checking once per review and attaches compact approval metadata", async
 			details: { outcome: "approved" },
 		},
 	]);
+	expect(h.ctx.ui.setStatus).toHaveBeenCalledWith("code-quality", "quality check: readability ✓");
 	expect(h.ctx.ui.setStatus).toHaveBeenLastCalledWith("code-quality", "approved");
+	expect(h.pi.appendEntry).toHaveBeenCalledWith(QUALITY_CHECK_UPDATE_ENTRY, {
+		checkId: expect.any(String),
+		caseId: h.runtime.state!.id,
+		stages: [{ source: "readability", outcome: "passed" }],
+	});
 	expect(h.qualityHeaders.at(-1)?.rejectionCount).toBe(0);
+});
+
+it("shows LSP progress before diagnostics and adds readability to the same pass", async () => {
+	const h = harness();
+	h.runtime.ports.lsp = {
+		revision: 0,
+		configRevision: "profile",
+		check: vi.fn(async (_files, _signal, onStart): Promise<LspCheckResult> => {
+			onStart?.();
+			expect(h.ctx.ui.setStatus).toHaveBeenLastCalledWith("code-quality", "quality check: lsp");
+			expect(h.pi.appendEntry).toHaveBeenCalledWith(QUALITY_CHECK_ENTRY, {
+				checkId: expect.any(String),
+				caseId: h.runtime.state!.id,
+				stages: [{ source: "lsp" }],
+			});
+			expect(h.qualityHeaders.at(-1)).toMatchObject({ phase: "checking", checkCount: 1 });
+			return {
+				kind: "checked",
+				findings: [],
+				generation: "server",
+				workspaceRevision: 0,
+				hashes: {},
+				elapsedMs: 1,
+			};
+		}),
+	};
+	h.review.mockImplementation(async () => {
+		expect(h.pi.appendEntry).toHaveBeenLastCalledWith(QUALITY_CHECK_UPDATE_ENTRY, {
+			checkId: expect.any(String),
+			caseId: h.runtime.state!.id,
+			stages: [{ source: "lsp", outcome: "passed" }, { source: "readability" }],
+		});
+		return approved();
+	});
+	await edit(h, "const count = 1;");
+	const starts = h.pi.appendEntry.mock.calls.filter(([type]) => type === QUALITY_CHECK_ENTRY);
+	expect(starts).toHaveLength(1);
+	const { checkId } = starts[0]![1] as QualityCheckData;
+	expect(h.runtime.checkDisplay(checkId)?.stages).toEqual([
+		{ source: "lsp", outcome: "passed" },
+		{ source: "readability", outcome: "passed" },
+	]);
+	h.runtime.start(h.ctx);
+	expect(h.runtime.checkDisplay(checkId)?.stages).toEqual([
+		{ source: "lsp", outcome: "passed" },
+		{ source: "readability", outcome: "passed" },
+	]);
+	expect(h.qualityHeaders.at(-1)?.checkCount).toBe(1);
+	h.entries.length = 0;
+	h.runtime.start(h.ctx);
+	expect(h.runtime.checkDisplay(checkId)).toBeUndefined();
+});
+
+it("does not show an LSP stage when no configured route matches", async () => {
+	const h = harness();
+	h.runtime.ports.lsp = {
+		revision: 0,
+		configRevision: "profile",
+		check: vi.fn().mockResolvedValue(undefined),
+	};
+	await edit(h, "const count = 1;");
+	const starts = h.pi.appendEntry.mock.calls.filter(([type]) => type === QUALITY_CHECK_ENTRY);
+	expect(starts).toHaveLength(1);
+	expect(starts[0]![1]).toMatchObject({ stages: [{ source: "readability" }] });
+	expect(h.ctx.ui.setStatus).not.toHaveBeenCalledWith("code-quality", "quality check: lsp");
+});
+
+it("restores an unfinished stage as interrupted rather than still running", () => {
+	const h = harness();
+	h.entries.push({
+		type: "custom",
+		customType: QUALITY_CHECK_ENTRY,
+		data: { checkId: "unfinished", caseId: "old-case", stages: [{ source: "readability" }] },
+	});
+	h.runtime.start(h.ctx);
+	expect(h.runtime.checkDisplay("unfinished")?.stages).toEqual([
+		{ source: "readability", outcome: "interrupted" },
+	]);
+});
+
+it("marks a stale review without approving its outdated snapshot", async () => {
+	const h = harness();
+	h.review.mockImplementation(async () => {
+		writeFileSync(h.path, "const count = 2;");
+		return approved();
+	});
+	const result = await edit(h, "const count = 1;");
+	expect(result?.entries?.[0]).toMatchObject({ details: { outcome: "stale" } });
+	expect(h.pi.appendEntry).toHaveBeenCalledWith(QUALITY_CHECK_UPDATE_ENTRY, {
+		checkId: expect.any(String),
+		caseId: h.runtime.state!.id,
+		stages: [{ source: "readability", outcome: "stale" }],
+	});
+});
+
+it("marks cancelled readability checks as interrupted", async () => {
+	const h = harness();
+	h.review.mockResolvedValue({
+		kind: "cancelled",
+		reason: "Cancelled",
+		metrics: { requests: 1, latencyMs: 1, usages: [] },
+	});
+	await edit(h, "const count = 1;");
+	expect(h.pi.appendEntry).toHaveBeenCalledWith(QUALITY_CHECK_UPDATE_ENTRY, {
+		checkId: expect.any(String),
+		caseId: h.runtime.state!.id,
+		stages: [{ source: "readability", outcome: "interrupted" }],
+	});
 });
 
 it("restores quality check totals from the active branch without carrying abandoned reviews", async () => {
@@ -371,9 +494,14 @@ it("numbers rejection log lines from one", async () => {
 	h.review.mockResolvedValue(namingRejection(h.path, "x"));
 	const initial = await edit(h, "x");
 	expect(initial?.entries?.[0]).toMatchObject({
-		details: { outcome: "rejected", rejection: 1 },
+		details: {
+			outcome: "rejected",
+			rejection: 1,
+			rejectionText: `Name the count\n\n${h.path}:1 [names] Name the count`,
+		},
 		content: expect.stringContaining("Name the count"),
 	});
+	expect(h.ctx.ui.setStatus).toHaveBeenCalledWith("code-quality", "quality check: readability ✕");
 	expect(h.ctx.ui.setStatus).toHaveBeenLastCalledWith("code-quality", "handling rejection 1");
 	await disagree(h, "This is a coordinate name.");
 	const second = await h.runtime.boundary(h.ctx, "completed");
@@ -395,6 +523,7 @@ it("does not label an explicitly waived failed review as approved", async () => 
 	vi.mocked(h.ui.failure).mockResolvedValue("waive");
 	const result = await edit(h, "const count = 1;");
 	expect(result?.entries?.[0]).toMatchObject({ details: { outcome: "waived" } });
+	expect(h.ctx.ui.setStatus).toHaveBeenCalledWith("code-quality", "quality check: readability ✕");
 	expect(h.ctx.ui.setStatus).toHaveBeenLastCalledWith("code-quality", "waived");
 	expect(h.qualityHeaders.at(-1)).toMatchObject({ checkCount: 1, rejectionCount: 0 });
 	h.runtime.start(h.ctx);

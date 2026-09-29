@@ -1,12 +1,42 @@
 export const QUALITY_CHECK_ENTRY = "code-quality:checking";
-export const CHECKING_QUALITY_LABEL = "Checking Quality...";
+export const QUALITY_CHECK_UPDATE_ENTRY = "code-quality:check-update";
+
+export type QualityCheckSource = "lsp" | "readability";
+export type QualityCheckOutcome = "passed" | "failed" | "stale" | "interrupted";
+export interface QualityCheckStage {
+	source: QualityCheckSource;
+	outcome?: QualityCheckOutcome;
+}
+export interface QualityCheckData {
+	checkId: string;
+	caseId: string;
+	stages: QualityCheckStage[];
+}
+
+export function qualityCheckLabel(stage: QualityCheckStage): string {
+	const label = `quality check: ${stage.source}`;
+	switch (stage.outcome) {
+		case "passed":
+			return `${label} ✓`;
+		case "failed":
+			return `${label} ✕`;
+		case "stale":
+			return `${label} ✕ (outdated)`;
+		case "interrupted":
+			return `${label} ✕ (interrupted)`;
+		default:
+			return label;
+	}
+}
 
 export type QualityFeedbackDetails =
-	| { outcome: "rejected"; rejection: number }
+	| { outcome: "rejected"; rejection: number; rejectionText?: string }
 	| { outcome: "approved" | "waived" | "not_reviewed" | "applying" | "retrying" | "stale" | "awaiting_user" };
 
 export function qualityFeedbackLabel(details: unknown): string {
-	if (!details || typeof details !== "object") return "quality";
+	if (!details || typeof details !== "object") {
+		return "quality";
+	}
 	const value = details as { outcome?: unknown; rejection?: unknown };
 	switch (value.outcome) {
 		case "approved":

@@ -1,7 +1,7 @@
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { QualityController, type RuntimePorts } from "./controller.js";
-import { qualityUI, feedbackRenderer, checkingRenderer } from "./ui.js";
+import { qualityUI, feedbackRenderer, createCheckingRenderer } from "./ui.js";
 import { createQualityActivityPublisher, type QualityActivityPublisher } from "./activity.js";
 import { QUALITY_CHECK_ENTRY } from "./feedback.js";
 import { LspManager } from "./lsp-manager.js";
@@ -19,7 +19,10 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 	let sessionAbort = new AbortController();
 	let lspSetupError: string | undefined;
 	pi.registerMessageRenderer("code-quality:feedback", feedbackRenderer);
-	pi.registerEntryRenderer(QUALITY_CHECK_ENTRY, checkingRenderer);
+	pi.registerEntryRenderer(
+		QUALITY_CHECK_ENTRY,
+		createCheckingRenderer((id) => runtime.checkDisplay(id)),
+	);
 	pi.on("session_start", (_event, ctx) => {
 		context = ctx;
 		sessionAbort = new AbortController();
@@ -33,11 +36,11 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 				activity?.updateLsp(lsp?.header ?? []);
 				if (context) context.ui.setStatus("quality-lsp", lsp?.statusText());
 			});
-			const checkFilesAfterStartup: LspManager["check"] = async (files, signal) => {
+			const checkFilesAfterStartup: LspManager["check"] = async (files, signal, onStart) => {
 				const manager = lsp!;
 				await lspStartup;
 				signal.throwIfAborted();
-				return manager.check(files, signal);
+				return manager.check(files, signal, onStart);
 			};
 			runtime.ports.lsp = {
 				check: checkFilesAfterStartup,

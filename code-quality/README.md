@@ -85,9 +85,9 @@ Provider failures have a separate budget: the first four failures wait 2/4/6/8 s
 
 ## Compact review log
 
-Each review pass displays `Checking Quality...`, followed by `approved` or `handling rejection N`. Rejection numbering starts at 1 for the initial rejection and advances with unresolved response-and-review rounds. Retries and file groups within one pass do not add checking lines. Explicit waivers remain labeled `waived`, not `approved`.
+Each review pass displays `quality check: lsp` when matching LSP checks run, then `quality check: readability` when model review starts. Each stage's line gains `✓` on success or `✕` on rejection or failure; outdated and interrupted checks are labeled explicitly. Completed stage results survive reloads and follow the active session branch. Retries and file groups within one pass do not add duplicate checking lines or increase the pass count.
 
-Collapsed feedback entries show only the short label. Expand an entry to inspect case IDs, snapshot details, rationale, and proposed edits; the executing agent still receives the full feedback. The checking line is presentation-only and is not added to model context.
+The outcome remains `approved`, `handling rejection N`, or an explicit `waived` rather than claiming approval for a waiver. Rejection numbering starts at 1 for the initial rejection and advances with unresolved response-and-review rounds. Rejections show the reviewer's rationale and file/line findings (or LSP diagnostics) without expansion. Expand feedback to inspect full case IDs, snapshot details, protocol instructions, and proposed edits; the executing agent still receives the full feedback. Checking lines and their completion updates are presentation-only and are not added to model context.
 
 ## Atelier status
 
