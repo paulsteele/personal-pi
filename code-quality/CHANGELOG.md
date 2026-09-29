@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.3 — 2026-09-29
+
+- Fix shared LSP broker crashes from file-handle exhaustion in large macOS workspaces by using native recursive watching instead of per-file watchers. Keep dependency changes observable without excluding restored packages.
+- Report workspace watcher failures to attached clients and refuse checks until the broker is recreated, rather than crashing or reporting unchecked results. Wait for portable watcher initialization before serving checks.
+- Add watcher and broker regression tests for startup failures, runtime errors, event normalization, exclusions, and shutdown. Validate Roslyn setup against a large C# solution with restored NuGet dependencies.
+
 ## 1.5.2 — 2026-09-29
 
 - Fix LSP source discovery stopping inside dependency trees before reaching application source. Use sorted Git-listed files with standard ignore rules, and breadth-first traversal when Git discovery is unavailable.

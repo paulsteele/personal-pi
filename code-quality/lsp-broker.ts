@@ -5,8 +5,7 @@ import { createInterface } from "node:readline";
 import { LspClient } from "./lsp-client.js";
 import { canonicalPath, inside } from "./capture.js";
 import { digest } from "./proposal.js";
-import { watch } from "chokidar";
-import { FileChangeType } from "vscode-languageserver-protocol";
+import { watchLspWorkspace } from "./lsp-workspace-watch.js";
 import {
 	parseBrokerRequest,
 	type BrokerLaunch,
@@ -21,6 +20,7 @@ export async function runLspBroker(launch: BrokerLaunch): Promise<void> {
 	const pending = new Map<string, AbortController>();
 	let workspaceRevision = 0;
 	let retiring = false;
+	let watcherFailure: string | undefined;
 	let generation = launch.generation;
 	let state: LspServerStatus = {
 		id: launch.route.id,
@@ -47,7 +47,7 @@ export async function runLspBroker(launch: BrokerLaunch): Promise<void> {
 			launch.route,
 			launch.root,
 			(phase, reason) => {
-				state = { ...state, phase, ...(reason ? { reason } : { reason: undefined }) };
+				state = { ...state, phase: watcherFailure ? "failed" : phase, reason: watcherFailure ?? reason };
 				broadcast("status");
 			},
 			() => {
@@ -59,11 +59,11 @@ export async function runLspBroker(launch: BrokerLaunch): Promise<void> {
 			join(launch.directory, "guard.json"),
 		);
 	let client: LspClient;
-	let ready: Promise<void>;
+	let ready: Promise<void[]>;
 	const startClient = () => {
 		client = makeClient();
-		ready = client.start().catch((error) => {
-			state = { ...state, phase: "failed", reason: String(error) };
+		ready = Promise.all([client.start(), watcher.ready]).catch((error) => {
+			state = { ...state, phase: "failed", reason: watcherFailure ?? String(error) };
 			broadcast("status");
 			throw error;
 		});
@@ -80,30 +80,32 @@ export async function runLspBroker(launch: BrokerLaunch): Promise<void> {
 		queue = result.catch(() => {});
 		return result;
 	};
-	const watcher = watch(launch.root, {
-		ignoreInitial: true,
-		ignored: (path, stat) =>
-			/(?:^|[/\\])(?:\.git|node_modules|target|obj|bin|\.venv)(?:[/\\]|$)/.test(path) ||
-			Boolean(stat && !stat.isDirectory() && path.endsWith("probe-trace.json")),
-	});
-	watcher.on("all", (event, path) => {
-		if (!["add", "change", "unlink"].includes(event) || retiring) return;
-		workspaceRevision++;
-		broadcast("invalidated");
-		void enqueue(async () => {
-			await ready;
-			const changeKind =
-				event === "add"
-					? FileChangeType.Created
-					: event === "unlink"
-						? FileChangeType.Deleted
-						: FileChangeType.Changed;
-			await client.fileChanged(path, changeKind);
-		}).catch((error) => {
-			state = { ...state, phase: "failed", reason: String(error) };
-			broadcast("status");
-		});
-	});
+	const watcher = watchLspWorkspace(
+		launch.root,
+		(path, changeKind) => {
+			if (retiring || watcherFailure) {
+				return;
+			}
+			workspaceRevision++;
+			broadcast("invalidated");
+			void enqueue(async () => {
+				await ready;
+				await client.fileChanged(path, changeKind);
+			}).catch((error) => {
+				state = { ...state, phase: "failed", reason: watcherFailure ?? String(error) };
+				broadcast("status");
+			});
+		},
+		(error) => {
+			if (retiring || watcherFailure) {
+				return;
+			}
+			watcherFailure = `Workspace watcher failed for ${launch.root}: ${error.message}; reload all attached Pi sessions to recreate the broker`;
+			workspaceRevision++;
+			state = { ...state, phase: "failed", reason: watcherFailure };
+			broadcast("invalidated");
+		},
+	);
 
 	const server = createServer((socket) => {
 		let bytes = 0;
@@ -145,6 +147,9 @@ export async function runLspBroker(launch: BrokerLaunch): Promise<void> {
 		checkingClients.add(request.clientId);
 		try {
 			await ready;
+			if (watcherFailure) {
+				return { kind: "unavailable", reason: watcherFailure };
+			}
 			const hashes: Record<string, string> = {};
 			for (const file of request.files!) {
 				const path = canonicalPath(file.path);
@@ -161,6 +166,9 @@ export async function runLspBroker(launch: BrokerLaunch): Promise<void> {
 				hashes[path] = file.hash;
 				await client.synchronize(path, language, text);
 			}
+			if (watcherFailure) {
+				return { kind: "unavailable", reason: watcherFailure };
+			}
 			const revision = workspaceRevision;
 			state = { ...state, phase: "checking" };
 			broadcast("status");
@@ -172,8 +180,12 @@ export async function runLspBroker(launch: BrokerLaunch): Promise<void> {
 			for (const [path, hash] of Object.entries(hashes))
 				if (digest(await readFile(path, "utf8")) !== hash)
 					return { kind: "stale", reason: "File changed while diagnostics were running" };
-			if (revision !== workspaceRevision)
+			if (watcherFailure) {
+				return { kind: "unavailable", reason: watcherFailure };
+			}
+			if (revision !== workspaceRevision) {
 				return { kind: "stale", reason: "Workspace changed during diagnostics" };
+			}
 			if (JSON.stringify(findings).length > 1024 * 1024) throw new Error("Complete diagnostics exceed 1 MiB");
 			return {
 				kind: "checked",
@@ -186,10 +198,10 @@ export async function runLspBroker(launch: BrokerLaunch): Promise<void> {
 		} catch (error) {
 			return signal.aborted
 				? { kind: "cancelled", reason: "Client cancelled the check" }
-				: { kind: "unavailable", reason: String(error) };
+				: { kind: "unavailable", reason: watcherFailure ?? String(error) };
 		} finally {
 			checkingClients.delete(request.clientId);
-			if (!retiring && state.phase === "checking") {
+			if (!retiring && !watcherFailure && state.phase === "checking") {
 				state = { ...state, phase: "ready" };
 				broadcast("status");
 			}
@@ -245,6 +257,9 @@ export async function runLspBroker(launch: BrokerLaunch): Promise<void> {
 			return;
 		}
 		if (request.method === "restart") {
+			if (watcherFailure) {
+				throw new Error(watcherFailure);
+			}
 			if (!restarting) {
 				for (const controller of pending.values()) controller.abort();
 				restarting = enqueue(async () => {

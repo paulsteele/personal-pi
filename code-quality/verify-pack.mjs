@@ -22,6 +22,7 @@ for (const required of [
 	"lsp-client.ts",
 	"lsp-manager.ts",
 	"lsp-broker.ts",
+	"lsp-workspace-watch.ts",
 	"lsp-broker-protocol.ts",
 	"lsp-broker-registry.ts",
 	"lsp-broker-host.mjs",
