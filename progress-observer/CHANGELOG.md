@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.0 — 2026-09-29
+
+- Correlate LiteLLM progress observations in a separate per-Pi activity log session, retaining grouping on resume and assigning new groups to new or forked sessions.
+
 ## 1.4.2 — 2026-09-28
 
 - Use SDK types for observation calls and settle cancellation/timeouts even when a provider ignores abort. Release queued refreshes after a timeout while retaining the last summary and ignoring late results.

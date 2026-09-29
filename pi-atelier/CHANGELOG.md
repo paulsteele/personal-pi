@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.0 — 2026-09-29
+
+- Show configured language servers, running states, and shared-client counts alongside the quality analyzer model, wrapping entries at narrow widths.
+- Display persistent quality check/rejection totals in the activity track while keeping source and diagnostic details out of presentation events.
+
 ## 1.4.1 — 2026-09-25
 
 - Accept Code Quality activity through the sixth request, accounting for one submission repair alongside the provider retry budget.

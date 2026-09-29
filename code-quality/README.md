@@ -23,10 +23,14 @@ The provider/model values above are placeholders, not defaults. `/quality status
 
 ## LSP setup and operation
 
-Run `/quality lsp setup` in a trusted project. The guided flow detects source languages, selects workspace roots and server executables, offers an explicitly approved private installation, validates a representative file, then asks before activation. Escape cancels. Setup never installs SDKs, edits project dependencies, or changes shell PATH. Existing code diagnostics do not prevent configuration activation.
+Run `/quality lsp setup` in a trusted project. One checklist shows detected and already configured languages. Toggle languages with Space or Enter, then Continue. Setup reuses existing server configurations, automatically chooses an installed executable or offers a private installation, infers workspace roots, and generates server names. It asks about roots or C# solutions only when there is no single clear choice; one solution is preferred over its constituent projects.
+
+Choose **Validate and enable** to authorize local analysis and activate checking if validation succeeds. There is no second activation prompt. Cancelling, failed validation, or configuration changes during validation leave the active profile unchanged. Existing source diagnostics do not prevent activation, and operational summaries stay out of the main transcript.
+
+**Advanced** contains custom servers, explicit executable paths/root overrides, and editable configuration. Existing environment, settings, and timeout overrides are preserved for languages you keep selected. Deselecting a language removes its routes from the proposed configuration; selecting none disables LSP checking. Setup never installs SDKs, edits project dependencies, or changes shell PATH.
 
 ```text
-/quality lsp setup                 Guided setup and activation
+/quality lsp setup                 Language checklist; validate and enable
 /quality lsp setup edit            Open a private editable draft
 /quality lsp setup approve         Validate and approve that draft
 /quality lsp status                Configured servers, states, sharing, failures

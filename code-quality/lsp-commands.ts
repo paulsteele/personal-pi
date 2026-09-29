@@ -63,7 +63,9 @@ export async function handleLspCommand(
 		if (!routes.length) throw new Error(`Unknown configured server: ${argument}`);
 		for (const route of routes) {
 			const result = await ports.validate(route, project, signal);
-			ctx.ui.notify(`${route.id}: ${result.summary}`, result.ready ? "info" : "warning");
+			if (!result.ready) {
+				ctx.ui.notify(`${route.id}: ${result.summary}`, "warning");
+			}
 		}
 		return;
 	}

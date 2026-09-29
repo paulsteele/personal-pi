@@ -22,7 +22,7 @@ Permission System and Progress Observer load before Atelier so their replayable 
 After the public repository and release tag exist:
 
 ```sh
-pi install https://github.com/paulsteele/personal-pi@v1.4.2
+pi install https://github.com/paulsteele/personal-pi@v1.5.0
 ```
 
 The dotfiles repository normally records the same pinned source in `~/.pi/agent/settings.json`, so Pi installs a missing user package automatically at startup when online. The public HTTPS URL requires no SSH alias or repository credentials.
@@ -105,7 +105,7 @@ Source and dependencies live in Pi's managed git checkout. Runtime Permission Sy
 
 PR review methodology and personal-global rules are versioned here in `pr-review/prompts/`; only generated repo semantics and runtime settings live in Pi config. Run `/pr setup` to create a private context draft, inspect it, then run `/pr setup approve` to activate it before the first review. Use `/pr model` to choose the independent model and `/pr` to review changes. Existing approved context is reused; `/pr setup regenerate` explicitly creates a replacement draft that also requires inspection and `/pr setup approve`. Verified findings open in the already-loaded Plannotator UI without a version allowlist; submitted feedback goes to the main agent without a second fix-selection screen. The harness never installs or updates Plannotator. See [`pr-review/README.md`](pr-review/README.md) for compatibility, privacy, scope, and verification details.
 
-The Code Quality gate injects its versioned clarity policy and reviews explicit edit/write batches in interactive sessions. Configure its independent reviewer with `/quality-model`. It pauses unrelated work while feedback is unresolved. Corrections and bounded disagreements return to the reviewer, sharing five response-and-review rounds before automatic terminal arbitration. Known generated/lock filenames auto-approve without model review. See [`code-quality/README.md`](code-quality/README.md) for coverage, privacy, controls, and recovery. It does not replace tests, permissions, or PR review.
+The Code Quality gate injects its versioned clarity policy and reviews explicit edit/write batches in interactive sessions. Configure its independent reviewer with `/quality-model` and optional project LSP diagnostics with `/quality lsp setup`. LSPs share warm servers across matching Pi instances; all diagnostic severities enter the existing correction flow before readability review. It pauses unrelated work while feedback is unresolved. Corrections and bounded disagreements return to the reviewer, sharing five response-and-review rounds before automatic terminal arbitration. Known generated/lock filenames auto-approve without model review. See [`code-quality/README.md`](code-quality/README.md) for coverage, privacy, controls, and recovery. It does not replace tests, permissions, or PR review.
 
 The Progress Observer uses a separate model to infer goal/progress/current/next state for Atelier's upper sidebar pane. It is TUI-only, memory-only, never injects into the main agent conversation, and degrades without interrupting work. See [`progress-observer/README.md`](progress-observer/README.md) for cadence, commands, privacy, and cost details.
 

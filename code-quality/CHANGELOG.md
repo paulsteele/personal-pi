@@ -1,11 +1,14 @@
 # Changelog
 
-## Unreleased
+## 1.5.0 — 2026-09-29
 
 - Add project-configured LSP diagnostics before readability review. All reported severities use the existing correction rounds and operator arbitration; warnings and hints are not filtered out.
 - Add guided private setup, pinned server installations with approval, doctor/status/restart controls, and worktree-shared profiles for C#, TypeScript/JavaScript, Python, Rust, and Go.
 - Share warm LSP processes through a local broker, retaining per-Pi cases and shutting down after the last client disconnects. Show server names, lifecycle state, and sharing counts in Atelier's quality row.
 - Add real-server compatibility probes, packed-loader checks, and regression tests for stale diagnostics, cancellation, restart, creator crashes, and no-proposal arbitration. Real-server validation currently covers macOS arm64.
+- Simplify setup to one language checklist with automatic executable/root/name selection and a single validate-and-enable confirmation. Keep custom overrides behind Advanced and suppress routine operational messages in the transcript.
+- Correlate LiteLLM reviewer calls in a separate per-Pi quality session without changing main-model or routing/cache identities.
+- Preserve quality check/rejection counters across session navigation and clarify explicit conditional-block requirements in the readability policy.
 
 ## 1.4.2 — 2026-09-28
 

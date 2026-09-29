@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.0 — 2026-09-29
+
+- Group LiteLLM PR setup, workers, verification, compaction, and repeated reviews in a separate per-Pi PR log session. Preserve individual worker routing/cache IDs and permission checks.
+
 ## 1.4.2 — 2026-09-28
 
 - Move the shared cancellation helper into a non-UI module so task recovery and snapshot reads no longer depend on the work UI. Preserve abort reasons and late-rejection handling.

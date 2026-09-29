@@ -29,6 +29,8 @@ for (const required of [
 	"lsp-profile.ts",
 	"lsp-presets.ts",
 	"lsp-setup.ts",
+	"lsp-setup-ui.ts",
+	"lsp-setup-defaults.ts",
 	"lsp-install.ts",
 	"lsp-commands.ts",
 	"lsp-diagnostics.ts",

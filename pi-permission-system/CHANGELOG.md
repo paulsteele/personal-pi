@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.0 — 2026-09-29
+
+- Correlate LiteLLM classifier calls, retries, and delegated PR permission checks in a separate per-Pi auto log session, without changing main-model or cache/routing identities.
+
 ## 1.4.2 — 2026-09-28
 
 - Use SDK types for classifier calls and settle cancellation/timeouts even when a provider ignores abort. Preserve one deadline across malformed-response retries and prevent late results from approving cancelled actions.

@@ -3,7 +3,9 @@ import { join, relative, resolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { canonicalPath, inside } from "./capture.js";
 import { installLsp, installationPlan, installedManagedExecutable } from "./lsp-install.js";
-import { findExecutable, LSP_PRESETS, presetRoute } from "./lsp-presets.js";
+import { findExecutable, LSP_PRESETS, presetRoute, type LspPresetDefinition } from "./lsp-presets.js";
+import { selectLspLanguages, type LspLanguageChoice } from "./lsp-setup-ui.js";
+import { chooseCsharpProject, chooseWorkspaceRoot, nextRouteId } from "./lsp-setup-defaults.js";
 import {
 	approveLspDraft,
 	loadLspDraft,
@@ -23,6 +25,7 @@ export interface LspValidation {
 export interface LspSetupPorts {
 	validate(route: LspRoute, project: LspProject, signal: AbortSignal): Promise<LspValidation>;
 	progress(text: string): void;
+	selectLanguages?: typeof selectLspLanguages;
 }
 export interface ProjectDiscovery {
 	files: string[];
@@ -67,7 +70,7 @@ function approvedWorkspace(project: LspProject, root: string): string {
 	return relative(project.root, resolved) || ".";
 }
 
-async function chooseRoute(
+async function chooseAdvancedRoute(
 	ctx: ExtensionContext,
 	project: LspProject,
 	agentDir: string,
@@ -75,20 +78,17 @@ async function chooseRoute(
 	existingIds: Set<string>,
 	signal: AbortSignal,
 	ports: LspSetupPorts,
-): Promise<LspRoute | "finished" | undefined> {
+): Promise<LspRoute | undefined> {
 	const labels = LSP_PRESETS.map((preset) => {
 		const detected = files.some((file) =>
 			Object.keys(preset.extensions).some((extension) => file.endsWith(extension)),
 		);
 		return `${preset.label}${detected ? " (detected)" : ""}`;
 	});
-	const choice = await ctx.ui.select(
-		"Add a language server",
-		[...labels, "Custom stdio server", "Finish configuration"],
-		{ signal },
-	);
-	if (!choice) return undefined;
-	if (choice === "Finish configuration") return "finished";
+	const choice = await ctx.ui.select("Add a language server", [...labels, "Custom stdio server", "Cancel"], {
+		signal,
+	});
+	if (!choice || choice === "Cancel") return undefined;
 	const rootInput = await ctx.ui.input("Workspace root relative to project", ".", { signal });
 	if (rootInput === undefined) return undefined;
 	const root = approvedWorkspace(project, rootInput || ".");
@@ -151,28 +151,80 @@ async function chooseRoute(
 			diagnosticTimeoutMs: 10000,
 		};
 	}
-	const requestedId = await ctx.ui.input("Unique server route name", route.id, { signal });
-	if (requestedId === undefined) return undefined;
-	route.id = requestedId || route.id;
-	if (existingIds.has(route.id))
-		throw new Error(`Route ${route.id} already exists; edit the draft to replace it`);
+	route.id = nextRouteId(route.preset, root, existingIds);
 	if (route.preset === "roslyn") {
-		const projects = files.filter(
-			(file) =>
-				/\.(csproj|sln|slnx)$/.test(file) && inside(resolve(project.root, root), resolve(project.root, file)),
-		);
-		const selected =
-			projects.length === 1
-				? projects[0]
-				: await ctx.ui.select("C# solution/project", [...projects, "Enter relative path"], { signal });
+		const selected = await chooseCsharpProject(ctx, project, root, files, signal);
 		if (!selected) return undefined;
-		const path =
-			selected === "Enter relative path"
-				? await ctx.ui.input("Project path relative to workspace", undefined, { signal })
-				: relative(resolve(project.root, root), resolve(project.root, selected));
-		if (!path) return undefined;
-		route.project = path;
+		route.project = selected;
 	}
+	return route;
+}
+
+function languageChoices(files: string[], profile: LspProfile) {
+	const configured = new Set(profile.routes.map((route) => route.preset));
+	const choices: LspLanguageChoice[] = LSP_PRESETS.flatMap((preset) => {
+		const detected = files.some((file) =>
+			Object.keys(preset.extensions).some((extension) => file.endsWith(extension)),
+		);
+		if (!detected && !configured.has(preset.id)) {
+			return [];
+		}
+		const isConfigured = configured.has(preset.id);
+		const selectedByDefault = isConfigured || profile.routes.length === 0;
+		return [
+			{
+				id: preset.id,
+				label: preset.label,
+				description: isConfigured ? "Keep existing configuration" : "Detected in this project",
+				selected: selectedByDefault,
+			},
+		];
+	});
+	if (configured.has("custom")) {
+		choices.push({
+			id: "custom",
+			label: "Custom servers",
+			description: "Keep existing custom configurations",
+			selected: true,
+		});
+	}
+	return choices;
+}
+
+async function configureDetectedServer(
+	ctx: ExtensionContext,
+	project: LspProject,
+	agentDir: string,
+	preset: LspPresetDefinition,
+	files: string[],
+	routes: LspRoute[],
+	ports: LspSetupPorts,
+	signal: AbortSignal,
+): Promise<LspRoute | undefined> {
+	const root = await chooseWorkspaceRoot(ctx, preset, files, signal);
+	if (root === undefined) return undefined;
+	let projectPath: string | undefined;
+	if (preset.id === "roslyn") {
+		projectPath = await chooseCsharpProject(ctx, project, root, files, signal);
+		if (!projectPath) return undefined;
+	}
+	const managed = await installedManagedExecutable(agentDir, preset);
+	const installedExecutable = managed ?? (await findExecutable(preset.executable, project.root));
+	const executablePath =
+		installedExecutable ??
+		(await installLsp(
+			installationPlan(agentDir, preset),
+			{
+				approve: (summary) => ctx.ui.confirm("Install missing language server?", summary, { signal }),
+				progress: ports.progress,
+			},
+			signal,
+		));
+	const id = nextRouteId(preset.id, root, new Set(routes.map((route) => route.id)));
+	const route = presetRoute(preset, executablePath, preset.id, root);
+	route.id = id;
+	if (installedExecutable && !managed) route.version = `external; preset tested with ${preset.version}`;
+	if (projectPath) route.project = projectPath;
 	return route;
 }
 
@@ -182,14 +234,23 @@ export async function approveLspSetup(
 	project: LspProject,
 	ports: LspSetupPorts,
 	signal: AbortSignal,
+	options: { showDetails?: boolean } = {},
 ): Promise<StoredLspProfile | undefined> {
 	const pending = await loadLspDraft(agentDir, project);
 	if (!pending) throw new Error("No LSP draft. Run /quality lsp setup first.");
 	if (!ctx.isProjectTrusted()) throw new Error("Trust this project before starting its language servers");
-	const summary = pending.draft.profile.routes.map(routeSummary).join("\n\n");
+	const summary = pending.draft.profile.routes
+		.map((route) => {
+			if (options.showDetails) return routeSummary(route);
+			const label = LSP_PRESETS.find((preset) => preset.id === route.preset)?.label ?? route.id;
+			return `${label} · ${route.root}${route.project ? ` · ${route.project}` : ""}\n${route.command} ${route.args.join(" ")}`;
+		})
+		.join("\n\n");
 	const consent = await ctx.ui.confirm(
-		"Run language-server validation?",
-		`${summary}\n\nThese local processes can read project dependencies, run analyzers/build tooling, access inherited environment, and write caches. No formatting or server-requested edits will be applied.`,
+		pending.draft.profile.enabled
+			? "Validate and enable LSP checking?"
+			: "Validate and save disabled LSP configuration?",
+		`${summary || "No languages selected; LSP checking will be disabled."}\n\n${pending.draft.profile.enabled ? "Enable automatic checks after validation succeeds. All diagnostic severities enter the quality correction flow." : "Save this configuration with automatic LSP checking disabled."}\nServers can read dependencies, run analyzers/build tooling, and write caches. No formatting or server-requested edits will be applied.`,
 		{ signal },
 	);
 	if (!consent) return undefined;
@@ -197,16 +258,7 @@ export async function approveLspSetup(
 		ports.progress(`Validating ${route.id}`);
 		const validation = await ports.validate(route, project, signal);
 		if (!validation.ready) throw new Error(`${route.id}: ${validation.summary}`);
-		ctx.ui.notify(`${route.id}: ${validation.summary}`, "info");
 	}
-	if (
-		!(await ctx.ui.confirm(
-			"Activate LSP quality checking?",
-			`${summary}\n\nAll reported diagnostic severities will enter the existing quality correction flow. This approves future background analysis for this project.`,
-			{ signal },
-		))
-	)
-		return undefined;
 	signal.throwIfAborted();
 	return approveLspDraft(agentDir, project, pending.revision);
 }
@@ -221,7 +273,8 @@ export async function setupLsp(
 ): Promise<StoredLspProfile | undefined> {
 	if (ctx.mode !== "tui") throw new Error("LSP quality setup requires interactive TUI mode");
 	if (!ctx.isProjectTrusted()) throw new Error("Trust this project before configuring its language servers");
-	if (mode === "approve") return approveLspSetup(ctx, agentDir, project, ports, signal);
+	if (mode === "approve")
+		return approveLspSetup(ctx, agentDir, project, ports, signal, { showDetails: true });
 	const active = await loadLspProfile(agentDir, project);
 	const pending = await loadLspDraft(agentDir, project);
 	const pendingIsActive =
@@ -243,8 +296,23 @@ export async function setupLsp(
 			"Language discovery reached its limit; choose any missing server/root manually.",
 			"warning",
 		);
-	while (!signal.aborted) {
-		const route = await chooseRoute(
+	const selection = await (ports.selectLanguages ?? selectLspLanguages)(
+		ctx,
+		languageChoices(discovery.files, profile),
+		signal,
+	);
+	if (!selection) return undefined;
+	if (selection.action === "advanced") {
+		const advancedSetupAction = await ctx.ui.select(
+			"Advanced LSP setup",
+			["Add a server with custom options", "Edit configuration file", "Cancel"],
+			{ signal },
+		);
+		if (advancedSetupAction === "Edit configuration file") {
+			return setupLsp(ctx, agentDir, project, "edit", ports, signal);
+		}
+		if (advancedSetupAction !== "Add a server with custom options") return undefined;
+		const route = await chooseAdvancedRoute(
 			ctx,
 			project,
 			agentDir,
@@ -253,11 +321,31 @@ export async function setupLsp(
 			signal,
 			ports,
 		);
-		if (route === undefined) return undefined;
-		if (route === "finished") break;
+		if (!route) return undefined;
 		profile.routes.push(route);
+		profile.enabled = true;
+	} else {
+		profile.routes = profile.routes.filter((route) => selection.selected.includes(route.preset));
+		for (const preset of LSP_PRESETS.filter((preset) => selection.selected.includes(preset.id))) {
+			if (profile.routes.some((route) => route.preset === preset.id)) continue;
+			const route = await configureDetectedServer(
+				ctx,
+				project,
+				agentDir,
+				preset,
+				discovery.files,
+				profile.routes,
+				ports,
+				signal,
+			);
+			if (!route) return undefined;
+			profile.routes.push(route);
+		}
+		profile.enabled = profile.routes.length > 0;
 	}
 	signal.throwIfAborted();
 	await saveLspDraft(agentDir, project, profile, baseRevision, pending?.revision ?? null);
-	return approveLspSetup(ctx, agentDir, project, ports, signal);
+	return approveLspSetup(ctx, agentDir, project, ports, signal, {
+		showDetails: selection.action === "advanced",
+	});
 }
