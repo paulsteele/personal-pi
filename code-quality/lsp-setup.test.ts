@@ -59,6 +59,7 @@ async function unreceiptedServerFixture(presetId: string, layout: "managed" | "t
 	await symlink("server-target", launcher);
 	await writeFile(join(fixture.project.root, "App.cs"), "class App {}\n");
 	await writeFile(join(fixture.project.root, "App.csproj"), "<Project />\n");
+	fixture.ctx.ui.select = vi.fn().mockResolvedValue("App.csproj");
 	return { ...fixture, preset, directory, executable: await realpath(executable) };
 }
 
@@ -342,7 +343,8 @@ it("offers an unreceipted Roslyn tool-root executable in advanced setup", async 
 		.fn()
 		.mockResolvedValueOnce("Add a server with custom options")
 		.mockResolvedValueOnce(`${fixture.preset.label} (detected)`)
-		.mockResolvedValueOnce(`Use ${fixture.executable}`);
+		.mockResolvedValueOnce(`Use ${fixture.executable}`)
+		.mockResolvedValueOnce("App.csproj");
 	fixture.ctx.ui.input = vi.fn().mockResolvedValue(".");
 	const result = await setupLsp(
 		fixture.ctx,
@@ -358,7 +360,8 @@ it("offers an unreceipted Roslyn tool-root executable in advanced setup", async 
 		expect.arrayContaining([`Use ${fixture.executable}`]),
 		expect.any(Object),
 	);
-	expect(result?.profile.routes[1]).toMatchObject({
+	expect(result?.profile.routes).toHaveLength(1);
+	expect(result?.profile.routes[0]).toMatchObject({
 		command: fixture.executable,
 		version: `external; preset tested with ${fixture.preset.version}`,
 		project: "App.csproj",
@@ -516,7 +519,7 @@ it("offers configuration-file editing only through Advanced without validation",
 	expect(fixture.ports.validate).not.toHaveBeenCalled();
 });
 
-it("infers roots and names and asks only for ambiguous C# solutions", async () => {
+it("infers roots and names without discarding C# projects of unknown membership", async () => {
 	expect(
 		suggestedWorkspaceRoots(presetById("typescript"), ["package.json", "packages/ui/tsconfig.json"]),
 	).toEqual(["."]);
@@ -527,7 +530,10 @@ it("infers roots and names and asks only for ambiguous C# solutions", async () =
 	]);
 	expect(nextRouteId("pyright", "backend", new Set(["pyright-backend"]))).toBe("pyright-backend-2");
 	const fixture = await setupFixture([]);
-	fixture.ctx.ui.select = vi.fn().mockResolvedValue("Tools.sln");
+	fixture.ctx.ui.select = vi
+		.fn()
+		.mockResolvedValueOnce("tests/Test.csproj")
+		.mockResolvedValueOnce("Tools.sln");
 	const signal = new AbortController().signal;
 	expect(
 		await chooseCsharpProject(
@@ -537,8 +543,12 @@ it("infers roots and names and asks only for ambiguous C# solutions", async () =
 			["App.sln", "src/App.csproj", "tests/Test.csproj"],
 			signal,
 		),
-	).toBe("App.sln");
-	expect(fixture.ctx.ui.select).not.toHaveBeenCalled();
+	).toBe("tests/Test.csproj");
+	expect(fixture.ctx.ui.select).toHaveBeenCalledWith(
+		"Which C# solution/project should Roslyn load?",
+		["App.sln", "src/App.csproj", "tests/Test.csproj", "Enter a relative path"],
+		{ signal },
+	);
 	expect(
 		await chooseCsharpProject(
 			fixture.ctx,
@@ -548,7 +558,150 @@ it("infers roots and names and asks only for ambiguous C# solutions", async () =
 			signal,
 		),
 	).toBe("Tools.sln");
-	expect(fixture.ctx.ui.select).toHaveBeenCalledTimes(1);
+	expect(fixture.ctx.ui.select).toHaveBeenCalledTimes(2);
+});
+
+it("keeps a manual C# path override even with a single discovered solution", async () => {
+	const fixture = await setupFixture([]);
+	fixture.ctx.ui.select = vi.fn().mockResolvedValue("Enter a relative path");
+	fixture.ctx.ui.input = vi.fn().mockResolvedValue("tools/Standalone.csproj");
+	expect(
+		await chooseCsharpProject(
+			fixture.ctx,
+			fixture.project,
+			"src",
+			["src/App.sln"],
+			new AbortController().signal,
+		),
+	).toBe("tools/Standalone.csproj");
+	expect(fixture.ctx.ui.select).toHaveBeenCalledWith(
+		expect.any(String),
+		["src/App.sln", "Enter a relative path"],
+		expect.any(Object),
+	);
+});
+
+it("prunes nested roots with thousands of sibling modules in deterministic order", () => {
+	const roots = Array.from({ length: 2000 }, (_, index) => `modules/module-${index}`).sort();
+	const files = roots.flatMap((root) => [`${root}/go.mod`, `${root}/nested/go.mod`]).reverse();
+	expect(suggestedWorkspaceRoots(presetById("gopls"), files)).toEqual(roots);
+	expect(suggestedWorkspaceRoots(presetById("gopls"), [...files, "go.work"])).toEqual(["."]);
+});
+
+it.each([true, false])(
+	"discloses edited pending overrides before normal setup validation (consent: %s)",
+	async (consent) => {
+		const fixture = await setupFixture([true, consent]);
+		const signal = new AbortController().signal;
+		const active = await approveLspSetup(
+			fixture.ctx,
+			fixture.agentDir,
+			fixture.project,
+			fixture.ports,
+			signal,
+		);
+		fixture.route.env = { NODE_OPTIONS: "--require /private/startup.js" };
+		fixture.route.settings = { pluginPath: "/private/plugin.js" };
+		fixture.route.initializationOptions = { analyzer: "/private/analyzer.js" };
+		await saveLspDraft(fixture.agentDir, fixture.project, { ...active!.profile, routes: [fixture.route] });
+		vi.mocked(fixture.ports.validate).mockClear();
+		fixture.confirm.mockClear();
+		fixture.ports.selectLanguages = vi.fn(async () => ({
+			action: "continue" as const,
+			selected: ["typescript"],
+		}));
+		fixture.ports.validate = vi.fn(async () => {
+			expect(fixture.confirm).toHaveBeenCalledExactlyOnceWith(
+				"Validate and enable LSP checking?",
+				expect.stringContaining("Environment keys: NODE_OPTIONS"),
+				expect.any(Object),
+			);
+			return { ready: true, summary: "Operational" };
+		});
+		await setupLsp(fixture.ctx, fixture.agentDir, fixture.project, "setup", fixture.ports, signal);
+		const summary = vi.mocked(fixture.ctx.ui.confirm).mock.calls[0]![1];
+		expect(summary).toContain('Settings: {"pluginPath":"/private/plugin.js"}');
+		expect(summary).toContain('Initialization: {"analyzer":"/private/analyzer.js"}');
+		expect(fixture.ports.validate).toHaveBeenCalledTimes(consent ? 1 : 0);
+		if (!consent) expect(await loadLspProfile(fixture.agentDir, fixture.project)).toEqual(active);
+	},
+);
+
+it.each([
+	{
+		action: "Add a server with custom options",
+		expectedPresets: ["gopls", "custom", "pyright"],
+		editsConfiguration: false,
+	},
+	{ action: "Edit configuration file", expectedPresets: ["gopls", "pyright"], editsConfiguration: true },
+])(
+	"carries selected additions, removals, and retained overrides into Advanced: $action",
+	async ({ action, expectedPresets, editsConfiguration }) => {
+		const fixture = await setupFixture([true]);
+		const retained = presetRoute(presetById("gopls"), process.execPath);
+		retained.env = { GOPROXY: "off" };
+		await saveLspDraft(fixture.agentDir, fixture.project, {
+			version: 1,
+			projectId: fixture.project.id,
+			enabled: true,
+			routes: [fixture.route, retained],
+		});
+		fixture.ports.selectLanguages = vi.fn(async () => ({
+			action: "advanced" as const,
+			selected: ["gopls", "pyright"],
+		}));
+		vi.spyOn(installations, "installedManagedExecutable").mockResolvedValue(process.execPath);
+		fixture.ctx.ui.select = vi
+			.fn()
+			.mockResolvedValueOnce(action)
+			.mockResolvedValueOnce("Custom stdio server");
+		fixture.ctx.ui.input = vi
+			.fn()
+			.mockResolvedValueOnce(".")
+			.mockResolvedValueOnce(process.execPath)
+			.mockResolvedValueOnce("[]")
+			.mockResolvedValueOnce('{".ts":"typescript"}');
+		const result = await setupLsp(
+			fixture.ctx,
+			fixture.agentDir,
+			fixture.project,
+			"setup",
+			fixture.ports,
+			new AbortController().signal,
+		);
+		const draft = await loadLspDraft(fixture.agentDir, fixture.project);
+		const routes = draft!.draft.profile.routes;
+		expect(routes.map((route) => route.preset)).toEqual(expectedPresets);
+		expect(routes[0]).toEqual(retained);
+		if (editsConfiguration) {
+			expect(result).toBeUndefined();
+			expect(await loadLspProfile(fixture.agentDir, fixture.project)).toBeUndefined();
+			expect(fixture.ports.validate).not.toHaveBeenCalled();
+		} else {
+			expect(result?.profile.routes).toEqual(routes);
+			expect(vi.mocked(fixture.ports.validate).mock.calls.map(([route]) => route)).toEqual(routes);
+		}
+	},
+);
+
+it("does not publish reconciled selections when Advanced is cancelled", async () => {
+	const fixture = await setupFixture([]);
+	const initial = await loadLspDraft(fixture.agentDir, fixture.project);
+	fixture.ports.selectLanguages = vi.fn(async () => ({ action: "advanced" as const, selected: [] }));
+	fixture.ctx.ui.select = vi
+		.fn()
+		.mockResolvedValueOnce("Add a server with custom options")
+		.mockResolvedValueOnce("Cancel");
+	await setupLsp(
+		fixture.ctx,
+		fixture.agentDir,
+		fixture.project,
+		"setup",
+		fixture.ports,
+		new AbortController().signal,
+	);
+	expect(await loadLspDraft(fixture.agentDir, fixture.project)).toEqual(initial);
+	expect(fixture.ports.validate).not.toHaveBeenCalled();
 });
 
 it("discovers source and project files without descending into dependency/build directories", async () => {

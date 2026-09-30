@@ -4,25 +4,29 @@ import { inside } from "./capture.js";
 import type { LspPresetDefinition } from "./lsp-presets.js";
 import type { LspProject } from "./lsp-profile.js";
 
+export const WORKSPACE_MARKERS: Record<LspPresetDefinition["id"], readonly string[]> = {
+	roslyn: [],
+	typescript: ["package.json", "tsconfig.json", "jsconfig.json"],
+	pyright: ["pyproject.toml", "pyrightconfig.json", "setup.py"],
+	"rust-analyzer": ["Cargo.toml"],
+	gopls: ["go.work", "go.mod"],
+};
+
 export function suggestedWorkspaceRoots(preset: LspPresetDefinition, files: string[]): string[] {
-	const markers: Record<LspPresetDefinition["id"], readonly string[]> = {
-		roslyn: [],
-		typescript: ["package.json", "tsconfig.json", "jsconfig.json"],
-		pyright: ["pyproject.toml", "pyrightconfig.json", "setup.py"],
-		"rust-analyzer": ["Cargo.toml"],
-		gopls: ["go.work", "go.mod"],
-	};
 	const roots = [
-		...new Set(files.filter((file) => markers[preset.id].includes(file.split("/").at(-1)!)).map(dirname)),
+		...new Set(
+			files.filter((file) => WORKSPACE_MARKERS[preset.id].includes(file.split("/").at(-1)!)).map(dirname),
+		),
 	];
 	if (!roots.length || roots.includes(".")) {
 		return ["."];
 	}
+	const rootSet = new Set(roots.map((root) => resolve(root)));
 	return roots.sort().filter((root) => {
-		const isNestedUnderAnotherRoot = roots.some(
-			(parent) => parent !== root && inside(resolve(parent), resolve(root)),
-		);
-		return !isNestedUnderAnotherRoot;
+		for (let parent = dirname(resolve(root)); ; parent = dirname(parent)) {
+			if (rootSet.has(parent)) return false;
+			if (dirname(parent) === parent) return true;
+		}
 	});
 }
 
@@ -50,20 +54,21 @@ export async function chooseCsharpProject(
 	const candidates = files.filter(
 		(file) => /\.(csproj|sln|slnx)$/.test(file) && inside(workspace, resolve(project.root, file)),
 	);
-	const solutions = candidates.filter((file) => /\.slnx?$/.test(file));
-	const preferred = solutions.length ? solutions : candidates;
-	if (preferred.length === 1) {
-		return relative(workspace, resolve(project.root, preferred[0]!));
-	}
+	const preferred = [
+		...candidates.filter((file) => /\.slnx?$/.test(file)).sort(),
+		...candidates.filter((file) => file.endsWith(".csproj")).sort(),
+	];
 	if (preferred.length) {
-		const selected = await ctx.ui.select("Which C# solution/project should Roslyn load?", preferred, {
-			signal,
-		});
-		return selected ? relative(workspace, resolve(project.root, selected)) : undefined;
+		const manualPath = "Enter a relative path";
+		const selected = await ctx.ui.select(
+			"Which C# solution/project should Roslyn load?",
+			[...preferred, manualPath],
+			{ signal },
+		);
+		if (!selected) return undefined;
+		if (selected !== manualPath) return relative(workspace, resolve(project.root, selected));
 	}
-	return ctx.ui.input("No C# project found — enter its path relative to the workspace", undefined, {
-		signal,
-	});
+	return ctx.ui.input("C# solution/project path relative to the workspace", undefined, { signal });
 }
 
 export function nextRouteId(presetId: string, root: string, existingIds: Set<string>): string {

@@ -100,7 +100,7 @@ export async function runLspBroker(launch: BrokerLaunch): Promise<void> {
 			if (retiring || watcherFailure) {
 				return;
 			}
-			watcherFailure = `Workspace watcher failed for ${launch.root}: ${error.message}; reload all attached Pi sessions to recreate the broker`;
+			watcherFailure = `Workspace watcher failed for ${launch.root}: ${error.message}; close every Pi session attached to this workspace before reopening any of them to recreate the broker`;
 			workspaceRevision++;
 			state = { ...state, phase: "failed", reason: watcherFailure };
 			broadcast("invalidated");

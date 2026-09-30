@@ -1,8 +1,13 @@
 import { EventEmitter } from "node:events";
+import { lstatSync } from "node:fs";
+import { mkdir, mkdtemp, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, it, vi } from "vitest";
 import { FileChangeType } from "vscode-languageserver-protocol";
 import { watchLspWorkspace } from "./lsp-workspace-watch.js";
+import { LspClient } from "./lsp-client.js";
+import { presetById, presetRoute } from "./lsp-presets.js";
 
 const backends = vi.hoisted(() => ({
 	platform: vi.fn(),
@@ -10,7 +15,10 @@ const backends = vi.hoisted(() => ({
 	portable: vi.fn(),
 	lstat: vi.fn(),
 }));
-vi.mock("node:os", () => ({ platform: backends.platform }));
+vi.mock("node:os", async (original) => ({
+	...(await original<typeof import("node:os")>()),
+	platform: backends.platform,
+}));
 vi.mock("node:fs", async (original) => ({
 	...(await original<typeof import("node:fs")>()),
 	watch: backends.native,
@@ -61,7 +69,7 @@ it("uses one native recursive watcher on macOS, including package dependency cha
 	await fixture.watcher.close();
 });
 
-it("ignores excluded build paths and symlinks without ignoring the workspace's own name", async () => {
+it("ignores excluded build paths without ignoring the workspace's own name", async () => {
 	const fixture = watcherFixture("darwin");
 	for (const path of [
 		".git/index",
@@ -71,8 +79,6 @@ it("ignores excluded build paths and symlinks without ignoring the workspace's o
 	]) {
 		fixture.nativeEvent("change", path);
 	}
-	backends.lstat.mockReturnValueOnce({ isSymbolicLink: () => true });
-	fixture.nativeEvent("change", "Source/Linked.cs");
 	expect(fixture.changed).not.toHaveBeenCalled();
 	const nestedWorkspaceChange = vi.fn();
 	const nestedWatcher = watchLspWorkspace("/workspace/target", nestedWorkspaceChange, vi.fn());
@@ -81,6 +87,83 @@ it("ignores excluded build paths and symlinks without ignoring the workspace's o
 	await nestedWatcher.close();
 	await fixture.watcher.close();
 });
+
+it("publishes deletion for a queued child event after its parent becomes a regular file", async () => {
+	const fixture = watcherFixture("darwin");
+	const directory = await realpath(await mkdtemp("/tmp/lsp-native-event-"));
+	try {
+		const parent = join(directory, "Source");
+		await mkdir(parent);
+		await writeFile(join(parent, "App.cs"), "class App {}");
+		await rm(parent, { recursive: true });
+		await writeFile(parent, "replacement");
+		const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+		backends.lstat.mockImplementationOnce(() => fs.lstatSync(join(parent, "App.cs")));
+		fixture.nativeEvent("rename", "Source/App.cs");
+		fixture.nativeEvent("change", "StillUsable.cs");
+		expect(fixture.changed.mock.calls).toEqual([
+			["/workspace/Source/App.cs", FileChangeType.Deleted],
+			["/workspace/StillUsable.cs", FileChangeType.Changed],
+		]);
+		expect(fixture.failed).not.toHaveBeenCalled();
+		expect(fixture.backend.close).not.toHaveBeenCalled();
+	} finally {
+		await fixture.watcher.close();
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
+function dependencyOverlayClient(root: string, dependency: string): LspClient {
+	const route = {
+		...presetRoute(presetById("typescript"), process.execPath),
+		preset: "custom" as const,
+		args: [fileURLToPath(new URL("./fixtures/lsp-dependency-server.mjs", import.meta.url))],
+		extensions: { ".txt": "plaintext" },
+		env: { PROBE_DEPENDENCY_URI: pathToFileURL(dependency).href },
+	};
+	return new LspClient(route, root, vi.fn(), vi.fn());
+}
+
+it("closes a dependency overlay replaced by a symlink before checking an unchanged dependent", async () => {
+	const directory = await realpath(await mkdtemp("/tmp/lsp-native-symlink-"));
+	const root = join(directory, "project");
+	await mkdir(root);
+	const dependency = join(root, "dependency.txt");
+	const dependent = join(root, "dependent.txt");
+	await writeFile(dependency, "dependency");
+	await writeFile(dependent, "dependent");
+	const client = dependencyOverlayClient(root, dependency);
+	backends.platform.mockReturnValue("darwin");
+	backends.native.mockReturnValue(Object.assign(new EventEmitter(), { close: vi.fn() }));
+	const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+	backends.lstat.mockImplementation(fs.lstatSync);
+	let pendingChange = Promise.resolve();
+	const changed = vi.fn((path, type) => {
+		pendingChange = client.fileChanged(path, type);
+	});
+	const failed = vi.fn();
+	const watcher = watchLspWorkspace(root, changed, failed);
+	try {
+		await client.start();
+		await client.synchronize(dependency, "plaintext", "dependency");
+		await client.synchronize(dependent, "plaintext", "dependent");
+		expect(await client.diagnose(dependent, "plaintext", AbortSignal.timeout(5000))).toEqual([]);
+		await unlink(dependency);
+		await symlink(join(directory, "nonexistent-target"), dependency);
+		backends.native.mock.calls[0]![2]("rename", "dependency.txt");
+		await pendingChange;
+		expect(changed).toHaveBeenCalledExactlyOnceWith(dependency, FileChangeType.Deleted);
+		expect(lstatSync).toHaveBeenCalledWith(dependency);
+		expect(failed).not.toHaveBeenCalled();
+		expect(await client.diagnose(dependent, "plaintext", AbortSignal.timeout(5000))).toMatchObject([
+			{ message: "Dependency overlay closed" },
+		]);
+	} finally {
+		await watcher.close();
+		await client.stop();
+		await rm(directory, { recursive: true, force: true });
+	}
+}, 15000);
 
 it("waits for portable discovery and normalizes its file and directory events", async () => {
 	const fixture = watcherFixture("linux");

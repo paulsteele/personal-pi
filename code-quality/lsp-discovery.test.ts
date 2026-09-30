@@ -88,7 +88,7 @@ it.each(["ignored", "tracked", "non-Git"] as const)(
 		const fixture = await discoveryFixture({
 			".gitignore": "packages/\n",
 			"App.sln": "",
-			"Source/App.cs": "class App {}",
+			"src/App.cs": "class App {}",
 		});
 		const cache = join(fixture.root, "packages/cache");
 		await mkdir(cache, { recursive: true });
@@ -97,22 +97,96 @@ it.each(["ignored", "tracked", "non-Git"] as const)(
 		}
 		if (dependencyLayout !== "non-Git") {
 			await fixture.git("init", "-q");
-			await fixture.git("add", "App.sln", "Source/App.cs");
+			await fixture.git("add", "App.sln", "src/App.cs");
 		}
 		if (dependencyLayout === "tracked") {
 			await fixture.git("add", "-f", "packages");
 		}
 		const discovery = await discoverLspFiles(fixture.root, fixture.signal);
-		expect(discovery.files).toContain("Source/App.cs");
+		expect(discovery.files).toContain("src/App.cs");
 		expect(discovery.files).toContain("App.sln");
 		expect(discovery.files).toEqual([...discovery.files].sort());
 		expect(discovery.truncated).toBe(dependencyLayout !== "ignored");
 		if (dependencyLayout === "ignored") {
-			expect(discovery.files).toEqual([".gitignore", "App.sln", "Source/App.cs"]);
+			expect(discovery.files).toEqual([".gitignore", "App.sln", "src/App.cs"]);
 		}
 	},
 	20000,
 );
+
+async function submoduleFixture() {
+	const submoduleRepository = await discoveryFixture({
+		".gitignore": "cache/\n",
+		"App.sln": "",
+		"src/App.cs": "class App {}",
+		"obj/Generated.cs": "class Generated {}",
+	});
+	await submoduleRepository.git("init", "-q");
+	await submoduleRepository.git("add", ".");
+	await submoduleRepository.git(
+		"-c",
+		"user.name=Fixture",
+		"-c",
+		"user.email=fixture@example.test",
+		"commit",
+		"-qm",
+		"fixture",
+	);
+	const containingRepository = await discoveryFixture({});
+	await containingRepository.git("init", "-q");
+	await containingRepository.git(
+		"-c",
+		"protocol.file.allow=always",
+		"submodule",
+		"add",
+		"-q",
+		submoduleRepository.root,
+		"modules/app",
+	);
+	const submodule = join(containingRepository.root, "modules/app");
+	return { ...containingRepository, submodule };
+}
+
+it("discovers initialized submodule source and markers with exclusions and symlink safety", async () => {
+	const fixture = await submoduleFixture();
+	await writeFile(join(fixture.submodule, "src/New.cs"), "class New {}");
+	await mkdir(join(fixture.submodule, "cache"));
+	await writeFile(join(fixture.submodule, "cache/Ignored.cs"), "");
+	await writeFile(join(fixture.directory, "Outside.cs"), "");
+	await symlink(join(fixture.directory, "Outside.cs"), join(fixture.submodule, "src/Linked.cs"));
+	const discovery = await discoverLspFiles(join(fixture.root, "modules"), fixture.signal);
+	expect(discovery).toEqual({
+		files: ["app/.gitignore", "app/App.sln", "app/src/App.cs", "app/src/New.cs"],
+		truncated: false,
+	});
+});
+
+it("does not follow a gitlink replaced by a symlink", async () => {
+	const fixture = await submoduleFixture();
+	await rm(fixture.submodule, { recursive: true });
+	const outside = join(fixture.directory, "outside");
+	await mkdir(outside);
+	await writeFile(join(outside, "App.cs"), "");
+	await symlink(outside, fixture.submodule);
+	expect(await discoverLspFiles(join(fixture.root, "modules"), fixture.signal)).toEqual({
+		files: [],
+		truncated: false,
+	});
+});
+
+it("shares the inspection budget between a parent repository and its submodule", async () => {
+	const fixture = await submoduleFixture();
+	const cache = join(fixture.submodule, "packages");
+	await mkdir(cache);
+	for (let index = 0; index < 10001; index++) {
+		await writeFile(join(cache, `dependency-${index}.xml`), "");
+	}
+	const discovery = await discoverLspFiles(fixture.root, fixture.signal);
+	expect(discovery.truncated).toBe(true);
+	expect(discovery.files).toContain("modules/app/src/App.cs");
+	expect(discovery.files).toContain("modules/app/App.sln");
+	expect(discovery.files.length).toBeLessThan(10000);
+}, 20000);
 
 it("honors cancellation before scanning a workspace", async () => {
 	const fixture = await discoveryFixture({ "App.cs": "class App {}" });

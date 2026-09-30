@@ -1,7 +1,11 @@
 # Changelog
 
-## Unreleased
+## 1.5.4 — 2026-09-30
 
+- Prioritize source and project markers before discovery limits, include initialized Git submodules, and use ancestor lookup for large workspace-root sets.
+- Preserve checklist selections in Advanced setup, disclose pending configuration changes before validation, and retain C# project choices and relative-path overrides.
+- Treat queued events under removed directories and symlink replacements as deletions, closing stale document overlays without reading symlink targets.
+- Clarify shared-watcher recovery: close all attached Pi sessions before reopening any. Add regression coverage for multi-client recovery, discovery limits, setup consent, and watcher races.
 - Show LSP and readability stages in the main transcript, updating each line with a pass/fail marker and preserving results across reloads and branch navigation.
 - Show reviewer rejection rationale and file/line findings without expanding feedback; keep full case details and proposed edits expandable.
 

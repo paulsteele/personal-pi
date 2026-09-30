@@ -91,14 +91,14 @@ async function brokerFixture() {
 	connections.push(connection);
 	const watcherFailed = watching.start.mock.calls[0]![2] as (error: Error) => void;
 	const requests = [{ path: join(root, "App.cs"), hash: "0".repeat(64), languageId: "csharp" }];
-	return { connection, watcherFailed, requests, root, update };
+	return { connection, watcherFailed, requests, root, update, launch };
 }
 
 it("keeps the socket alive and refuses checks when the workspace watcher fails after startup", async () => {
 	watching.start.mockReturnValue({ ready: Promise.resolve(), close: vi.fn().mockResolvedValue(undefined) });
 	const fixture = await brokerFixture();
 	fixture.watcherFailed(new Error("EMFILE: too many open files, watch"));
-	const expectedReason = `Workspace watcher failed for ${fixture.root}: EMFILE: too many open files, watch; reload all attached Pi sessions to recreate the broker`;
+	const expectedReason = `Workspace watcher failed for ${fixture.root}: EMFILE: too many open files, watch; close every Pi session attached to this workspace before reopening any of them to recreate the broker`;
 	expect(await fixture.connection.check(fixture.requests, AbortSignal.timeout(2000))).toEqual({
 		kind: "unavailable",
 		reason: expectedReason,
@@ -107,6 +107,51 @@ it("keeps the socket alive and refuses checks when the workspace watcher fails a
 	await expect(fixture.connection.restart(AbortSignal.timeout(2000))).rejects.toThrow(expectedReason);
 	expect(languageServer.synchronize).not.toHaveBeenCalled();
 	await fixture.connection.close();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+});
+
+it("requires all clients to detach before a failed shared watcher can be recreated", async () => {
+	const closeWatcher = vi.fn().mockResolvedValue(undefined);
+	watching.start.mockReturnValue({ ready: Promise.resolve(), close: closeWatcher });
+	const fixture = await brokerFixture();
+	const registry = { ...fixture.launch, pid: process.pid };
+	const connect = async (id: string) => {
+		const connection = await BrokerConnection.connect(registry, id, vi.fn());
+		connections.push(connection);
+		return connection;
+	};
+	const initialTestClient = fixture.connection;
+	const initialSecondClient = await connect("second-client");
+	fixture.watcherFailed(new Error("EMFILE"));
+	await initialTestClient.close();
+	const reconnectedTestClient = await connect("test-client");
+	await initialSecondClient.close();
+	const reconnectedSecondClient = await connect("second-client");
+	for (const attachedClient of [reconnectedTestClient, reconnectedSecondClient]) {
+		expect(await attachedClient.check(fixture.requests, AbortSignal.timeout(2000))).toMatchObject({
+			kind: "unavailable",
+			reason: expect.stringContaining(
+				"close every Pi session attached to this workspace before reopening any",
+			),
+		});
+	}
+	expect(watching.start).toHaveBeenCalledOnce();
+	expect(closeWatcher).not.toHaveBeenCalled();
+	await reconnectedTestClient.close();
+	await reconnectedSecondClient.close();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+	expect(closeWatcher).toHaveBeenCalledOnce();
+	const replacement = { ...fixture.launch, generation: "replacement-generation" };
+	await runLspBroker(replacement);
+	const recovered = await BrokerConnection.connect(
+		{ ...replacement, pid: process.pid },
+		"test-client",
+		vi.fn(),
+	);
+	connections.push(recovered);
+	expect(watching.start).toHaveBeenCalledTimes(2);
+	expect(recovered.status).toMatchObject({ phase: "ready", generation: replacement.generation });
+	await recovered.close();
 	await new Promise((resolve) => setTimeout(resolve, 50));
 });
 

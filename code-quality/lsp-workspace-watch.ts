@@ -20,18 +20,20 @@ function excludedWorkspacePath(root: string, path: string): boolean {
 	);
 }
 
-function nativeFileChange(path: string, event: "rename" | "change"): FileChangeType | undefined {
+function nativeFileChange(path: string, event: "rename" | "change"): FileChangeType {
 	let stat: Stats;
 	try {
 		stat = lstatSync(path);
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT" || code === "ENOTDIR") {
 			return FileChangeType.Deleted;
 		}
 		throw error;
 	}
 	if (stat.isSymbolicLink()) {
-		return undefined;
+		// Retire any old document overlay without reading the replacement's target.
+		return FileChangeType.Deleted;
 	}
 	return event === "rename" ? FileChangeType.Created : FileChangeType.Changed;
 }
@@ -83,10 +85,7 @@ export function watchLspWorkspace(
 						if (excludedWorkspacePath(root, path)) {
 							return;
 						}
-						const type = nativeFileChange(path, event);
-						if (type !== undefined) {
-							publishChange(path, type);
-						}
+						publishChange(path, nativeFileChange(path, event));
 					} catch (error) {
 						reportFailure(error);
 					}

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { lstat, readdir, realpath } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { basename, extname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { canonicalPath, inside } from "./capture.js";
@@ -13,7 +13,12 @@ import {
 	type LspPresetDefinition,
 } from "./lsp-presets.js";
 import { selectLspLanguages, type LspLanguageChoice } from "./lsp-setup-ui.js";
-import { chooseCsharpProject, chooseWorkspaceRoot, nextRouteId } from "./lsp-setup-defaults.js";
+import {
+	chooseCsharpProject,
+	chooseWorkspaceRoot,
+	nextRouteId,
+	WORKSPACE_MARKERS,
+} from "./lsp-setup-defaults.js";
 import {
 	approveLspDraft,
 	loadLspDraft,
@@ -52,12 +57,32 @@ const EXCLUDED_DISCOVERY_DIRECTORIES = new Set([
 	"vendor",
 ]);
 
-async function discoverGitFiles(root: string, signal: AbortSignal): Promise<ProjectDiscovery | undefined> {
+const SOURCE_EXTENSIONS = new Set(LSP_PRESETS.flatMap((preset) => Object.keys(preset.extensions)));
+const PROJECT_MARKERS = new Set(Object.values(WORKSPACE_MARKERS).flat());
+
+interface DiscoveryBudget {
+	remaining: number;
+}
+
+function discoveryPriority(file: string, submodule: boolean): number {
+	const isSourceFile = SOURCE_EXTENSIONS.has(extname(file));
+	const isProjectMarker = PROJECT_MARKERS.has(basename(file)) || /\.(csproj|slnx?)$/.test(file);
+	if (isSourceFile || isProjectMarker) {
+		return 0;
+	}
+	return submodule ? 1 : 2;
+}
+
+async function discoverGitFiles(
+	root: string,
+	signal: AbortSignal,
+	budget: DiscoveryBudget,
+): Promise<ProjectDiscovery | undefined> {
 	let stdout: string;
 	try {
 		({ stdout } = await promisify(execFile)(
 			"git",
-			["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+			["ls-files", "--stage", "--cached", "--others", "--exclude-standard", "-z"],
 			{
 				cwd: root,
 				signal,
@@ -70,24 +95,43 @@ async function discoverGitFiles(root: string, signal: AbortSignal): Promise<Proj
 		signal.throwIfAborted();
 		return undefined;
 	}
-	const candidates = [...new Set(stdout.split("\0").filter(Boolean))].sort();
+	const entries = new Map<string, boolean>();
+	for (const entry of stdout.split("\0").filter(Boolean)) {
+		const metadata = /^(\d{6}) [a-f0-9]+ [0-3]\t/.exec(entry);
+		const file = metadata ? entry.slice(metadata[0].length) : entry;
+		entries.set(file, entries.get(file) === true || metadata?.[1] === "160000");
+	}
+	const candidates = [...entries].sort(
+		([left, leftSubmodule], [right, rightSubmodule]) =>
+			discoveryPriority(left, leftSubmodule) - discoveryPriority(right, rightSubmodule) ||
+			(left < right ? -1 : left > right ? 1 : 0),
+	);
 	const files: string[] = [];
-	let inspected = 0;
-	for (const file of candidates) {
+	for (const [file, submodule] of candidates) {
 		signal.throwIfAborted();
 		const parentDirectories = file.split("/").slice(0, -1);
 		if (parentDirectories.some((directory) => EXCLUDED_DISCOVERY_DIRECTORIES.has(directory))) {
 			continue;
 		}
-		if (++inspected > DISCOVERY_ENTRY_LIMIT) {
-			return { files, truncated: true };
+		if (budget.remaining-- <= 0) {
+			return { files: files.sort(), truncated: true };
 		}
 		const path = resolve(root, file);
+		if (!inside(root, path)) continue;
 		try {
-			const isRegularFile = (await lstat(path)).isFile();
-			const isCanonicalPath = isRegularFile && (await realpath(path)) === path;
-			if (isCanonicalPath) {
+			const stat = await lstat(path);
+			if (stat.isSymbolicLink() || (await realpath(path)) !== path) continue;
+			if (stat.isFile()) {
 				files.push(file);
+			} else if (submodule && stat.isDirectory() && !EXCLUDED_DISCOVERY_DIRECTORIES.has(basename(path))) {
+				// An initialized gitlink has its own .git entry; an empty checkout does not.
+				const gitEntry = await lstat(join(path, ".git"));
+				if (gitEntry.isSymbolicLink()) continue;
+				const nested =
+					(await discoverGitFiles(path, signal, budget)) ??
+					(await discoverDirectoryFiles(path, signal, budget));
+				files.push(...nested.files.map((child) => join(file, child)));
+				if (nested.truncated) return { files: files.sort(), truncated: true };
 			}
 		} catch (error) {
 			const code = (error as NodeJS.ErrnoException).code;
@@ -96,19 +140,22 @@ async function discoverGitFiles(root: string, signal: AbortSignal): Promise<Proj
 			}
 		}
 	}
-	return { files, truncated: false };
+	return { files: files.sort(), truncated: false };
 }
 
-async function discoverDirectoryFiles(root: string, signal: AbortSignal): Promise<ProjectDiscovery> {
+async function discoverDirectoryFiles(
+	root: string,
+	signal: AbortSignal,
+	budget: DiscoveryBudget,
+): Promise<ProjectDiscovery> {
 	const files: string[] = [];
 	const directories = [root];
-	let inspected = 0;
 	for (let index = 0; index < directories.length; index++) {
 		signal.throwIfAborted();
 		const directory = directories[index]!;
 		for (const entry of await readdir(directory, { withFileTypes: true })) {
 			signal.throwIfAborted();
-			if (++inspected > DISCOVERY_ENTRY_LIMIT) {
+			if (budget.remaining-- <= 0) {
 				return { files: files.sort(), truncated: true };
 			}
 			if (entry.isSymbolicLink()) {
@@ -128,7 +175,10 @@ async function discoverDirectoryFiles(root: string, signal: AbortSignal): Promis
 export async function discoverLspFiles(root: string, signal: AbortSignal): Promise<ProjectDiscovery> {
 	signal.throwIfAborted();
 	const workspace = canonicalPath(root);
-	return (await discoverGitFiles(workspace, signal)) ?? discoverDirectoryFiles(workspace, signal);
+	const budget = { remaining: DISCOVERY_ENTRY_LIMIT };
+	return (
+		(await discoverGitFiles(workspace, signal, budget)) ?? discoverDirectoryFiles(workspace, signal, budget)
+	);
 }
 
 export function routeSummary(route: LspRoute): string {
@@ -320,9 +370,12 @@ export async function approveLspSetup(
 	const pending = await loadLspDraft(agentDir, project);
 	if (!pending) throw new Error("No LSP draft. Run /quality lsp setup first.");
 	if (!ctx.isProjectTrusted()) throw new Error("Trust this project before starting its language servers");
+	const active = await loadLspProfile(agentDir, project);
 	const summary = pending.draft.profile.routes
 		.map((route) => {
-			if (options.showDetails) return routeSummary(route);
+			const approved = active?.profile.routes.find((candidate) => candidate.id === route.id);
+			if (options.showDetails || JSON.stringify(route) !== JSON.stringify(approved))
+				return routeSummary(route);
 			const label = LSP_PRESETS.find((preset) => preset.id === route.preset)?.label ?? route.id;
 			return `${label} · ${route.root}${route.project ? ` · ${route.project}` : ""}\n${route.command} ${route.args.join(" ")}`;
 		})
@@ -383,16 +436,22 @@ export async function setupLsp(
 		signal,
 	);
 	if (!selection) return undefined;
-	if (selection.action === "advanced") {
-		const advancedSetupAction = await ctx.ui.select(
-			"Advanced LSP setup",
-			["Add a server with custom options", "Edit configuration file", "Cancel"],
-			{ signal },
-		);
-		if (advancedSetupAction === "Edit configuration file") {
-			return setupLsp(ctx, agentDir, project, "edit", ports, signal);
-		}
-		if (advancedSetupAction !== "Add a server with custom options") return undefined;
+	const advancedSetupAction =
+		selection.action === "advanced"
+			? await ctx.ui.select(
+					"Advanced LSP setup",
+					["Add a server with custom options", "Edit configuration file", "Cancel"],
+					{ signal },
+				)
+			: undefined;
+	if (
+		selection.action === "advanced" &&
+		advancedSetupAction !== "Add a server with custom options" &&
+		advancedSetupAction !== "Edit configuration file"
+	)
+		return undefined;
+	profile.routes = profile.routes.filter((route) => selection.selected.includes(route.preset));
+	if (advancedSetupAction === "Add a server with custom options") {
 		const route = await chooseAdvancedRoute(
 			ctx,
 			project,
@@ -404,28 +463,29 @@ export async function setupLsp(
 		);
 		if (!route) return undefined;
 		profile.routes.push(route);
-		profile.enabled = true;
-	} else {
-		profile.routes = profile.routes.filter((route) => selection.selected.includes(route.preset));
-		for (const preset of LSP_PRESETS.filter((preset) => selection.selected.includes(preset.id))) {
-			if (profile.routes.some((route) => route.preset === preset.id)) continue;
-			const route = await configureDetectedServer(
-				ctx,
-				project,
-				agentDir,
-				preset,
-				discovery.files,
-				profile.routes,
-				ports,
-				signal,
-			);
-			if (!route) return undefined;
-			profile.routes.push(route);
-		}
-		profile.enabled = profile.routes.length > 0;
 	}
+	for (const preset of LSP_PRESETS.filter((preset) => selection.selected.includes(preset.id))) {
+		if (profile.routes.some((route) => route.preset === preset.id)) continue;
+		const route = await configureDetectedServer(
+			ctx,
+			project,
+			agentDir,
+			preset,
+			discovery.files,
+			profile.routes,
+			ports,
+			signal,
+		);
+		if (!route) return undefined;
+		profile.routes.push(route);
+	}
+	profile.enabled = profile.routes.length > 0;
 	signal.throwIfAborted();
-	await saveLspDraft(agentDir, project, profile, baseRevision, pending?.revision ?? null);
+	const path = await saveLspDraft(agentDir, project, profile, baseRevision, pending?.revision ?? null);
+	if (advancedSetupAction === "Edit configuration file") {
+		ctx.ui.notify(`Edit ${path}, then run /quality lsp setup approve.`, "info");
+		return undefined;
+	}
 	return approveLspSetup(ctx, agentDir, project, ports, signal, {
 		showDetails: selection.action === "advanced",
 	});
