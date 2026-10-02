@@ -49,6 +49,12 @@ it("loads the packed extension through Pi and launches its standalone broker", a
 		await loader.reload();
 		expect(loader.getExtensions().errors).toEqual([]);
 		expect(loader.getExtensions().extensions).toHaveLength(1);
+		for (const peerDependencyName of Object.keys(manifest.peerDependencies)) {
+			const isRuntimeDependency = peerDependencyName in manifest.dependencies;
+			if (!isRuntimeDependency) {
+				await rm(join(extracted, "node_modules", peerDependencyName));
+			}
+		}
 		const jiti = createJiti(import.meta.url);
 		const packedBroker = await jiti.import<{ attachBroker: typeof attachBroker }>(
 			join(extracted, "lsp-broker-registry.ts"),
@@ -87,6 +93,18 @@ it("loads the packed extension through Pi and launches its standalone broker", a
 		} finally {
 			await connection.close();
 		}
+
+		await rm(join(extracted, "node_modules", "jiti"));
+		await expect(
+			packedBroker.attachBroker(
+				agentDir,
+				cwd,
+				{ ...route, settings: { scenario: "missing runtime dependency" } },
+				"missing-dependency-client",
+				() => {},
+				AbortSignal.timeout(15000),
+			),
+		).rejects.toThrow(/Cannot find package 'jiti'/);
 	} finally {
 		await rm(directory, { recursive: true, force: true });
 	}

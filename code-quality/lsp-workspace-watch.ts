@@ -3,7 +3,7 @@ import { platform } from "node:os";
 import { relative, resolve } from "node:path";
 import { watch as watchPortable } from "chokidar";
 import { FileChangeType } from "vscode-languageserver-protocol";
-import { inside } from "./capture.js";
+import { inside } from "./paths.js";
 
 export interface LspWorkspaceWatcher {
 	ready: Promise<void>;

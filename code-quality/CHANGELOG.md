@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.6 — 2026-10-02
+
+- Fix standalone LSP broker startup in Git-installed packages by separating path and snapshot-hash utilities from host-provided Pi and TypeBox imports.
+- Report underlying broker startup errors instead of only an exit code. Add package regression coverage without host peer dependencies and for missing runtime dependencies.
+
 ## 1.5.5 — 2026-10-02
 
 - Test against Pi 1.0.0 with wildcard host-package peer ranges. Keep `quality_response` model-only so correction-scope requests and disagreements stay directly visible to the main model.

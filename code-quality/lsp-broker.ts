@@ -3,8 +3,8 @@ import { chmod, readFile, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { LspClient } from "./lsp-client.js";
-import { canonicalPath, inside } from "./capture.js";
-import { digest } from "./proposal.js";
+import { canonicalPath, inside } from "./paths.js";
+import { digest } from "./snapshot-hash.js";
 import { watchLspWorkspace } from "./lsp-workspace-watch.js";
 import {
 	parseBrokerRequest,

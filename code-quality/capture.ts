@@ -1,8 +1,11 @@
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync } from "node:fs";
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
+import { relative } from "node:path";
 import { generateUnifiedPatch } from "@earendil-works/pi-coding-agent";
 import type { QualityConfig } from "./config.js";
 import type { ReviewFile } from "./proposal.js";
+import { canonicalPath, inside } from "./paths.js";
+
+export { canonicalPath, inside } from "./paths.js";
 
 export class CoverageError extends Error {
 	constructor(
@@ -12,22 +15,6 @@ export class CoverageError extends Error {
 	) {
 		super(message);
 	}
-}
-export function canonicalPath(path: string): string {
-	try {
-		return realpathSync(path);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		const parent = dirname(path);
-		if (parent === path) throw error;
-		return resolve(canonicalPath(parent), basename(path));
-	}
-}
-export function inside(root: string, path: string): boolean {
-	const rel = relative(root, path);
-	return (
-		!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
-	);
 }
 export function sensitivePath(path: string): boolean {
 	return /(?:^|[/\\])(?:\.env(?:\..+)?|auth\.json|credentials(?:\.json)?|id_(?:rsa|ed25519)|[^/\\]+\.(?:pem|key|p12))$/i.test(

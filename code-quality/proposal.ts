@@ -1,11 +1,7 @@
-import { createHash } from "node:crypto";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 
-export const digest = (text: string | null): string =>
-	createHash("sha256")
-		.update(text === null ? "absent:" : `text:${text}`)
-		.digest("hex");
+export { digest } from "./snapshot-hash.js";
 export interface ReviewFile {
 	path: string;
 	before: string | null;

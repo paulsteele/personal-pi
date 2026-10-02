@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
-import { lspStorageRoot, type LspRoute } from "./lsp-profile.js";
+import { canonicalPath } from "./paths.js";
+import type { LspRoute } from "./lsp-profile.js";
 import {
 	LSP_BROKER_VERSION,
 	type BrokerLaunch,
@@ -90,7 +91,7 @@ export class BrokerConnection {
 		readonly registry: BrokerRegistry,
 		private readonly socket: Socket,
 		readonly clientId: string,
-		private readonly update: (status: LspServerStatus, invalidated: boolean) => void,
+		update: (status: LspServerStatus, invalidated: boolean) => void,
 	) {
 		const lines = createInterface({ input: socket, crlfDelay: Infinity });
 		lines.on("error", () => socket.destroy());
@@ -304,7 +305,7 @@ export async function attachBroker(
 	signal: AbortSignal,
 ): Promise<BrokerConnection> {
 	const key = brokerKey(root, route);
-	const directory = join(lspStorageRoot(agentDir), "brokers", key);
+	const directory = join(canonicalPath(agentDir), "extensions", "code-quality", "brokers", key);
 	await mkdir(directory, { recursive: true, mode: 0o700 });
 	const directoryStat = await lstat(directory);
 	if (
@@ -374,11 +375,15 @@ export async function attachBroker(
 				[fileURLToPath(new URL("./lsp-broker-host.mjs", import.meta.url)), launchPath],
 				{
 					detached: true,
-					stdio: ["ignore", "ignore", "ignore", "ipc"],
+					stdio: ["ignore", "ignore", "pipe", "ipc"],
 					cwd: root,
 					env: { ...serverEnvironment(route), HOME: process.env.HOME ?? homedir() },
 				},
 			);
+			let startupStderr = "";
+			child.stderr!.on("data", (chunk) => {
+				startupStderr = (startupStderr + String(chunk)).slice(-8000);
+			});
 			await new Promise<void>((resolve, reject) => {
 				const timer = setTimeout(() => {
 					child.kill("SIGTERM");
@@ -386,7 +391,8 @@ export async function attachBroker(
 				}, 10000);
 				child.once("exit", (code) => {
 					clearTimeout(timer);
-					reject(new Error(`Broker exited during startup (${code})`));
+					const detail = startupStderr.trim();
+					reject(new Error(`Broker exited during startup (${code})${detail ? `: ${detail}` : ""}`));
 				});
 				child.once("error", (error) => {
 					clearTimeout(timer);
