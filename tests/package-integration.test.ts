@@ -93,6 +93,28 @@ describe("Pi package integration", () => {
     expect(lock.packages["@paulsteele/pi-pr-review"]).toEqual(["@paulsteele/pi-pr-review@workspace:pr-review"]);
   });
 
+  test("uses host-provided peers and pins Pi development packages to 1.0.0", () => {
+    const hostPackages = [
+      "@earendil-works/pi-agent-core",
+      "@earendil-works/pi-ai",
+      "@earendil-works/pi-coding-agent",
+      "@earendil-works/pi-tui",
+      "typebox",
+    ];
+    for (const workspace of ["", ...manifest.workspaces]) {
+      const pkg = JSON.parse(readFileSync(resolve(root, workspace, "package.json"), "utf8"));
+      for (const name of hostPackages) {
+        expect(pkg.dependencies?.[name]).toBeUndefined();
+        if (name in (pkg.peerDependencies ?? {})) {
+          expect(pkg.peerDependencies[name]).toBe("*");
+        }
+        if (name !== "typebox" && name in (pkg.devDependencies ?? {})) {
+          expect(pkg.devDependencies[name]).toBe("1.0.0");
+        }
+      }
+    }
+  });
+
   test("keeps every extension independently packaged at the repository version", () => {
     for (const entry of manifest.pi.extensions) {
       const workspace = packageForEntry(entry);

@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { aggregateMetrics, formatTokens } from "../src/metrics.js";
+import { aggregateMetrics, formatTokens, type UsageMessage } from "../src/metrics.js";
 
-const messages = [
-	{ usage: { input: 1_200, output: 500, cacheRead: 8_000, cacheWrite: 300, cost: { total: 0.125 } } },
-	{ usage: { input: 2_000, output: 700, cacheRead: 18_000, cacheWrite: 0, cost: { total: 0.375 } } },
+const messages: UsageMessage[] = [
+	{
+		role: "assistant",
+		usage: { input: 1_200, output: 500, cacheRead: 8_000, cacheWrite: 300, cost: { total: 0.125 } },
+	},
+	{
+		role: "assistant",
+		usage: { input: 2_000, output: 700, cacheRead: 18_000, cacheWrite: 0, cost: { total: 0.375 } },
+	},
 ];
 
 describe("metrics", () => {
@@ -30,9 +36,36 @@ describe("metrics", () => {
 		expect(result.cacheHitPercent).toBeCloseTo(90, 5);
 	});
 
+	it("adds tool-result usage without replacing the latest assistant cache-hit rate", () => {
+		const result = aggregateMetrics(
+			[
+				...messages,
+				{
+					role: "toolResult",
+					usage: { input: 400, output: 100, cacheRead: 0, cacheWrite: 200, cost: { total: 0.25 } },
+				},
+				{ role: "toolResult" },
+			],
+			{ subscription: false, autoCompact: true },
+		);
+		expect(result).toMatchObject({
+			input: 3_600,
+			output: 1_300,
+			cacheRead: 26_000,
+			cacheWrite: 500,
+			cost: 0.75,
+		});
+		expect(result.cacheHitPercent).toBeCloseTo(90, 5);
+	});
+
 	it("handles missing and zero prompt usage without NaN", () => {
 		const result = aggregateMetrics(
-			[{ usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } }],
+			[
+				{
+					role: "assistant",
+					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+				},
+			],
 			{
 				subscription: false,
 				context: { tokens: null, contextWindow: 128_000, percent: null },

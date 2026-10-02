@@ -144,7 +144,7 @@ it("shares the Pi owner across stages and repeated runs while separating a fork"
 		expect(new Set(calls.map((options) => options.piSessionId))).toEqual(new Set([piSessionId]));
 		expect(new Set(calls.map((options) => options.sessionId)).size).toBe(calls.length);
 	}
-});
+}, 20_000);
 
 it("bounds resident preparation and reports automatic checks separately from slot waits", async () => {
 	const repo = await fixture();

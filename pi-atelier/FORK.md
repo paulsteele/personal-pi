@@ -9,7 +9,7 @@ This directory is a manually maintained, source-owned workspace in the `pi-exten
 - Peeled commit: `159f34cf440c18cba847999a191b252b4574b57d`
 - Original package version: `0.8.2`
 - Local package version: `0.8.2-local.2`
-- Pi/TUI target used by this fork: `0.87.1`
+- Pi/TUI target used by this fork: `1.0.0`
 
 The local copy retains only runtime source, tests, build configuration, the package lock, license,
 and concise local maintenance docs. Upstream agent/Claude skills, contributor workflow, research/demo

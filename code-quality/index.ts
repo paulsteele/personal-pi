@@ -149,6 +149,7 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 	pi.on("agent_before_settle", (event, ctx) => runtime.boundary(ctx, event.outcome, true));
 	pi.registerTool({
 		name: "quality_response",
+		exposure: "model-only",
 		label: "Quality response",
 		description:
 			"Send a bounded disagreement to the quality reviewer for reconsideration, or request user-approved helper/test paths. Corrections and disagreements share five review rounds before automatic operator arbitration. Cannot approve, disable, or waive a review.",

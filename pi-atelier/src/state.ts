@@ -80,8 +80,11 @@ export class AtelierRuntime {
 		if (this.#disposed) return;
 		const messages: UsageMessage[] = [];
 		for (const entry of this.#ctx.sessionManager.getEntries()) {
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				messages.push(entry.message as UsageMessage);
+			if (
+				entry.type === "message" &&
+				(entry.message.role === "assistant" || entry.message.role === "toolResult")
+			) {
+				messages.push(entry.message);
 			}
 		}
 		const model = this.#ctx.model;

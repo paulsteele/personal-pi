@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.5 — 2026-10-02
+
+- Test against Pi 1.0.0 with wildcard host-package peer ranges. Keep `quality_response` model-only so correction-scope requests and disagreements stay directly visible to the main model.
+
 ## 1.5.4 — 2026-09-30
 
 - Prioritize source and project markers before discovery limits, include initialized Git submodules, and use ancestor lookup for large workspace-root sets.

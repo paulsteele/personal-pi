@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.5 — 2026-10-02
+
+- Test against Pi 1.0.0 with wildcard host-package peer ranges. Keep `pr_review` model-only so codemode and other tools cannot invoke its interactive review workflow.
+- Support Git LFS repositories by disabling LFS filters per capture invocation and automatically excluding LFS assets from text diffs and setup/review source access. Preserve staged/unstaged code comparisons, latest-commit fallback, historical attribute handling, and refusal of other active conversion filters without changing repository configuration.
+
 ## 1.5.0 — 2026-09-29
 
 - Group LiteLLM PR setup, workers, verification, compaction, and repeated reviews in a separate per-Pi PR log session. Preserve individual worker routing/cache IDs and permission checks.

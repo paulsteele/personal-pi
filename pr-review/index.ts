@@ -598,6 +598,7 @@ export default function prReview(pi: ExtensionAPI): void {
 	});
 	pi.registerTool({
 		name: "pr_review",
+		exposure: "model-only",
 		label: "PR review",
 		description:
 			"Run the code-owned repository review pipeline and open verified findings in Plannotator. Requires explicit /pr setup and interactive approvals. Browser feedback can authorize the parent agent to fix selected verified findings; this tool never edits project files.",

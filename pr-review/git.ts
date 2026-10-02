@@ -20,7 +20,22 @@ export async function git(
 	try {
 		const pending = execute(
 			"git",
-			["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", ...args],
+			[
+				"--no-optional-locks",
+				"-c",
+				"core.fsmonitor=false",
+				"-c",
+				"core.hooksPath=/dev/null",
+				"-c",
+				"filter.lfs.clean=",
+				"-c",
+				"filter.lfs.process=",
+				"-c",
+				"filter.lfs.smudge=",
+				"-c",
+				"filter.lfs.required=false",
+				...args,
+			],
 			{
 				cwd,
 				encoding: "buffer",
@@ -112,31 +127,81 @@ async function assertFilterFree(cwd: string, signal?: AbortSignal): Promise<void
 	for (const [name, value] of effective) {
 		const driver = name.match(/^filter\.(.*)\.(?:clean|process)$/)?.[1];
 		if (!driver) throw new Error("Cannot establish filter-free Git inspection");
-		if (value.trim()) drivers.add(driver);
+		if (driver !== "lfs" && value.trim()) {
+			drivers.add(driver);
+		}
 	}
 	if (!drivers.size) return;
 	// Attribute queries and index listing do not execute conversion filters. Inspect both
 	// current and staged attributes; global-but-unused filters must not block every repo.
 	const names = await git(cwd, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], signal);
 	if (!names.length) return;
-	for (const cached of [false, true]) {
-		const attributes = await git(
-			cwd,
-			["check-attr", ...(cached ? ["--cached"] : []), "-z", "--stdin", "filter"],
-			signal,
-			false,
-			undefined,
-			names,
-		);
-		const fields = attributes.toString("utf8").split("\0");
-		if (fields.pop() !== "" || fields.length % 3 !== 0)
-			throw new Error("Cannot establish filter-free Git attributes");
-		for (let i = 0; i < fields.length; i += 3)
-			if (drivers.has(fields[i + 2]!))
+	for (const source of ["worktree", "index"] as const) {
+		for (const driver of (await selectedFilters(cwd, names, source, signal)).values()) {
+			if (drivers.has(driver)) {
 				throw new Error(
 					"Review capture refuses active Git clean/process filters on source paths. Use a filter-free review configuration; no filter commands were executed.",
 				);
+			}
+		}
 	}
+}
+type AttributeSource = "worktree" | "index" | { ref: string };
+async function selectedFilters(
+	cwd: string,
+	names: Buffer,
+	source: AttributeSource,
+	signal?: AbortSignal,
+): Promise<Map<string, string>> {
+	let selection: string[];
+	if (typeof source === "object") {
+		selection = [`--source=${source.ref}`];
+	} else if (source === "index") {
+		selection = ["--cached"];
+	} else {
+		selection = [];
+	}
+	const attributes = await git(
+		cwd,
+		["check-attr", ...selection, "-z", "--stdin", "filter"],
+		signal,
+		false,
+		undefined,
+		names,
+	);
+	const fields = attributes.toString("utf8").split("\0");
+	if (fields.pop() !== "" || fields.length % 3 !== 0) {
+		throw new Error("Cannot establish filter-free Git attributes");
+	}
+	const filters = new Map<string, string>();
+	for (let i = 0; i < fields.length; i += 3) {
+		if (fields[i + 1] !== "filter") {
+			throw new Error("Cannot establish filter-free Git attributes");
+		}
+		filters.set(fields[i]!, fields[i + 2]!);
+	}
+	return filters;
+}
+export async function gitLfsPaths(
+	cwd: string,
+	paths: Iterable<string>,
+	sources: AttributeSource[],
+	signal?: AbortSignal,
+): Promise<Set<string>> {
+	const names = [...paths];
+	const lfs = new Set<string>();
+	if (names.length === 0) {
+		return lfs;
+	}
+	const input = Buffer.from(`${names.join("\0")}\0`);
+	for (const source of sources) {
+		for (const [path, driver] of await selectedFilters(cwd, input, source, signal)) {
+			if (driver === "lfs") {
+				lfs.add(path);
+			}
+		}
+	}
+	return lfs;
 }
 const line = (value: Buffer) => value.toString("utf8").replace(/\r?\n$/, "");
 

@@ -1,6 +1,6 @@
 {
 	"name": "@paulsteele/pi-code-quality",
-	"version": "1.5.4",
+	"version": "1.5.5",
 	"private": true,
 	"description": "Isolated post-edit quality gate with human arbitration",
 	"type": "module",
@@ -47,15 +47,15 @@
 		"vscode-languageserver-protocol": "3.18.4"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-ai": "0.87.x",
-		"@earendil-works/pi-coding-agent": "0.87.x",
-		"@earendil-works/pi-tui": "0.87.x",
-		"typebox": "1.3.x"
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		"typebox": "*"
 	},
 	"devDependencies": {
-		"@earendil-works/pi-ai": "0.87.1",
-		"@earendil-works/pi-coding-agent": "0.87.1",
-		"@earendil-works/pi-tui": "0.87.1",
+		"@earendil-works/pi-ai": "1.0.0",
+		"@earendil-works/pi-coding-agent": "1.0.0",
+		"@earendil-works/pi-tui": "1.0.0",
 		"@biomejs/biome": "2.5.4",
 		"@types/node": "24.12.4",
 		"typebox": "1.3.7",

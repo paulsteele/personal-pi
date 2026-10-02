@@ -1,6 +1,6 @@
 {
 	"name": "@paulsteele/pi-atelier",
-	"version": "1.5.4",
+	"version": "1.5.5",
 	"private": true,
 	"description": "Personal source-owned Pi Atelier fork",
 	"type": "module",
@@ -45,13 +45,13 @@
 		"check": "npm run typecheck && npm run lint && npm run format:check && npm test && npm run check:pack"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-coding-agent": "0.87.x",
-		"@earendil-works/pi-tui": "0.87.x"
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.4",
-		"@earendil-works/pi-coding-agent": "0.87.1",
-		"@earendil-works/pi-tui": "0.87.1",
+		"@earendil-works/pi-coding-agent": "1.0.0",
+		"@earendil-works/pi-tui": "1.0.0",
 		"@types/node": "24.12.4",
 		"typescript": "5.9.3",
 		"vitest": "4.1.10"

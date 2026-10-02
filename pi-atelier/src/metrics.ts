@@ -1,6 +1,7 @@
 import type { AtelierMetrics } from "./types.js";
 
 export interface UsageMessage {
+	role: "assistant" | "toolResult";
 	usage?: {
 		input?: number;
 		output?: number;
@@ -49,8 +50,10 @@ export function aggregateMetrics(
 		cacheRead += finite(usage.cacheRead);
 		cacheWrite += finite(usage.cacheWrite);
 		cost += finite(usage.cost?.total);
-		const prompt = finite(usage.input) + finite(usage.cacheRead) + finite(usage.cacheWrite);
-		cacheHitPercent = prompt > 0 ? (finite(usage.cacheRead) / prompt) * 100 : undefined;
+		if (message.role === "assistant") {
+			const prompt = finite(usage.input) + finite(usage.cacheRead) + finite(usage.cacheWrite);
+			cacheHitPercent = prompt > 0 ? (finite(usage.cacheRead) / prompt) * 100 : undefined;
+		}
 	}
 
 	const context = options.context;

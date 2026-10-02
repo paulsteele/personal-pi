@@ -60,7 +60,7 @@ async function reviewCommand(h: Awaited<ReturnType<typeof interactive>>, args: s
 it("registers only the unified command and review tool, without startup work", async () => {
 	const h = harness();
 	expect([...h.commands.keys()]).toEqual(["pr"]);
-	expect(h.tools.map((tool) => tool.name)).toEqual(["pr_review"]);
+	expect(h.tools).toEqual([expect.objectContaining({ name: "pr_review", exposure: "model-only" })]);
 	expect([...h.events.keys()]).toEqual(["session_start", "session_shutdown", "session_tree"]);
 	const ctx = { mode: "rpc", hasUI: true, ui: { notify: vi.fn() } } as unknown as ExtensionContext;
 	await h.commands.get("pr")!.handler("setup", ctx);

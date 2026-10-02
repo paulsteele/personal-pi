@@ -80,6 +80,20 @@ async function fixture(review: (options: any) => Promise<ReviewResult>, calls: s
   return { session, cwd, errors, activity, qualityHeaders };
 }
 
+test("quality_response stays declared to the model but is unavailable to nested tools", async () => {
+  const h = await fixture(async () => approved(), []);
+  try {
+    const tool = h.session.getAllTools().find((tool) => tool.name === "quality_response");
+    expect(tool?.exposure).toBe("model-only");
+    expect(h.session.getActiveToolNames()).toContain("quality_response");
+    const ctx = h.session.extensionRunner.createToolContext("parent", undefined);
+    expect(ctx.tools.some((tool) => tool.name === "quality_response")).toBe(false);
+  } finally {
+    await h.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    h.session.dispose();
+  }
+});
+
 test("real Pi receives LSP warnings on the write result and fixes them before readability review", async () => {
   const calls: string[] = [];
   const h = await fixture(async () => { calls.push("review"); return approved(); }, calls, false, {}, (turn, context) => {

@@ -31,7 +31,7 @@ The sidebar starts visible in Pi's fullscreen TUI and hides when the terminal is
 
 The quality group shows checks followed by rejections: `󰅴 17 3✕` means 17 review rounds started and 3 needs-work verdicts. Rejections are red when nonzero and remain counted after a later approval or waiver. Provider failures, skipped files, and user decisions are not rejections. Files in a shared batch and provider retries do not add extra checks or rejections; correction and reconsideration rounds count separately. Both totals survive reloads and follow the active session branch. Narrow tracks omit group separators and outer padding as needed.
 
-The persistent footer is the overview surface. A single responsive Nerd Font strip summarizes auto mode, Plannotator, thinking level, model state, Git churn, context, usage, performance, alerts, and external contributions. The footer remains in Pi’s native dock; the Sidebar continues to fail closed on unknown layouts. Layout and behavior are intentionally fixed in source rather than user configuration.
+The persistent footer is the overview surface. A single responsive Nerd Font strip summarizes auto mode, Plannotator, thinking level, model state, Git churn, context, usage, performance, alerts, and external contributions. Usage totals include assistant messages and model usage reported on tool-result messages, such as PR review and codemode results. Cache-hit percentage remains based on the latest assistant request. The footer remains in Pi’s native dock; the Sidebar continues to fail closed on unknown layouts. Layout and behavior are intentionally fixed in source rather than user configuration.
 
 ## Privacy
 

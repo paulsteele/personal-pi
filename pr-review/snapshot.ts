@@ -7,7 +7,7 @@ import { dirname, join, matchesGlob } from "node:path";
 
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type, type TSchema } from "typebox";
-import { firstParent, git, gitBlobToFile, resolveCommit } from "./git.js";
+import { firstParent, git, gitBlobToFile, gitLfsPaths, resolveCommit } from "./git.js";
 import { ExactDiffWorker } from "./exact-diff.js";
 import { SnapshotStore, textLineCount, textLinePage, textPage } from "./snapshot-store.js";
 import { safePath } from "./profile.js";
@@ -22,6 +22,7 @@ type Entry = {
 	contentOid?: string;
 	backing?: string | undefined;
 	unavailable?: string;
+	lfs?: boolean;
 	live?: { path: string; size: number; identity: string; oidLength: number };
 };
 const liveIdentity = (stat: Awaited<ReturnType<typeof lstat>>) =>
@@ -106,6 +107,9 @@ async function tree(repo: Repo, ref: string | null, signal?: AbortSignal): Promi
 		if (!mode || !oid || tab < 0) throw new Error("Invalid Git tree data");
 		result.set(path, { mode, oid });
 	}
+	for (const path of await gitLfsPaths(repo.root, result.keys(), [{ ref }], signal)) {
+		result.get(path)!.lfs = true;
+	}
 	return result;
 }
 const paths = (bytes: Buffer) => bytes.toString("utf8").split("\0").filter(Boolean).map(safePath);
@@ -150,6 +154,12 @@ async function workingTree(
 			)
 		: paths(await git(repo.root, ["ls-files", "--cached", "-z"], signal));
 	const untracked = paths(await git(repo.root, ["ls-files", "--others", "--exclude-standard", "-z"], signal));
+	const lfs = await gitLfsPaths(
+		repo.root,
+		new Set([...result.keys(), ...dirty, ...untracked]),
+		["worktree", "index", ...(head ? [{ ref: head }] : [])],
+		signal,
+	);
 	const format = (await git(repo.root, ["rev-parse", "--show-object-format"], signal)).toString().trim();
 	for (const path of new Set([...dirty, ...untracked])) {
 		signal?.throwIfAborted();
@@ -185,12 +195,19 @@ async function workingTree(
 				result.set(path, {
 					mode: stat.mode & 0o111 ? "100755" : "100644",
 					oid: `live:${identity}`,
+					...(lfs.has(path) ? { lfs: true } : {}),
 					live: { path: full, size: stat.size, identity, oidLength: format === "sha256" ? 64 : 40 },
 				});
 			}
 		} catch (error) {
 			if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) result.delete(path);
 			else throw error;
+		}
+	}
+	for (const path of lfs) {
+		const entry = result.get(path);
+		if (entry) {
+			entry.lfs = true;
 		}
 	}
 	return result;
@@ -201,9 +218,31 @@ const fingerprint = (head: string | null, entries: Map<string, Entry>) =>
 			head,
 			[...entries]
 				.sort(([a], [b]) => a.localeCompare(b))
-				.map(([path, entry]) => [path, entry.mode, entry.oid]),
+				.map(([path, entry]) => [path, entry.mode, entry.oid, entry.lfs ?? false]),
 		]),
 	);
+const reviewEntries = (entries: Map<string, Entry>) =>
+	new Map([...entries].filter(([, entry]) => !entry.lfs));
+async function hasLocalReviewChanges(
+	repo: Repo,
+	head: string,
+	live: Map<string, Entry>,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	const committed = await tree(repo, head, signal);
+	if (fingerprint(head, reviewEntries(live)) !== fingerprint(head, reviewEntries(committed))) {
+		return true;
+	}
+	const status = await git(
+		repo.root,
+		["status", "--porcelain=v1", "--no-renames", "-z", "--untracked-files=all"],
+		signal,
+	);
+	const statusRecords = status.toString("utf8").split("\0").filter(Boolean);
+	const changedPaths = statusRecords.map((record) => safePath(record.slice(3)));
+	const lfs = await gitLfsPaths(repo.root, changedPaths, ["worktree", "index", { ref: head }], signal);
+	return changedPaths.some((path) => !lfs.has(path));
+}
 function text(data: Buffer): string {
 	const decoded = data.toString("utf8");
 	if (data.includes(0) || !Buffer.from(decoded).equals(data)) throw new Error("binary/non-UTF8 content");
@@ -272,14 +311,8 @@ export async function capture(
 				.toString()
 				.trim();
 			if (!/^[a-f0-9]{40}$|^[a-f0-9]{64}$/.test(baseline)) throw new Error("No available merge base");
-		} else if (head && fingerprint(head, live) === fingerprint(head, await tree(repo, head, signal))) {
-			// Only a truly clean index/worktree falls back; staged reverts are not clean.
-			const status = await git(
-				repo.root,
-				["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-				signal,
-			);
-			if (status.length === 0) baseline = await firstParent(repo.root, head, signal);
+		} else if (head && !(await hasLocalReviewChanges(repo, head, live, signal))) {
+			baseline = await firstParent(repo.root, head, signal);
 		}
 		const before = await tree(repo, baseline, signal);
 		const blobs = new Map<string, Promise<string>>();
@@ -288,6 +321,9 @@ export async function capture(
 		// Private backing access requires a disclosure guard or a restricted local-search check.
 		async function entryPath(entry: Entry | undefined): Promise<string> {
 			if (!entry) throw new Error("File not present in snapshot");
+			if (entry.lfs) {
+				throw new Error("Git LFS content is excluded from text review");
+			}
 			if (entry.unavailable || !["100644", "100755"].includes(entry.mode))
 				throw new Error(entry.unavailable ?? "symlink/submodule content unavailable");
 			if (entry.backing) return entry.backing;
@@ -335,7 +371,9 @@ export async function capture(
 		// Capture only needed dirty source. Excluded/discovery-only content stays metadata-only until requested.
 		if (!discovery)
 			for (const [path, entry] of target) {
-				if (!entry.live || exclusions.some((item) => matchesGlob(path, item.glob))) continue;
+				if (!entry.live || entry.lfs || exclusions.some((item) => matchesGlob(path, item.glob))) {
+					continue;
+				}
 				try {
 					await permissions.guard(
 						{
@@ -379,6 +417,10 @@ export async function capture(
 			// per tracked path. Cooperate only for actual changes, including excluded/denied ones.
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			signal?.throwIfAborted();
+			if (old?.lfs || next?.lfs) {
+				omitted.push({ file, reason: "excluded: Git LFS content (not text-reviewed)" });
+				continue;
+			}
 			const exclusion = exclusions.find((item) => matchesGlob(file, item.glob));
 			if (exclusion) {
 				omitted.push({ file, reason: `excluded: ${exclusion.reason}` });
@@ -535,7 +577,7 @@ export async function capture(
 				withPermissions: view,
 				changePage,
 				dispose: () => store.dispose(),
-				paths: (side = "new") => [...(side === "old" ? before : target).keys()].sort(),
+				paths: (side = "new") => [...reviewEntries(side === "old" ? before : target).keys()].sort(),
 				readLines: (path, side, offset, limit, maxChars, pageSignal) =>
 					readSource(
 						path,

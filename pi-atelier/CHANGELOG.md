@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.5 — 2026-10-02
+
+- Test against Pi 1.0.0 with wildcard host-package peer ranges.
+- Include tool-result model usage in token and cost totals without changing the latest assistant cache-hit percentage.
+
 ## 1.5.0 — 2026-09-29
 
 - Show configured language servers, running states, and shared-client counts alongside the quality analyzer model, wrapping entries at narrow widths.

@@ -63,6 +63,35 @@ describe("AtelierRuntime", () => {
 		expect(JSON.stringify(runtime.getState())).not.toContain("content");
 	});
 
+	it.each(["pr_review", "codemode"])("includes %s model usage from its persisted tool result", (toolName) => {
+		const { runtime, ctx } = createRuntime();
+		ctx.sessionManager.getEntries.mockReturnValue([
+			assistant,
+			{
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolName,
+					content: [{ type: "text", text: "Private tool output" }],
+					usage: { input: 200, output: 40, cacheRead: 0, cacheWrite: 50, cost: { total: 0.02 } },
+					nestedCalls: { calls: [{ id: "parent/1", name: "read", status: "ok" }], complete: true },
+				},
+			},
+		] as never);
+
+		runtime.refreshUsage();
+
+		expect(runtime.getState().metrics).toMatchObject({
+			input: 300,
+			output: 60,
+			cacheRead: 900,
+			cacheWrite: 50,
+			cacheHitPercent: 90,
+		});
+		expect(runtime.getState().metrics.cost).toBeCloseTo(0.03);
+		expect(JSON.stringify(runtime.getState())).not.toContain("Private tool output");
+	});
+
 	it("starts inspecting and derives clean or changed Pulse states from successful inspection", async () => {
 		const changed = {
 			...cleanInspection,
