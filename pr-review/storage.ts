@@ -32,7 +32,7 @@ export async function ensurePrivateDirectory(path: string): Promise<void> {
 	if ((await lstat(path)).isSymbolicLink()) throw new Error(`Refusing symlink storage directory: ${path}`);
 	await chmod(path, 0o700);
 }
-async function checkPath(root: string, path: string): Promise<void> {
+async function checkStorageLinks(root: string, path: string): Promise<void> {
 	if (!inside(root, path) || root === path) throw new Error("Invalid runtime storage path");
 	let current = path;
 	while (current !== root) {
@@ -43,6 +43,9 @@ async function checkPath(root: string, path: string): Promise<void> {
 		}
 		current = dirname(current);
 	}
+}
+async function checkPath(root: string, path: string): Promise<void> {
+	await checkStorageLinks(root, path);
 	const ancestor = await nearestExistingDirectory(dirname(path));
 	const top = (await git(ancestor, ["rev-parse", "--show-toplevel"], undefined, true))
 		.toString()
@@ -87,6 +90,23 @@ export async function initializeStorage(root: string): Promise<void> {
 }
 const isReport = (root: string, path: string) =>
 	/^repos\/[a-f0-9]{64}\/reports\/[a-f0-9-]{36}\.json$/.test(relative(root, path).split("\\").join("/"));
+/** Bind a verified content revision to an unchanged regular-file identity without rereading its body. */
+export async function storedFileMetadataFingerprint(root: string, path: string): Promise<string | undefined> {
+	await checkStorageLinks(root, path);
+	try {
+		const stat = await lstat(path, { bigint: true });
+		if (!stat.isFile()) {
+			throw new Error("Invalid saved report file");
+		}
+		return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+			return undefined;
+		}
+		throw error;
+	}
+}
+
 export async function readStored(
 	root: string,
 	path: string,

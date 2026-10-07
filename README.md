@@ -22,7 +22,7 @@ Permission System and Progress Observer load before Atelier so their replayable 
 After the public repository and release tag exist:
 
 ```sh
-pi install https://github.com/paulsteele/personal-pi@v1.5.6
+pi install https://github.com/paulsteele/personal-pi@v1.6.0
 ```
 
 The dotfiles repository normally records the same pinned source in `~/.pi/agent/settings.json`, so Pi installs a missing user package automatically at startup when online. The public HTTPS URL requires no SSH alias or repository credentials.
@@ -55,6 +55,7 @@ Focused commands:
 ```sh
 bun run test:custom
 bun run test:integration
+bun run test:release
 bun run test:packages
 bun run typecheck
 bun run lint
@@ -67,14 +68,26 @@ bun run check:pack
 The repository and all eight workspace packages share one version.
 
 1. Start from a clean `main` checkout.
-2. Run `bun install --frozen-lockfile && bun run check`.
-3. Update the root/workspace versions and changelogs as appropriate.
-4. Commit the release.
-5. Create an immutable annotated tag: `git tag -a vX.Y.Z -m "vX.Y.Z"`.
-6. Push `main` and the tag.
-7. Update the pinned repository tag in dotfiles and run `pi update --extensions`.
+2. Write release notes under `## Unreleased` in the affected workspace changelogs.
+3. Preview and apply the version bump:
 
-Do not move or replace a published version tag.
+   ```sh
+   bun run bump patch --dry-run
+   bun run bump patch
+   ```
+
+   Use `minor`, `major`, or an explicit stable version such as `1.6.0` (also accepts `v1.6.0`). The target must be newer than the current version.
+
+   [`scripts/bump-version.ts`](scripts/bump-version.ts) discovers workspaces from the root manifest and updates all nine package versions, only the corresponding workspace version fields in `bun.lock`, and the README install pin. It promotes nonempty `## Unreleased` or `## [Unreleased]` sections to the new version with today's UTC date. Empty sections, historical notes, dependency versions, and lockfile resolutions remain unchanged; missing changelogs are not created. Existing version mismatches or a stale README pin stop preparation before any writes.
+
+   Preparation can run on a dirty checkout and preserves unrelated edits, but does not enforce branch or Git state. Review the diff and finish any release notes before proceeding.
+4. Run `bun install --frozen-lockfile && bun run check` against the bumped files.
+5. Commit the release.
+6. Create an immutable annotated tag: `git tag -a vX.Y.Z -m "vX.Y.Z"`.
+7. Push `main` and the tag.
+8. Update the pinned repository tag in dotfiles and run `pi update --extensions`.
+
+The bump command only prepares repository files: it never runs checks, commits, tags, pushes, edits dotfiles, or updates Pi. `--dry-run` lists the planned files without writing; `bun run bump --help` shows usage. Do not move or replace a published version tag.
 
 ## New-machine setup
 

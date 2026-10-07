@@ -22,6 +22,7 @@ import { createReviewDashboard, trackPermissionPrompts, type ReviewDashboard } f
 import { createRunJournal } from "./journal.js";
 import { storageRoot } from "./storage.js";
 import type { Report, Repo } from "./types.js";
+import { prepareReport, ResultStore, type RegisteredReport } from "./result-store.js";
 import { openReviewPermissions, isPermissionBlocked, type ReviewPermissions } from "./permissions.js";
 import { createWorkUI, directWork, type WorkPhase, type WorkUI } from "./work-ui.js";
 
@@ -30,7 +31,11 @@ interface Outcome {
 	report?: Report;
 	path?: string;
 	handoff?: boolean;
-	validate?: () => Promise<{ text: string; handoff: boolean } | void>;
+	actionComplete?: boolean;
+	root?: string;
+	repo?: Repo;
+	registration?: RegisteredReport;
+	validate?: () => Promise<{ text: string; handoff: boolean; actionComplete: boolean } | void>;
 }
 interface ActiveOperation {
 	controller: AbortController;
@@ -43,6 +48,14 @@ interface ActiveOperation {
 	phaseUI?: WorkUI;
 }
 export default function prReview(pi: ExtensionAPI): void {
+	const results = new ResultStore();
+	const retrievals = new Set<AbortController>();
+	const clearResults = () => {
+		results.clear();
+		for (const controller of retrievals) {
+			controller.abort();
+		}
+	};
 	let active: ActiveOperation | undefined;
 	let lastTasks: TaskStore | undefined;
 	let lastDashboard: ReviewDashboard | undefined;
@@ -57,6 +70,7 @@ export default function prReview(pi: ExtensionAPI): void {
 	};
 	let generation = 0;
 	const cancel = () => {
+		clearResults();
 		generation++;
 		active?.cancel();
 		active?.dashboard?.dispose();
@@ -65,7 +79,10 @@ export default function prReview(pi: ExtensionAPI): void {
 		lastTasks = undefined;
 		active = undefined;
 	};
-	pi.on("session_start", observePermissionPrompts);
+	pi.on("session_start", () => {
+		clearResults();
+		observePermissionPrompts();
+	});
 	pi.on("session_shutdown", () => {
 		cancel();
 		permissionPrompts?.dispose();
@@ -308,6 +325,8 @@ export default function prReview(pi: ExtensionAPI): void {
 					...reviewOutcome(report, path, prompts.text["fix-handoff"]),
 					report,
 					path,
+					root,
+					repo,
 					...(report.browser?.requestedIds.length
 						? {
 								validate: async () => {
@@ -423,6 +442,7 @@ export default function prReview(pi: ExtensionAPI): void {
 				const permissionOwner = current.permissions;
 				const access = permissionOwner.host("Return PR output to the parent");
 				await (current.dashboard?.work ?? work)("Authorizing parent handoff", async () => {
+					let correctionAlreadyApplied = false;
 					for (;;) {
 						try {
 							const revision = await access.authorizeSources(
@@ -430,8 +450,23 @@ export default function prReview(pi: ExtensionAPI): void {
 								"Return the authorized review result to the parent",
 								current.controller.signal,
 							);
-							const corrected = await outcome.validate?.();
-							if (corrected) Object.assign(outcome, corrected);
+							if (outcome.report && outcome.path && outcome.root && outcome.repo) {
+								outcome.registration = await prepareReport(
+									outcome.root,
+									outcome.path,
+									outcome.repo,
+									outcome.report,
+									permissionOwner.dependencies,
+								);
+							}
+							if (!correctionAlreadyApplied) {
+								const corrected = await outcome.validate?.();
+								if (corrected) {
+									Object.assign(outcome, corrected);
+									correctionAlreadyApplied = true;
+									continue;
+								}
+							}
 							if (revision !== access.revision()) continue;
 							break;
 						} catch (error) {
@@ -451,6 +486,10 @@ export default function prReview(pi: ExtensionAPI): void {
 				});
 				if (current.tasks?.records.has("output"))
 					current.tasks.update("output", { state: "completed", endedAt: Date.now() }, "Output authorized");
+			}
+			current.controller.signal.throwIfAborted();
+			if (active !== current) {
+				throw new Error("PR operation retired before result registration");
 			}
 			if (outcome.path) {
 				try {
@@ -557,15 +596,25 @@ export default function prReview(pi: ExtensionAPI): void {
 						ui,
 					);
 					if (owner !== generation) return;
+					const content = displayOutcome(result);
 					pi.sendMessage(
 						{
 							customType: "pr-review",
-							content: displayOutcome(result),
+							content,
 							display: true,
-							details: { reportId: result.report?.id, path: result.path },
+							details: {
+								reportId: result.report?.id,
+								status: result.report?.status,
+								path: result.path,
+								actionComplete: result.actionComplete,
+								retrievalTool: "pr_review_result",
+							},
 						},
 						{ triggerTurn: result.handoff ?? false },
 					);
+					if (result.registration) {
+						results.publish(result.registration, ctx.sessionManager.getSessionId());
+					}
 				} catch (error) {
 					if (owner !== generation) return;
 					const message = controller.signal.aborted
@@ -601,10 +650,11 @@ export default function prReview(pi: ExtensionAPI): void {
 		exposure: "model-only",
 		label: "PR review",
 		description:
-			"Run the code-owned repository review pipeline and open verified findings in Plannotator. Requires explicit /pr setup and interactive approvals. Browser feedback can authorize the parent agent to fix selected verified findings; this tool never edits project files.",
+			"Run the code-owned repository review pipeline and open verified findings in Plannotator. Requires explicit /pr setup and interactive approvals. Browser feedback can authorize the parent agent to fix selected verified findings; this tool never edits project files. Results include actionComplete: use complete inline action data directly, or page pr_review_result before acting when false. The saved report path is an optional audit locator.",
 		promptSnippet: "Run repository-aware, independently verified code review",
 		promptGuidelines: [
 			"Use pr_review for repository-aware review requests. An approved profile remains usable after repository changes. If setup is missing, ask the user to run /pr setup and approve the saved draft with /pr setup approve; do not silently substitute an old Claude Task-based skill.",
+			"Use a complete inline PR action payload without reopening the saved report. If actionComplete is false, concatenate pr_review_result action pages until nextOffset is null before acting. Report paths are optional audit locators; do not use shell scripts to extract routine review feedback.",
 		],
 		parameters: Type.Object(
 			{
@@ -615,6 +665,8 @@ export default function prReview(pi: ExtensionAPI): void {
 			{ additionalProperties: false },
 		),
 		async execute(_id, args, signal, onUpdate, ctx) {
+			const invocationGeneration = generation;
+			const invocationSessionId = ctx.sessionManager.getSessionId();
 			if (args.commits !== undefined && args.base !== undefined)
 				throw new Error("Choose commits or base, not both");
 			const scopeArgs = `${args.commits !== undefined ? `--commits ${args.commits}` : args.base !== undefined ? `--base ${args.base}` : ""}${args.committedOnly ? " --committed-only" : ""}`;
@@ -653,17 +705,92 @@ export default function prReview(pi: ExtensionAPI): void {
 			} finally {
 				clearTimeout(updateTimer);
 			}
+			signal?.throwIfAborted();
+			if (invocationGeneration !== generation || invocationSessionId !== ctx.sessionManager.getSessionId()) {
+				throw new Error("PR result producer belongs to a retired session generation");
+			}
+			const text = displayOutcome(result);
 			const usage = result.report ? toProviderUsage(result.report.usage) : undefined;
+			if (result.registration) {
+				results.publish(result.registration, invocationSessionId);
+			}
 			return {
 				content: [
 					{
 						type: "text",
-						text: displayOutcome(result),
+						text,
 					},
 				],
-				details: { reportId: result.report?.id, status: result.report?.status, path: result.path },
+				details: {
+					reportId: result.report?.id,
+					status: result.report?.status,
+					path: result.path,
+					actionComplete: result.actionComplete,
+					retrievalTool: "pr_review_result",
+				},
 				...(usage ? { usage } : {}),
 			};
+		},
+	});
+	pi.registerTool({
+		name: "pr_review_result",
+		label: "Read PR result",
+		exposure: "direct",
+		annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+		description:
+			"Retrieve a report already handed to this session. Read action for complete fix authorization and human constraints, or report for optional audit data. Cursor counts UTF-16 code units; concatenate text fragments and follow nextOffset until null. No historical reports or arbitrary paths. Live permissions still apply.",
+		parameters: Type.Object(
+			{
+				reportId: Type.String({ minLength: 1, maxLength: 120 }),
+				section: Type.Union([Type.Literal("action"), Type.Literal("report")]),
+				cursor: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+			},
+			{ additionalProperties: false },
+		),
+		async execute(id, args, signal, _onUpdate, ctx) {
+			if (ctx.mode !== "tui" || !ctx.hasUI || !ctx.isProjectTrusted()) {
+				throw new Error("PR result retrieval requires a trusted interactive TUI session");
+			}
+			const sessionId = ctx.sessionManager.getSessionId();
+			const entry = results.get(args.reportId, sessionId);
+			const controller = new AbortController();
+			const abort = () => controller.abort();
+			retrievals.add(controller);
+			signal?.addEventListener("abort", abort, { once: true });
+			if (signal?.aborted) {
+				controller.abort();
+			}
+			let permissions: ReviewPermissions | undefined;
+			try {
+				controller.signal.throwIfAborted();
+				permissions = openReviewPermissions(
+					pi,
+					ctx,
+					entry.repo,
+					`Retrieve review ${entry.reportId}`,
+					controller.signal,
+					{ parentToolCallId: id },
+				);
+				const access = permissions.host("Read handed-off PR result");
+				for (;;) {
+					const revision = await access.authorizeSources(
+						entry.dependencies,
+						"Disclose saved PR result to the parent",
+						controller.signal,
+					);
+					const page = await results.page(entry, sessionId, args.section, args.cursor, controller.signal);
+					controller.signal.throwIfAborted();
+					results.assertCurrent(entry, ctx.sessionManager.getSessionId());
+					if (revision !== access.revision()) {
+						continue;
+					}
+					return { content: [{ type: "text", text: JSON.stringify(page) }], details: page };
+				}
+			} finally {
+				permissions?.close();
+				signal?.removeEventListener("abort", abort);
+				retrievals.delete(controller);
+			}
 		},
 	});
 }

@@ -57,10 +57,18 @@ async function reviewCommand(h: Awaited<ReturnType<typeof interactive>>, args: s
 	await h.commands.get("pr")!.handler(args, h.ctx);
 	await vi.waitFor(() => expect(h.pi.sendMessage.mock.calls.length).toBeGreaterThan(before));
 }
-it("registers only the unified command and review tool, without startup work", async () => {
+it("registers the unified command, review tool, and scoped result reader without startup work", async () => {
 	const h = harness();
 	expect([...h.commands.keys()]).toEqual(["pr"]);
-	expect(h.tools).toEqual([expect.objectContaining({ name: "pr_review", exposure: "model-only" })]);
+	const resultReaderAnnotations = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
+	expect(h.tools).toEqual([
+		expect.objectContaining({ name: "pr_review", exposure: "model-only" }),
+		expect.objectContaining({
+			name: "pr_review_result",
+			exposure: "direct",
+			annotations: resultReaderAnnotations,
+		}),
+	]);
 	expect([...h.events.keys()]).toEqual(["session_start", "session_shutdown", "session_tree"]);
 	const ctx = { mode: "rpc", hasUI: true, ui: { notify: vi.fn() } } as unknown as ExtensionContext;
 	await h.commands.get("pr")!.handler("setup", ctx);

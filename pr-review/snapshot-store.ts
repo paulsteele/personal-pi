@@ -14,6 +14,9 @@ export class SnapshotStore {
 	private constructor(readonly directory: string) {}
 	static async create(repo: Repo): Promise<SnapshotStore> {
 		const root = await storageRoot(getAgentDir(), repo);
+		return SnapshotStore.createAtRoot(root);
+	}
+	static async createAtRoot(root: string): Promise<SnapshotStore> {
 		await initializeStorage(root);
 		const parent = join(root, "snapshots");
 		await ensurePrivateDirectory(parent);

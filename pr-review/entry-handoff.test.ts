@@ -7,6 +7,8 @@ import { providerUsage } from "./usage.js";
 import { saveReport } from "./report.js";
 import { testPermissionEvents } from "./test-fixtures.js";
 import { PermissionBlocked, PermissionScope } from "./permissions.js";
+import { ResultStore } from "./result-store.js";
+import * as storage from "./storage.js";
 const state = vi.hoisted(() => ({
 	report: undefined as unknown,
 	browser: undefined as unknown,
@@ -22,6 +24,7 @@ const state = vi.hoisted(() => ({
 	onProgressQueued: undefined as (() => void) | undefined,
 	progressMessage: "Viewer preparing",
 	progressCallback: undefined as ((message: string) => void) | undefined,
+	sectionFiles: new Map<string, string>(),
 }));
 vi.mock("./git.js", async (original) => ({
 	...(await original<object>()),
@@ -30,6 +33,48 @@ vi.mock("./git.js", async (original) => ({
 vi.mock("./storage.js", async (original) => ({
 	...(await original<object>()),
 	storageRoot: async () => "/private-runtime",
+	storedFileMetadataFingerprint: async (_root: string, path: string) => {
+		if (state.sectionFiles.has(path)) {
+			return path;
+		}
+		const report = state.savedReports.at(-1);
+		if (!report) {
+			return undefined;
+		}
+		return JSON.stringify(report);
+	},
+	readStored: async () => {
+		const report = state.savedReports.at(-1);
+		if (!report) {
+			return undefined;
+		}
+		return { value: structuredClone(report), revision: JSON.stringify(report) };
+	},
+}));
+vi.mock("./snapshot-store.js", async (original) => ({
+	...(await original<object>()),
+	SnapshotStore: {
+		createAtRoot: async () => {
+			const paths: string[] = [];
+			return {
+				put: async (text: string) => {
+					const path = `/private-runtime/section-${state.sectionFiles.size}`;
+					state.sectionFiles.set(path, text);
+					paths.push(path);
+					return path;
+				},
+				dispose: async () => {
+					for (const path of paths) {
+						state.sectionFiles.delete(path);
+					}
+				},
+			};
+		},
+	},
+	textPage: async (path: string, offset: number, limit: number) => {
+		const text = state.sectionFiles.get(path)!;
+		return { text: text.slice(offset, offset + limit), total: text.length };
+	},
 }));
 vi.mock("./profile.js", async (original) => ({
 	...(await original<object>()),
@@ -48,7 +93,19 @@ vi.mock("./snapshot.js", () => ({
 		if (++state.validations >= state.driftAfter) throw new Error("fixture source drift");
 	},
 }));
-vi.mock("./runner.js", () => ({ review: async () => structuredClone(state.report) }));
+vi.mock("./runner.js", () => ({
+	review: async (options: { permissions: { host(name: string): PermissionScope } }) => {
+		await options.permissions.host("Fixture review source").guard(
+			{
+				toolName: "read",
+				input: { path: "/fixture/a.ts" },
+				effects: [{ path: "/fixture/a.ts", side: "new", version: "snapshot" }],
+			},
+			async () => undefined,
+		);
+		return structuredClone(state.report);
+	},
+}));
 vi.mock("./journal.js", () => ({
 	createRunJournal: async () => ({ path: "/private-runtime/progress.json", close: async () => {} }),
 }));
@@ -146,6 +203,7 @@ function harness() {
 	state.onProgressQueued = undefined;
 	state.progressMessage = "Viewer preparing";
 	state.progressCallback = undefined;
+	state.sectionFiles.clear();
 	const ui = uiHarness();
 	const ctx = {
 		cwd: "/fixture",
@@ -157,7 +215,8 @@ function harness() {
 		ui: ui.ui,
 		modelRegistry: { find: () => ({}), hasConfiguredAuth: () => true },
 	} as unknown as ExtensionContext;
-	let command: any, tool: any;
+	let command: any;
+	const tools = new Map<string, any>();
 	const events = new Map<string, () => void>();
 	const api = {
 		events: { ...testPermissionEvents(), emit: vi.fn(testPermissionEvents().emit) },
@@ -167,13 +226,21 @@ function harness() {
 		registerCommand(_name: string, value: unknown) {
 			command = value;
 		},
-		registerTool(value: unknown) {
-			tool = value;
+		registerTool(value: { name: string }) {
+			tools.set(value.name, value);
 		},
 		sendMessage: vi.fn(),
 	};
 	extension(api as unknown as ExtensionAPI);
-	return { api, ctx, command, tool, ui, events };
+	return {
+		api,
+		ctx,
+		command,
+		tool: tools.get("pr_review"),
+		resultTool: tools.get("pr_review_result"),
+		ui,
+		events,
+	};
 }
 afterEach(() => {
 	vi.useRealTimers();
@@ -219,12 +286,20 @@ it.each(["command", "tool"])(
 		const text = entry === "tool" ? toolResult.content[0].text : h.api.sendMessage.mock.calls[0]![0].content;
 		expect(text).toContain("NO FIXES AUTHORIZED");
 		expect(text).toContain("Requested verified finding IDs: []");
-		expect(text).toContain("Full structured report:");
+		expect(text).toContain("Audit report (optional; no filesystem read required):");
 		expect(state.savedReports.at(-1)).toMatchObject({
 			status: "incomplete",
 			browser: { decision: "feedback", requestedIds: [] },
 		});
 		expect(state.savedReports.at(-1)?.issues.join(" ")).toContain("fixture source drift");
+		const retrieved = await h.resultTool.execute(
+			"read-drifted-result",
+			{ reportId: "fixture", section: "action" },
+			new AbortController().signal,
+			undefined,
+			h.ctx,
+		);
+		expect(JSON.parse(JSON.parse(retrieved.content[0].text).text).browser.requestedIds).toEqual([]);
 	},
 );
 
@@ -549,7 +624,7 @@ it("triggers discussion for command approval notes without authorizing fixes", a
 	);
 	expect(h.api.sendMessage.mock.calls[0]![0].content).toContain("browser.feedback");
 });
-it("retains a visible report locator for a truncated command result", async () => {
+it("returns scoped retrieval instructions for an oversized command action", async () => {
 	const h = harness();
 	state.browser = {
 		decision: "lgtm",
@@ -561,8 +636,511 @@ it("retains a visible report locator for a truncated command result", async () =
 	await h.command.handler("", h.ctx);
 	await vi.waitFor(() => expect(h.api.sendMessage).toHaveBeenCalled());
 	const text = h.api.sendMessage.mock.calls[0]![0].content;
-	expect(text).toContain("Display truncated");
+	expect(text).toContain('"actionComplete":false');
+	expect(text).toContain("pr_review_result");
 	expect(text).toContain("NO FIXES AUTHORIZED");
-	expect(text).toMatch(/Full structured report: .*\/reports\/fixture\.json$/);
+	expect(text).toMatch(/Audit report .*\/reports\/fixture\.json/);
 	expect(h.api.sendMessage.mock.calls[0]![1]).toEqual({ triggerTurn: false });
+});
+
+it.each(["command", "tool"])(
+	"publishes the same complete action data through %s and scoped retrieval",
+	async (entry) => {
+		const h = harness();
+		state.browser = {
+			decision: "feedback",
+			requestedIds: ["F1"],
+			discussion: [{ id: "reply", text: "Keep the public API." }],
+			feedback: "Fix F1 without changing exports.",
+		};
+		let text: string;
+		if (entry === "command") {
+			await h.command.handler("", h.ctx);
+			await vi.waitFor(() => expect(h.api.sendMessage).toHaveBeenCalledOnce());
+			text = h.api.sendMessage.mock.calls[0]![0].content;
+		} else {
+			const result = await h.tool.execute("review", {}, new AbortController().signal, undefined, h.ctx);
+			text = result.content[0].text;
+			expect(result.details.actionComplete).toBe(true);
+			expect(result.details.retrievalTool).toBe("pr_review_result");
+		}
+		const inline = JSON.parse(text.split("# Action payload\n")[1]!.split("\n")[0]!);
+		const result = await h.resultTool.execute(
+			"read",
+			{ reportId: "fixture", section: "action" },
+			new AbortController().signal,
+			undefined,
+			h.ctx,
+		);
+		const page = JSON.parse(result.content[0].text);
+		expect(page.nextOffset).toBeNull();
+		expect(JSON.parse(page.text)).toEqual(inline);
+		expect(inline.browser.feedback).toBe("Fix F1 without changing exports.");
+		expect(inline.browser.discussion).toEqual([{ id: "reply", text: "Keep the public API." }]);
+		expect(inline.browser.requestedIds).toEqual(["F1"]);
+	},
+);
+
+it.each(["session_start", "session_shutdown", "session_tree"])(
+	"expires published report retrieval on %s",
+	async (event) => {
+		const h = harness();
+		state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "" };
+		await h.tool.execute("review", {}, new AbortController().signal, undefined, h.ctx);
+		h.events.get(event)!();
+		await expect(
+			h.resultTool.execute(
+				"read",
+				{ reportId: "fixture", section: "action" },
+				new AbortController().signal,
+				undefined,
+				h.ctx,
+			),
+		).rejects.toThrow("Unknown or expired");
+	},
+);
+
+it("denies report retrieval in a different session without discovering a permission service", async () => {
+	const h = harness();
+	state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "" };
+	await h.tool.execute("review", {}, new AbortController().signal, undefined, h.ctx);
+	h.api.events.emit.mockClear();
+	h.ctx.sessionManager.getSessionId = () => "replacement-session";
+	await expect(
+		h.resultTool.execute(
+			"read",
+			{ reportId: "fixture", section: "action" },
+			new AbortController().signal,
+			undefined,
+			h.ctx,
+		),
+	).rejects.toThrow("Unknown or expired");
+	expect(h.api.events.emit).not.toHaveBeenCalled();
+});
+
+it("checks retained source dependencies on every retrieval and attaches the actual parent tool ID", async () => {
+	const h = harness();
+	state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "" };
+	await h.tool.execute("review", {}, new AbortController().signal, undefined, h.ctx);
+	const authorize = vi.spyOn(PermissionScope.prototype, "authorizeSources");
+	const open = vi.fn((_options: { parentToolCallId: string }) => ({
+		task: () => ({
+			check: async () => ({ kind: "allowed", revision: "live" }),
+			revision: () => "live",
+			nextTurn() {},
+			endTurn() {},
+			close() {},
+		}),
+		close() {},
+	}));
+	h.api.events.emit.mockImplementation((name, raw) => {
+		if (name === "permissions:review-service:v1") {
+			(raw as { accept(value: unknown): void }).accept({ version: 1, open });
+		}
+	});
+	await h.resultTool.execute(
+		"read-one",
+		{ reportId: "fixture", section: "action" },
+		new AbortController().signal,
+		undefined,
+		h.ctx,
+	);
+	await h.resultTool.execute(
+		"read-two",
+		{ reportId: "fixture", section: "report" },
+		new AbortController().signal,
+		undefined,
+		h.ctx,
+	);
+	expect(open.mock.calls.map(([options]) => options.parentToolCallId)).toEqual(["read-one", "read-two"]);
+	expect(authorize).toHaveBeenCalledTimes(2);
+	for (const [dependencies, description] of authorize.mock.calls) {
+		expect(dependencies).toEqual([{ path: "/fixture/a.ts", side: "new", version: "snapshot" }]);
+		expect(description).toBe("Disclose saved PR result to the parent");
+	}
+});
+
+it.each(["denied", "unavailable"])(
+	"does not disclose report data after a %s live permission check",
+	async (kind) => {
+		const h = harness();
+		state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "" };
+		await h.tool.execute("review", {}, new AbortController().signal, undefined, h.ctx);
+		const closeTask = vi.fn();
+		const closeOperation = vi.fn();
+		h.api.events.emit.mockImplementation((name, raw) => {
+			if (name === "permissions:review-service:v1") {
+				(raw as { accept(value: unknown): void }).accept({
+					version: 1,
+					open: () => ({
+						task: () => ({
+							check: async () => ({ kind, reason: "Fixture live policy blocked disclosure" }),
+							revision: () => "live",
+							nextTurn() {},
+							endTurn() {},
+							close: closeTask,
+						}),
+						close: closeOperation,
+					}),
+				});
+			}
+		});
+		await expect(
+			h.resultTool.execute(
+				"read",
+				{ reportId: "fixture", section: "action" },
+				new AbortController().signal,
+				undefined,
+				h.ctx,
+			),
+		).rejects.toThrow("Fixture live policy blocked disclosure");
+		expect(closeTask).toHaveBeenCalledOnce();
+		expect(closeOperation).toHaveBeenCalledOnce();
+	},
+);
+
+it("blocks retrieval when the compatible permission service disappears", async () => {
+	const h = harness();
+	state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "" };
+	await h.tool.execute("review", {}, new AbortController().signal, undefined, h.ctx);
+	h.api.events.emit.mockImplementation(() => {});
+	await expect(
+		h.resultTool.execute(
+			"read",
+			{ reportId: "fixture", section: "action" },
+			new AbortController().signal,
+			undefined,
+			h.ctx,
+		),
+	).rejects.toThrow("requires the loaded compatible Permission System");
+});
+
+it.each([
+	{
+		trigger: "tool abort",
+		cancel: ({ controller }: { controller: AbortController; h: ReturnType<typeof harness> }) =>
+			controller.abort(),
+	},
+	{
+		trigger: "session tree change",
+		cancel: ({ h }: { controller: AbortController; h: ReturnType<typeof harness> }) =>
+			h.events.get("session_tree")!(),
+	},
+])("cancels pending retrieval after a $trigger and closes its permission operation", async ({ cancel }) => {
+	const h = harness();
+	state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "" };
+	await h.tool.execute("review", {}, new AbortController().signal, undefined, h.ctx);
+	const controller = new AbortController();
+	const closeOperation = vi.fn();
+	let checking = false;
+	h.api.events.emit.mockImplementation((name, raw) => {
+		if (name === "permissions:review-service:v1") {
+			(raw as { accept(value: unknown): void }).accept({
+				version: 1,
+				open: () => ({
+					task: () => ({
+						check: async (request: { signal: AbortSignal }) => {
+							checking = true;
+							await new Promise<void>((resolve) =>
+								request.signal.addEventListener("abort", () => resolve(), { once: true }),
+							);
+							return { kind: "cancelled", reason: "Fixture retrieval cancelled" };
+						},
+						revision: () => "live",
+						nextTurn() {},
+						endTurn() {},
+						close() {},
+					}),
+					close: closeOperation,
+				}),
+			});
+		}
+	});
+	const pending = h.resultTool.execute(
+		"read",
+		{ reportId: "fixture", section: "action" },
+		controller.signal,
+		undefined,
+		h.ctx,
+	);
+	const rejected = expect(pending).rejects.toThrow("Fixture retrieval cancelled");
+	await vi.waitFor(() => expect(checking).toBe(true));
+	cancel({ controller, h });
+	await rejected;
+	expect(closeOperation).toHaveBeenCalledOnce();
+});
+
+it("rechecks source policy after saved-file work and rejects a new denial", async () => {
+	const h = harness();
+	state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "" };
+	await h.tool.execute("review", {}, new AbortController().signal, undefined, h.ctx);
+	let denied = false;
+	const close = vi.fn();
+	h.api.events.emit.mockImplementation((name, raw) => {
+		if (name === "permissions:review-service:v1") {
+			(raw as { accept(value: unknown): void }).accept({
+				version: 1,
+				open: () => ({
+					task: () => ({
+						check: async () => {
+							if (denied) {
+								return { kind: "denied", reason: "Source now denied" };
+							}
+							return { kind: "allowed", revision: "allowed" };
+						},
+						revision: () => (denied ? "denied" : "allowed"),
+						nextTurn() {},
+						endTurn() {},
+						close() {},
+					}),
+					close,
+				}),
+			});
+		}
+	});
+	const original = ResultStore.prototype.page;
+	vi.spyOn(ResultStore.prototype, "page").mockImplementation(async function (this: ResultStore, ...args) {
+		const text = await original.apply(this, args);
+		denied = true;
+		return text;
+	});
+	await expect(
+		h.resultTool.execute(
+			"read",
+			{ reportId: "fixture", section: "action" },
+			new AbortController().signal,
+			undefined,
+			h.ctx,
+		),
+	).rejects.toThrow("Source now denied");
+	expect(close).toHaveBeenCalledOnce();
+});
+
+it("restarts a complete source-authorization pass when the live revision changes", async () => {
+	const h = harness();
+	state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "" };
+	await h.tool.execute("review", {}, new AbortController().signal, undefined, h.ctx);
+	let revision = "old";
+	const checked: string[] = [];
+	h.api.events.emit.mockImplementation((name, raw) => {
+		if (name === "permissions:review-service:v1") {
+			(raw as { accept(value: unknown): void }).accept({
+				version: 1,
+				open: () => ({
+					task: () => ({
+						check: async () => {
+							checked.push(revision);
+							const checkedRevision = revision;
+							revision = "new";
+							return { kind: "allowed", revision: checkedRevision };
+						},
+						revision: () => revision,
+						nextTurn() {},
+						endTurn() {},
+						close() {},
+					}),
+					close() {},
+				}),
+			});
+		}
+	});
+	const result = await h.resultTool.execute(
+		"read",
+		{ reportId: "fixture", section: "action" },
+		new AbortController().signal,
+		undefined,
+		h.ctx,
+	);
+	const authorizationRevisions = ["old", "new", "new"];
+	expect(checked).toEqual(authorizationRevisions);
+	expect(JSON.parse(JSON.parse(result.content[0].text).text).reportId).toBe("fixture");
+});
+
+it("does not leave a retrievable report when command result publication fails", async () => {
+	const h = harness();
+	state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "" };
+	h.api.sendMessage.mockImplementationOnce(() => {
+		throw new Error("Fixture result publication failed");
+	});
+	await h.command.handler("", h.ctx);
+	await vi.waitFor(() => expect(h.api.sendMessage).toHaveBeenCalledTimes(2));
+	await expect(
+		h.resultTool.execute(
+			"read",
+			{ reportId: "fixture", section: "action" },
+			new AbortController().signal,
+			undefined,
+			h.ctx,
+		),
+	).rejects.toThrow("Unknown or expired");
+});
+
+it("pages a large command action to completion through the result tool", async () => {
+	const h = harness();
+	const feedback = "Preserve the API. 😀 ".repeat(6000);
+	state.browser = { decision: "feedback", requestedIds: ["F1"], discussion: [], feedback };
+	await h.command.handler("", h.ctx);
+	await vi.waitFor(() => expect(h.api.sendMessage).toHaveBeenCalledOnce());
+	expect(h.api.sendMessage.mock.calls[0]![0].details.actionComplete).toBe(false);
+	expect(h.api.sendMessage.mock.calls[0]![0].content).toContain("pr_review_result");
+	const fragments: string[] = [];
+	let cursor: number | null = 0;
+	while (cursor !== null) {
+		const result = await h.resultTool.execute(
+			"read",
+			{ reportId: "fixture", section: "action", cursor },
+			new AbortController().signal,
+			undefined,
+			h.ctx,
+		);
+		const page = JSON.parse(result.content[0].text);
+		fragments.push(page.text);
+		cursor = page.nextOffset;
+	}
+	const action = JSON.parse(fragments.join(""));
+	expect(action.browser.feedback).toBe(feedback);
+	expect(action.browser.requestedIds).toEqual(["F1"]);
+	expect(action.findings.map((finding: { id: string }) => finding.id)).toEqual(["F1"]);
+});
+
+it.each(["session_tree", "session_shutdown"])(
+	"rejects a tool producer retired at final publication by %s",
+	async (event) => {
+		const h = harness();
+		state.browser = { decision: "feedback", requestedIds: ["F1"], discussion: [], feedback: "Fix F1" };
+		const caller = new AbortController();
+		const emit = h.api.events.emit.getMockImplementation()!;
+		h.api.events.emit.mockImplementation((name, data) => {
+			emit(name, data);
+			if (name === "permissions:allow_session_files") {
+				queueMicrotask(() => h.events.get(event)!());
+			}
+		});
+		await expect(h.tool.execute("review", {}, caller.signal, undefined, h.ctx)).rejects.toThrow(
+			"retired session generation",
+		);
+		expect(caller.signal.aborted).toBe(false);
+		await expect(
+			h.resultTool.execute(
+				"read",
+				{ reportId: "fixture", section: "action" },
+				new AbortController().signal,
+				undefined,
+				h.ctx,
+			),
+		).rejects.toThrow("Unknown or expired");
+	},
+);
+
+it("rejects tool publication after the original session identity changes", async () => {
+	const h = harness();
+	state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "" };
+	const emit = h.api.events.emit.getMockImplementation()!;
+	h.api.events.emit.mockImplementation((name, data) => {
+		emit(name, data);
+		if (name === "permissions:allow_session_files") {
+			queueMicrotask(() => {
+				h.ctx.sessionManager.getSessionId = () => "replacement";
+			});
+		}
+	});
+	await expect(h.tool.execute("review", {}, new AbortController().signal, undefined, h.ctx)).rejects.toThrow(
+		"retired session generation",
+	);
+});
+
+it.each([
+	{
+		mutation: "deletion",
+		expectedError: "unavailable",
+		mutate: () => {
+			state.savedReports = [];
+		},
+	},
+	{
+		mutation: "replacement",
+		expectedError: "Saved review report changed",
+		mutate: () => {
+			state.savedReports.at(-1)!.status = "incomplete";
+		},
+	},
+])("rejects backing $mutation during a renewed disclosure approval", async ({ mutate, expectedError }) => {
+	const h = harness();
+	state.browser = { decision: "feedback", requestedIds: ["F1"], discussion: [], feedback: "Fix F1" };
+	await h.tool.execute("review", {}, new AbortController().signal, undefined, h.ctx);
+	let revision = "initial";
+	let waiting = false;
+	let release!: () => void;
+	const approval = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	h.api.events.emit.mockImplementation((name, raw) => {
+		if (name === "permissions:review-service:v1") {
+			(raw as { accept(value: unknown): void }).accept({
+				version: 1,
+				open: () => ({
+					task: () => ({
+						check: async () => {
+							if (revision === "renewed") {
+								waiting = true;
+								await approval;
+							}
+							return { kind: "allowed", revision };
+						},
+						revision: () => revision,
+						nextTurn() {},
+						endTurn() {},
+						close() {},
+					}),
+					close() {},
+				}),
+			});
+		}
+	});
+	const page = ResultStore.prototype.page;
+	vi.spyOn(ResultStore.prototype, "page").mockImplementation(async function (this: ResultStore, ...args) {
+		const result = await page.apply(this, args);
+		revision = "renewed";
+		return result;
+	});
+	const pending = h.resultTool.execute(
+		"read",
+		{ reportId: "fixture", section: "action" },
+		new AbortController().signal,
+		undefined,
+		h.ctx,
+	);
+	const rejected = expect(pending).rejects.toThrow(expectedError);
+	await vi.waitFor(() => expect(waiting).toBe(true));
+	mutate();
+	release();
+	await rejected;
+});
+
+it("materializes result sections only once across actual tool page calls", async () => {
+	const h = harness();
+	state.browser = {
+		decision: "feedback",
+		requestedIds: ["F1"],
+		discussion: [],
+		feedback: "Long feedback. ".repeat(7000),
+	};
+	await h.tool.execute("review", {}, new AbortController().signal, undefined, h.ctx);
+	const reads = vi.spyOn(storage, "readStored");
+	let cursor: number | null = 0;
+	let pages = 0;
+	while (cursor !== null) {
+		const result: { content: [{ text: string }] } = await h.resultTool.execute(
+			"read",
+			{ reportId: "fixture", section: "action", cursor },
+			new AbortController().signal,
+			undefined,
+			h.ctx,
+		);
+		cursor = JSON.parse(result.content[0].text).nextOffset;
+		pages++;
+	}
+	expect(pages).toBeGreaterThan(10);
+	expect(reads).toHaveBeenCalledOnce();
+	expect(state.sectionFiles.size).toBe(2);
 });

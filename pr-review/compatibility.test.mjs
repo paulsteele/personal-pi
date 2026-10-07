@@ -70,11 +70,20 @@ test("host loader resolves TypeBox subpaths and loads the extension entry point"
 			commands.push(name);
 		},
 		registerTool(tool) {
-			tools.push(tool.name);
+			tools.push(tool);
 		},
 	});
 	assert.deepEqual(commands, ["pr"]);
-	assert.deepEqual(tools, ["pr_review"]);
+	assert.deepEqual(
+		tools.map((tool) => tool.name),
+		["pr_review", "pr_review_result"],
+	);
+	assert.equal(tools[1].exposure, "direct");
+	assert.deepEqual(tools[1].annotations, {
+		readOnlyHint: true,
+		destructiveHint: false,
+		openWorldHint: false,
+	});
 });
 
 test("installed Pi loader loads the shared permission owner without starting a session", {

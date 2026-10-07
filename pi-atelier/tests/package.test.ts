@@ -20,11 +20,12 @@ import {
 } from "../extensions/index.js";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const repositoryPackage = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
 
 describe("local package contract", () => {
 	it("publishes a Pi extension with compatible peers", () => {
 		expect(pkg.name).toBe("@paulsteele/pi-atelier");
-		expect(pkg.version).toBe("1.5.6");
+		expect(pkg.version).toBe(repositoryPackage.version);
 		expect(pkg.private).toBe(true);
 		expect(pkg.description).toBe("Personal source-owned Pi Atelier fork");
 		expect(pkg.keywords).toContain("pi-package");

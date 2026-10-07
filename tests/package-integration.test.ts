@@ -77,6 +77,7 @@ describe("Pi package integration", () => {
     const review = readFileSync(resolve(root, "pr-review/index.ts"), "utf8");
     expect(review).toContain('pi.registerCommand("pr"');
     expect(review).toContain('name: "pr_review"');
+    expect(review).toContain('name: "pr_review_result"');
     expect(review).not.toContain('registerCommand("pr-refresh"');
   });
 
