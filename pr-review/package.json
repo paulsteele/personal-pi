@@ -1,6 +1,6 @@
 {
 	"name": "@paulsteele/pi-pr-review",
-	"version": "1.6.0",
+	"version": "2.0.0",
 	"private": true,
 	"description": "Code-owned PR reviews with versioned methodology and private repository context",
 	"type": "module",
@@ -22,7 +22,6 @@
 		"!compatibility*.mjs",
 		"!vitest.config.ts",
 		"!verify-pack.mjs",
-		"!manual-smoke.mjs",
 		"!run-tool.mjs"
 	],
 	"pi": {
@@ -33,7 +32,6 @@
 	"scripts": {
 		"test": "node run-tool.mjs vitest run",
 		"test:compat": "node --test compatibility.test.mjs",
-		"test:browser": "node manual-smoke.mjs",
 		"typecheck": "node run-tool.mjs tsc --noEmit",
 		"lint": "node run-tool.mjs biome lint .",
 		"format": "node run-tool.mjs biome format --write .",
@@ -42,6 +40,8 @@
 		"check": "bun run typecheck && bun run lint && bun run format:check && bun run test && bun run check:pack"
 	},
 	"dependencies": {
+		"@paulsteele/pi-shared-ui": "workspace:*",
+		"@paulsteele/pi-project-locations": "workspace:*",
 		"diff": "8.0.4"
 	},
 	"peerDependencies": {

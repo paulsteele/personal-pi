@@ -49,17 +49,25 @@ export class BashProgram {
   static async parse(
     command: string,
     normalizer: PathNormalizer,
-    options?: { workdir?: string },
+    options?: {
+      workdir?: string;
+      probeGuestEntries?: (paths: readonly string[]) => Promise<readonly boolean[]>;
+    },
   ): Promise<BashProgram> {
     const parser = await getParser();
     const tree = parser.parse(command);
     if (!tree) return new BashProgram(command, [], [], [], [], false, false);
 
     try {
-      const { externalPaths, ruleCandidates, unresolvedPathExpression } = new BashPathResolver(
-        normalizer,
-        options?.workdir,
-      ).resolve(tree.rootNode);
+      const resolver = new BashPathResolver(normalizer, options?.workdir);
+      const unprobedResolvedPaths = resolver.resolve(tree.rootNode);
+      const guestEntryProbesWerePrepared = await normalizer.prepareGuestEntryProbes(
+        options?.probeGuestEntries,
+      );
+      const resolvedPaths = guestEntryProbesWerePrepared
+        ? resolver.resolve(tree.rootNode)
+        : unprobedResolvedPaths;
+      const { externalPaths, ruleCandidates, unresolvedPathExpression } = resolvedPaths;
       const commandUnits = collectCommandFacts(tree.rootNode);
       return new BashProgram(
         command,

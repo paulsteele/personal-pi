@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { BashProgram } from "#src/access-intent/bash/program.ts";
 import { PathNormalizer } from "#src/path-normalizer.ts";
 
@@ -10,6 +10,36 @@ const tokens = async (command: string) =>
   (await BashProgram.parse(command, normalizer)).pathRuleCandidates().map(({ token }) => token);
 
 describe("BashProgram compound safety projection", () => {
+  it("promotes only bare filenames confirmed in the guest, using their literal cd base", async () => {
+    const probeGuestEntries = vi.fn(async (paths: readonly string[]) =>
+      paths.map((path) => path === "/workspace/app/secret"),
+    );
+    const program = await BashProgram.parse(
+      "cd app && cat secret missing",
+      new PathNormalizer("/workspace", "guest", "/home/developer"),
+      { probeGuestEntries },
+    );
+    expect(probeGuestEntries).toHaveBeenCalledOnce();
+    expect(probeGuestEntries.mock.calls[0]![0]).toContain("/workspace/app/secret");
+    expect(program.pathRuleCandidates().map(({ token }) => token)).toEqual(["secret"]);
+  });
+
+  it("resolves HOME access using the guest user rather than the host home", async () => {
+    const program = await BashProgram.parse(
+      'cat "$HOME"/.ssh/id_rsa',
+      new PathNormalizer("/workspace", "guest", "/home/developer"),
+      { probeGuestEntries: async (paths) => paths.map(() => false) },
+    );
+    expect(program.pathRuleCandidates().map(({ path }) => path.value())).toContain("/home/developer/.ssh/id_rsa");
+  });
+
+  it("refuses incomplete guest existence results rather than inferring a missing path", async () => {
+    await expect(BashProgram.parse(
+      "cat secret", new PathNormalizer("/workspace", "guest", "/home/developer"),
+      { probeGuestEntries: async () => [] },
+    )).rejects.toThrow("incomplete results");
+  });
+
   it("keeps direct HOME path projection", async () => {
     expect(await tokens('cat "$HOME"/.ssh/*.pub')).toContain(ssh("*.pub"));
   });

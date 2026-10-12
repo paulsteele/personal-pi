@@ -9,6 +9,9 @@ import { testPermissionEvents } from "./test-fixtures.js";
 import { PermissionBlocked, PermissionScope } from "./permissions.js";
 import { ResultStore } from "./result-store.js";
 import * as storage from "./storage.js";
+import type { WorkPhase } from "./work-ui.js";
+import { discoverSettingsSections } from "@paulsteele/pi-shared-ui";
+import * as repositorySetup from "./setup.js";
 const state = vi.hoisted(() => ({
 	report: undefined as unknown,
 	browser: undefined as unknown,
@@ -19,6 +22,13 @@ const state = vi.hoisted(() => ({
 	driftAfter: Infinity,
 	captureFailures: 0,
 	viewerWait: undefined as Promise<void> | undefined,
+	preparationWait: undefined as Promise<void> | undefined,
+	preparationStarted: false,
+	journalClosed: false,
+	journalWait: undefined as Promise<void> | undefined,
+	journalStarted: false,
+	snapshotCleanupWait: undefined as Promise<void> | undefined,
+	snapshotCleanupStarted: false,
 	emitProgress: false,
 	progressQueued: false,
 	onProgressQueued: undefined as (() => void) | undefined,
@@ -87,27 +97,46 @@ vi.mock("./config.js", async (original) => ({
 vi.mock("./snapshot.js", () => ({
 	capture: async () => {
 		if (state.captureFailures-- > 0) throw new Error("Fixture source temporarily unavailable");
-		return { changes: [{ file: "a.ts", patch: "fixture" }], omitted: [], dispose: async () => {} };
+		return {
+			changes: [{ file: "a.ts", patch: "fixture" }], omitted: [],
+			dispose: async () => {
+				state.snapshotCleanupStarted = true;
+				await state.snapshotCleanupWait;
+			},
+		};
 	},
 	assertCurrent: async () => {
 		if (++state.validations >= state.driftAfter) throw new Error("fixture source drift");
 	},
 }));
 vi.mock("./runner.js", () => ({
-	review: async (options: { permissions: { host(name: string): PermissionScope } }) => {
-		await options.permissions.host("Fixture review source").guard(
-			{
-				toolName: "read",
-				input: { path: "/fixture/a.ts" },
-				effects: [{ path: "/fixture/a.ts", side: "new", version: "snapshot" }],
-			},
-			async () => undefined,
+	review: async (options: { permissions: { host(name: string): PermissionScope }; work: WorkPhase }) => {
+		await options.work("Reviewing fixture source", () =>
+			options.permissions.host("Fixture review source").guard(
+				{
+					toolName: "read",
+					input: { path: "/fixture/a.ts" },
+					effects: [{ path: "/fixture/a.ts", side: "new", version: "snapshot" }],
+				},
+				async () => undefined,
+			),
 		);
+		if (state.preparationWait) {
+			state.preparationStarted = true;
+			await state.preparationWait;
+		}
 		return structuredClone(state.report);
 	},
 }));
 vi.mock("./journal.js", () => ({
-	createRunJournal: async () => ({ path: "/private-runtime/progress.json", close: async () => {} }),
+	createRunJournal: async () => ({
+		path: "/private-runtime/progress.json",
+		close: async () => {
+			state.journalStarted = true;
+			await state.journalWait;
+			state.journalClosed = true;
+		},
+	}),
 }));
 vi.mock("./plannotator.js", () => ({
 	installedPlannotator: async () => "/installed",
@@ -198,6 +227,13 @@ function harness() {
 	vi.mocked(saveReport).mockClear();
 	state.captureFailures = 0;
 	state.viewerWait = undefined;
+	state.preparationWait = undefined;
+	state.preparationStarted = false;
+	state.journalClosed = false;
+	state.journalWait = undefined;
+	state.journalStarted = false;
+	state.snapshotCleanupWait = undefined;
+	state.snapshotCleanupStarted = false;
 	state.emitProgress = false;
 	state.progressQueued = false;
 	state.onProgressQueued = undefined;
@@ -218,8 +254,23 @@ function harness() {
 	let command: any;
 	const tools = new Map<string, any>();
 	const events = new Map<string, () => void>();
+	const permissionEvents = testPermissionEvents();
+	const settingsSubscribers = new Map<string, Set<(value: unknown) => void>>();
 	const api = {
-		events: { ...testPermissionEvents(), emit: vi.fn(testPermissionEvents().emit) },
+		events: {
+			on(name: string, handler: (value: unknown) => void) {
+				const listeners = settingsSubscribers.get(name) ?? new Set();
+				listeners.add(handler);
+				settingsSubscribers.set(name, listeners);
+				return () => listeners.delete(handler);
+			},
+			emit: vi.fn((name: string, data: unknown) => {
+				permissionEvents.emit(name, data);
+				for (const listener of settingsSubscribers.get(name) ?? []) {
+					listener(data);
+				}
+			}),
+		},
 		on(name: string, handler: () => void) {
 			events.set(name, handler);
 		},
@@ -341,7 +392,9 @@ it.each(
 	h.ui.state.active?.handleInput?.("cancel-key");
 	await h.command.handler("status", h.ctx);
 	await vi.waitFor(() => expect(h.ui.state.active).toBeDefined());
-	expect(h.ui.state.active!.render(120).join("\n")).toContain("Authorize output");
+	expect(h.ui.state.active!.render(120).join("\n")).toContain(
+		stage === "handoff" ? "Authorize parent output" : "Authorize output",
+	);
 	expect(h.ui.state.notifications.some((note) => note.message.includes("suspended while approval"))).toBe(
 		false,
 	);
@@ -349,6 +402,134 @@ it.each(
 	await h.command.handler(control, h.ctx);
 	await pending;
 	if (entry === "command") await vi.waitFor(() => expect(h.api.sendMessage).toHaveBeenCalledOnce());
+});
+
+it("shows parent-output source progress after journal work finishes before final authorization", async () => {
+	const h = harness();
+	state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "" };
+	let checking = false;
+	let release!: () => void;
+	const approval = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const original = PermissionScope.prototype.guard;
+	vi.spyOn(PermissionScope.prototype, "guard").mockImplementation(async function (
+		this: PermissionScope,
+		action,
+		read,
+	) {
+		if (action.description === "Return the authorized review result to the parent") {
+			checking = true;
+			await approval;
+		}
+		return original.call(this, action, read);
+	});
+	const pending = h.tool.execute("fixture", {}, new AbortController().signal, undefined, h.ctx);
+	try {
+		await vi.waitFor(() => expect(checking).toBe(true));
+		await vi.waitFor(() => {
+			const text = h.ui.state.active?.render(120).join("\n");
+			expect(text).toContain("Authorize parent output");
+			expect(text).toContain("Parent output: 0/1 source checks complete");
+			expect(text).toContain("/fixture/a.ts");
+		});
+		expect(state.journalClosed).toBe(true);
+		expect(h.api.sendMessage).not.toHaveBeenCalled();
+	} finally {
+		release();
+		await pending;
+	}
+	expect(state.journalClosed).toBe(true);
+});
+
+it("cancels the initial sandbox source probe before opening permissions or starting a second probe", async () => {
+	const h = harness();
+	let finishProbe!: () => void;
+	const probeWait = new Promise<void>((resolve) => {
+		finishProbe = resolve;
+	});
+	const authorizeHostSource = vi.fn((_path: string, _signal?: AbortSignal) => probeWait);
+	const originalEmit = h.api.events.emit.getMockImplementation()!;
+	h.api.events.emit.mockImplementation((name, data) => {
+		if (name === "sandbox:service:v1") {
+			(data as { accept(value: unknown): void }).accept({ authorizeHostSource });
+			return;
+		}
+		originalEmit(name, data);
+	});
+	const pending = h.tool.execute("fixture", {}, new AbortController().signal, undefined, h.ctx);
+	const cancelled = expect(pending).rejects.toThrow();
+	try {
+		await vi.waitFor(() => expect(authorizeHostSource).toHaveBeenCalledOnce());
+		const [path, probeSignal] = authorizeHostSource.mock.calls[0]!;
+		expect(path).toBe("/fixture");
+		await h.command.handler("cancel", h.ctx);
+		await cancelled;
+		expect(probeSignal!.aborted).toBe(true);
+		expect(authorizeHostSource).toHaveBeenCalledOnce();
+		expect(state.savedReports).toEqual([]);
+	} finally {
+		finishProbe();
+	}
+});
+
+it("shows and cancels the owned work presenter for settings-launched repository setup", async () => {
+	const h = harness();
+	const pendingSetup = vi.spyOn(repositorySetup, "setup").mockImplementation(async (_context, _repository, _rootPath, abortSignal, reportProgress, runOwnedWork) => {
+		return runOwnedWork!("Generating setup context", async () => {
+			reportProgress("Discovering fixture sources");
+			return new Promise<string>((_resolve, reject) => {
+				abortSignal.addEventListener("abort", () => reject(abortSignal.reason), { once: true });
+			});
+		});
+	});
+	const prSettingsSection = discoverSettingsSections(h.api).find((section) => section.id === "pr")!;
+	const repositorySetupAction = prSettingsSection.actions!.find((settingsAction) => settingsAction.id === "setup-create")!;
+	const pending = repositorySetupAction.run(h.ctx, new AbortController().signal);
+	const cancelled = expect(pending).rejects.toThrow();
+	await vi.waitFor(() => expect(h.ui.state.active?.render(100).join("\n")).toContain("Discovering fixture sources"));
+	h.ui.state.active!.handleInput!("cancel-key");
+	await cancelled;
+	expect(h.ui.state.active).toBeUndefined();
+	expect(pendingSetup).toHaveBeenCalledOnce();
+});
+
+it.each(["command", "tool"])("cancels %s handoff while final journal publication is pending", async (entry) => {
+	const h = harness();
+	state.browser = { decision: "feedback", requestedIds: ["F1"], discussion: [], feedback: "Fix F1" };
+	let release!: () => void;
+	state.journalWait = new Promise<void>((resolve) => { release = resolve; });
+	const pending = entry === "tool"
+		? h.tool.execute("fixture", {}, new AbortController().signal, undefined, h.ctx).catch((error: unknown) => error)
+		: h.command.handler("", h.ctx);
+	await vi.waitFor(() => expect(state.journalStarted).toBe(true));
+	await h.command.handler("cancel", h.ctx);
+	release();
+	await pending;
+	if (entry === "command") {
+		await vi.waitFor(() => expect(h.api.sendMessage).toHaveBeenCalledOnce());
+		expect(h.api.sendMessage.mock.calls[0]![0].content).toContain("cancelled");
+	}
+	await expect(h.resultTool.execute("read", { reportId: "fixture", section: "action" }, new AbortController().signal, undefined, h.ctx)).rejects.toThrow("Unknown or expired");
+});
+
+it("withholds fixes when source changes while snapshot cleanup is pending", async () => {
+	const h = harness();
+	state.browser = { decision: "feedback", requestedIds: ["F1"], discussion: [], feedback: "Fix F1" };
+	let releaseCleanup!: () => void;
+	state.snapshotCleanupWait = new Promise<void>((resolve) => {
+		releaseCleanup = resolve;
+	});
+	const pending = h.tool.execute("fixture", {}, new AbortController().signal, undefined, h.ctx);
+	try {
+		await vi.waitFor(() => expect(state.snapshotCleanupStarted).toBe(true));
+		state.driftAfter = 2;
+	} finally {
+		releaseCleanup();
+	}
+	const result = await pending;
+	expect(result.content[0].text).toContain("NO FIXES AUTHORIZED");
+	expect(state.savedReports.at(-1)?.browser?.requestedIds).toEqual([]);
 });
 
 it.each(["command", "tool"])("registers only the saved report before the %s handoff", async (entry) => {
@@ -508,6 +689,42 @@ it("releases Pi's serial command loop so status opens before browser feedback", 
 	expect(h.ui.state.active?.render(120).join("\n")).not.toContain("Waiting for Plannotator feedback");
 	h.events.get("session_shutdown")!();
 });
+it.each(["command", "tool"])(
+	"keeps /pr status available for a %s review preparing the next phase",
+	async (entry) => {
+		const h = harness();
+		state.browser = { decision: "lgtm", requestedIds: [], discussion: [], feedback: "" };
+		let release!: () => void;
+		state.preparationWait = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const pending =
+			entry === "tool"
+				? h.tool.execute("fixture", {}, new AbortController().signal, undefined, h.ctx)
+				: h.command.handler("", h.ctx);
+		try {
+			await vi.waitFor(() => expect(state.preparationStarted).toBe(true));
+			expect(h.ui.state.active?.render(120).join("\n")).toContain("Reviewing fixture source");
+			h.ui.state.active!.handleInput!("cancel-key");
+			expect(h.ui.state.active).toBeUndefined();
+			await h.command.handler("status", h.ctx);
+			await vi.waitFor(() => expect(h.ui.state.active).toBeDefined());
+			expect(h.ui.state.notifications).toEqual([]);
+			expect(h.api.sendMessage).not.toHaveBeenCalled();
+			await h.command.handler("", h.ctx);
+			expect(h.ui.state.notifications.at(-1)?.message).toContain("already active");
+		} finally {
+			release();
+			await pending;
+		}
+		if (entry === "command") {
+			await vi.waitFor(() => expect(h.api.sendMessage).toHaveBeenCalledOnce());
+		}
+		expect(h.ui.state.active).toBeUndefined();
+		expect(h.ui.state.factories).toBe(h.ui.state.closes);
+	},
+);
+
 it("does not publish a detached command result or viewer URL into a retired session", async () => {
 	vi.useFakeTimers();
 	const h = harness();
@@ -863,7 +1080,7 @@ it.each([
 		undefined,
 		h.ctx,
 	);
-	const rejected = expect(pending).rejects.toThrow("Fixture retrieval cancelled");
+	const rejected = expect(pending).rejects.toThrow("Permission review cancelled.");
 	await vi.waitFor(() => expect(checking).toBe(true));
 	cancel({ controller, h });
 	await rejected;
@@ -1017,7 +1234,7 @@ it.each(["session_tree", "session_shutdown"])(
 			}
 		});
 		await expect(h.tool.execute("review", {}, caller.signal, undefined, h.ctx)).rejects.toThrow(
-			"retired session generation",
+			"operation was aborted",
 		);
 		expect(caller.signal.aborted).toBe(false);
 		await expect(

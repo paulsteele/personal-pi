@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAutoPublisher } from "../pi-permission-system/src/auto/events.ts";
+import { createSandboxPublisher } from "../pi-permission-system/src/sandbox/events.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const manifest = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")) as {
@@ -19,7 +19,7 @@ const expectedExtensions = [
   "./code-quality/index.ts",
   "./progress-observer/index.ts",
   "./pr-review/index.ts",
-  "./pi-atelier/extensions/index.ts",
+  "./pi-sidebar/extensions/index.ts",
 ];
 
 const packageForEntry = (entry: string): string => entry.split("/")[1] ?? "";
@@ -53,6 +53,8 @@ describe("Pi package integration", () => {
     expect(manifest.pi.extensions).toEqual(expectedExtensions);
     expect(new Set(manifest.pi.extensions).size).toBe(expectedExtensions.length);
     expect(manifest.workspaces).toEqual([
+      "project-locations",
+      "shared-ui",
       "claude-skills",
       "code-blocks",
       "desktop-notifications",
@@ -60,20 +62,22 @@ describe("Pi package integration", () => {
       "code-quality",
       "progress-observer",
       "pr-review",
-      "pi-atelier",
+      "pi-sidebar",
     ]);
     expect(manifest.pi.extensions.indexOf("./pi-permission-system/src/index.ts")).toBeLessThan(
-      manifest.pi.extensions.indexOf("./pi-atelier/extensions/index.ts"),
+      manifest.pi.extensions.indexOf("./pi-sidebar/extensions/index.ts"),
     );
     expect(manifest.pi.extensions.indexOf("./progress-observer/index.ts")).toBeLessThan(
-      manifest.pi.extensions.indexOf("./pi-atelier/extensions/index.ts"),
+      manifest.pi.extensions.indexOf("./pi-sidebar/extensions/index.ts"),
     );
   });
 
   test("development resources mirror the global manifest without duplicate owners", () => {
     const settings = JSON.parse(readFileSync(resolve(root, ".pi/settings.json"), "utf8"));
     expect(settings.extensions).toEqual(expectedExtensions.map((entry) => `.${entry}`));
-    expect(settings.packages[0].extensions).toEqual(expectedExtensions.map((entry) => `-${entry.slice(2)}`));
+    const installedExtensionExclusions = expectedExtensions.map((entry) => `-${entry.slice(2)}`);
+    installedExtensionExclusions.splice(installedExtensionExclusions.indexOf("-pi-sidebar/extensions/index.ts"), 0, "-pi-atelier/extensions/index.ts");
+    expect(settings.packages[0].extensions).toEqual(installedExtensionExclusions);
     const review = readFileSync(resolve(root, "pr-review/index.ts"), "utf8");
     expect(review).toContain('pi.registerCommand("pr"');
     expect(review).toContain('name: "pr_review"');
@@ -128,44 +132,41 @@ describe("Pi package integration", () => {
     }
   });
 
-  test("replays Permission System state when a later-loaded consumer discovers it", () => {
+  test("replays sandbox state when the later-loaded Sidebar discovers it", () => {
     const events = eventBus();
-    const publisher = createAutoPublisher(events);
+    const publisher = createSandboxPublisher(events);
     const snapshot = {
-      enabled: true,
-      usable: true,
-      provider: "test",
-      modelId: "model",
-      allowed: 3,
-      asked: 1,
+      sessionId: "session",
+      phase: "ready" as const,
+      definitionPath: "/private/devcontainer.json",
+      mounts: [],
+      ports: [],
     };
     publisher.update(snapshot);
-
     const received: unknown[] = [];
-    const unsubscribe = events.on("auto-mode:state", (event) => received.push(event));
-    expect(events.count("auto-mode:discover")).toBe(1);
-    events.emit("auto-mode:discover", {});
-    expect(received).toEqual([snapshot]);
-
+    const unsubscribe = events.on("sandbox:state:v1", (event) => received.push(event));
+    expect(events.count("sandbox:discover:v1")).toBe(1);
+    events.emit("sandbox:discover:v1", {});
+    expect(received).toEqual([{ ...snapshot, version: 1, revision: 1 }]);
     unsubscribe();
     publisher.dispose();
-    expect(events.count("auto-mode:discover")).toBe(0);
+    expect(events.count("sandbox:discover:v1")).toBe(0);
   });
 
-  test("loads the independent progress observer before its Atelier consumer", () => {
+  test("loads the independent progress observer before its Sidebar consumer", () => {
     const observerSource = readFileSync(resolve(root, "progress-observer/index.ts"), "utf8");
-    const atelierSource = readFileSync(resolve(root, "pi-atelier/extensions/index.ts"), "utf8");
+    const sidebarSource = readFileSync(resolve(root, "pi-sidebar/extensions/index.ts"), "utf8");
     expect(observerSource).toContain('pi.on("turn_end"');
     expect(observerSource).toContain('pi.registerCommand("observer"');
-    expect(atelierSource).toContain('pi.events.on("progress-observer:state"');
-    expect(atelierSource).not.toContain("modelRegistry.complete");
+    expect(sidebarSource).toContain('pi.events.on("progress-observer:state"');
+    expect(sidebarSource).not.toContain("modelRegistry.complete");
   });
 
-  test("keeps desktop notifications separate from Atelier", () => {
+  test("keeps desktop notifications separate from Sidebar", () => {
     const desktopSource = readFileSync(resolve(root, "desktop-notifications/index.ts"), "utf8");
-    const atelierSource = readFileSync(resolve(root, "pi-atelier/extensions/index.ts"), "utf8");
+    const sidebarSource = readFileSync(resolve(root, "pi-sidebar/extensions/index.ts"), "utf8");
     expect(desktopSource).toContain('pi.registerCommand("notify-test"');
-    expect(atelierSource).not.toContain('pi.registerCommand("notify-test"');
-    expect(atelierSource).not.toContain("completion-notifier");
+    expect(sidebarSource).not.toContain('pi.registerCommand("notify-test"');
+    expect(sidebarSource).not.toContain("completion-notifier");
   });
 });

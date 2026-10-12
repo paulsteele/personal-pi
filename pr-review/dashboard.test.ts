@@ -363,6 +363,68 @@ it("does not steal permission focus if the dashboard mounts after the prompt sta
 	expect(vi.getTimerCount()).toBe(0);
 });
 
+it("keeps status reopenable between work phases without mistaking preparation for approval", async () => {
+	vi.useFakeTimers();
+	const h = uiHarness();
+	const tasks = store();
+	const dashboard = createReviewDashboard({ mode: "tui", ui: h.ui } as ExtensionContext, tasks, {
+		cancel: vi.fn(),
+	});
+	const completed = vi.fn(async () => {});
+	await dashboard.work("Reviewing", completed);
+	await vi.advanceTimersByTimeAsync(0);
+	expect(h.state.active?.render(120).join("\n")).toContain("Reviewing");
+	dashboard.hide();
+	tasks.setProgress("Preparing verification inputs");
+	dashboard.show();
+	await vi.advanceTimersByTimeAsync(0);
+	expect(h.state.active?.render(120).join("\n")).toContain("Preparing verification inputs");
+	expect(h.state.notifications).toEqual([]);
+	expect(completed).toHaveBeenCalledOnce();
+	dashboard.dispose();
+	expect(vi.getTimerCount()).toBe(0);
+});
+
+it.each(["accepted", "failed"])(
+	"yields only during actual specialist approval and releases status after it is %s",
+	async (outcome) => {
+		vi.useFakeTimers();
+		const h = uiHarness();
+		const dashboard = createReviewDashboard({ mode: "tui", ui: h.ui } as ExtensionContext, store(), {
+			cancel: vi.fn(),
+		});
+		await dashboard.work("Planning specialists", async () => {});
+		await vi.advanceTimersByTimeAsync(0);
+		let finish!: () => void;
+		const answer = new Promise<void>((resolve) => {
+			finish = resolve;
+		});
+		const approval = dashboard.approval("Approving specialists", async () => {
+			await h.ui.select("Specialist approval", ["yes"]);
+			await answer;
+			if (outcome === "failed") {
+				throw new Error("Specialist approval failed");
+			}
+			return "yes";
+		});
+		dashboard.show();
+		expect(h.state.active).toBeUndefined();
+		expect(h.state.notifications.at(-1)?.message).toContain("suspended while approval UI");
+		expect(h.state.nativeDialogs).toContain("Specialist approval");
+		const settled =
+			outcome === "failed"
+				? expect(approval).rejects.toThrow("Specialist approval failed")
+				: expect(approval).resolves.toBe("yes");
+		finish();
+		await settled;
+		dashboard.show();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(h.state.active?.render(120).join("\n")).toContain("PR REVIEW");
+		dashboard.dispose();
+		expect(vi.getTimerCount()).toBe(0);
+	},
+);
+
 it("tracks all actual permission prompts until their matching terminal decisions and unsubscribes", () => {
 	const listeners = new Map<string, Set<(value: unknown) => void>>();
 	const events = {
@@ -457,7 +519,9 @@ it("dismisses and reopens without restarting work; cleans all timers and release
 	expect(task).toHaveBeenCalledOnce();
 	finish();
 	await pending;
-	await expect(h.ui.select("Specialist approval", ["yes"])).resolves.toBe("yes");
+	await expect(
+		dashboard.approval("Approving specialists", () => h.ui.select("Specialist approval", ["yes"])),
+	).resolves.toBe("yes");
 	dashboard.dispose();
 	expect(vi.getTimerCount()).toBe(0);
 });

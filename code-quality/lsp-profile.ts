@@ -1,15 +1,15 @@
-import { createHash, randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { projectStoragePath, resolveProjectLocation } from "@paulsteele/pi-project-locations";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, realpath, rename, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { promisify } from "node:util";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { canonicalPath, inside } from "./capture.js";
 import { digest } from "./proposal.js";
 
-export type LspPreset = "roslyn" | "typescript" | "pyright" | "rust-analyzer" | "gopls" | "custom";
+const LSP_PRESET_IDS = ["roslyn", "typescript", "pyright", "rust-analyzer", "gopls", "custom"] as const;
+export type LspPreset = (typeof LSP_PRESET_IDS)[number];
 export interface LspRoute {
 	id: string;
 	root: string;
@@ -29,6 +29,8 @@ export interface LspProfile {
 	version: 1;
 	projectId: string;
 	enabled: boolean;
+	mode?: "auto" | "explicit";
+	disabledLanguages?: LspPreset[];
 	routes: LspRoute[];
 }
 export interface LspProject {
@@ -52,11 +54,7 @@ const RouteSchema = Type.Object(
 	{
 		id: Type.String({ pattern: "^[a-zA-Z0-9_-]{1,80}$" }),
 		root: Text,
-		preset: Type.Union(
-			["roslyn", "typescript", "pyright", "rust-analyzer", "gopls", "custom"].map((value) =>
-				Type.Literal(value),
-			),
-		),
+		preset: Type.Union(LSP_PRESET_IDS.map((preset) => Type.Literal(preset))),
 		command: Text,
 		args: Type.Array(Type.String({ maxLength: 4096 }), { maxItems: 64 }),
 		version: Text,
@@ -78,6 +76,12 @@ const ProfileSchema = Type.Object(
 		version: Type.Literal(1),
 		projectId: Type.String({ pattern: "^[a-f0-9]{64}$" }),
 		enabled: Type.Boolean(),
+		mode: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("explicit")])),
+		disabledLanguages: Type.Optional(
+			Type.Array(Type.Union(LSP_PRESET_IDS.map((preset) => Type.Literal(preset))), {
+				maxItems: LSP_PRESET_IDS.length,
+			}),
+		),
 		routes: Type.Array(RouteSchema, { maxItems: 32 }),
 	},
 	{ additionalProperties: false },
@@ -133,11 +137,9 @@ export function lspStorageRoot(agentDir: string): string {
 	return join(canonicalPath(agentDir), "extensions", "code-quality");
 }
 export function lspProfilePath(agentDir: string, project: LspProject, draft = false): string {
-	if (!/^[a-f0-9]{64}$/.test(project.id)) throw new Error("Invalid LSP project identity");
-	return join(
+	return projectStoragePath(
 		lspStorageRoot(agentDir),
-		project.kind,
-		project.id,
+		project,
 		draft ? "lsp-profile-draft.json" : "lsp-profile.json",
 	);
 }
@@ -176,7 +178,7 @@ export async function publishLspJson(
 	path: string,
 	value: unknown,
 	expected: string | undefined,
-): Promise<void> {
+): Promise<string> {
 	await rejectSymlinks(path);
 	await mkdir(dirname(path), { recursive: true, mode: 0o700 });
 	await chmod(dirname(path), 0o700);
@@ -201,6 +203,7 @@ export async function publishLspJson(
 			await file.close();
 		}
 		await rename(temporary, path);
+		return digest(text);
 	} finally {
 		await lock.close();
 		await unlink(temporary).catch(() => {});
@@ -208,36 +211,10 @@ export async function publishLspJson(
 	}
 }
 
-function projectIdentity(path: string): string {
-	return createHash("sha256").update(path).digest("hex");
-}
-
 export async function resolveLspProject(cwd: string, agentDir: string): Promise<LspProject> {
-	const canonical = await realpath(cwd);
-	try {
-		const execute = promisify(execFile);
-		const options = { cwd: canonical, timeout: 10000, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } };
-		const { stdout: root } = await execute("git", ["rev-parse", "--show-toplevel"], options);
-		const { stdout: common } = await execute(
-			"git",
-			["rev-parse", "--path-format=absolute", "--git-common-dir"],
-			options,
-		);
-		return {
-			kind: "repos",
-			root: await realpath(root.trim()),
-			id: projectIdentity(await realpath(common.trim())),
-		};
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as { code?: number }).code !== 128)
-			throw error;
-	}
-	for (let root = canonical; ; root = dirname(root)) {
-		const project: LspProject = { kind: "projects", root, id: projectIdentity(root) };
-		if (await readJson(lspProfilePath(agentDir, project))) return project;
-		if (dirname(root) === root) break;
-	}
-	return { kind: "projects", root: canonical, id: projectIdentity(canonical) };
+	return resolveProjectLocation(cwd, {
+		hasProfile: async (project) => Boolean(await readJson(lspProfilePath(agentDir, project))),
+	});
 }
 
 function assertOutsideProject(agentDir: string, project: LspProject): void {
@@ -266,6 +243,16 @@ export async function saveLspDraft(
 	baseRevision?: string | null,
 	expectedDraftRevision?: string | null,
 ): Promise<string> {
+	return (await publishLspDraft(agentDir, project, profile, baseRevision, expectedDraftRevision)).path;
+}
+
+export async function publishLspDraft(
+	agentDir: string,
+	project: LspProject,
+	profile: LspProfile,
+	baseRevision?: string | null,
+	expectedDraftRevision?: string | null,
+): Promise<{ path: string; revision: string }> {
 	assertOutsideProject(agentDir, project);
 	const active = await loadLspProfile(agentDir, project);
 	const path = lspProfilePath(agentDir, project, true);
@@ -273,7 +260,7 @@ export async function saveLspDraft(
 	const draftBaseRevision = baseRevision === undefined ? (active?.revision ?? null) : baseRevision;
 	const expectedPublicationRevision =
 		expectedDraftRevision === undefined ? prior?.revision : (expectedDraftRevision ?? undefined);
-	await publishLspJson(
+	const revision = await publishLspJson(
 		path,
 		{
 			version: 1,
@@ -282,7 +269,7 @@ export async function saveLspDraft(
 		} satisfies LspDraft,
 		expectedPublicationRevision,
 	);
-	return path;
+	return { path, revision };
 }
 
 export async function loadLspDraft(

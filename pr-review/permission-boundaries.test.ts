@@ -1,20 +1,26 @@
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import { expect, it, vi } from "vitest";
-import { PermissionScope, type PermissionWait } from "./permissions.js";
+import {
+	PermissionScope,
+	type PermissionWait,
+	type SourceAuthorizationProgress,
+	type PermissionAction,
+} from "./permissions.js";
 import { registryStream, type Registry } from "./worker.js";
 import { testConfig } from "./test-fixtures.js";
 import { commitToolResult } from "./tool-commit.js";
 
 const source = (name: string) => ({ path: `/repo/${name}`, side: "new" as const, version: "blob" });
-function liveScope() {
+function liveScope(maxSourcesPerBatch?: number) {
 	let revision = "old";
-	const check = vi.fn(async (action) =>
+	const check = vi.fn(async (action: PermissionAction) =>
 		revision === "new" && action.effects?.some((item: { path: string }) => item.path === "/repo/A")
 			? { kind: "denied" as const, reason: "A was revoked" }
 			: { kind: "allowed" as const, revision },
 	);
 	const scope = new PermissionScope({
 		check,
+		...(maxSourcesPerBatch !== undefined ? { maxSourcesPerBatch } : {}),
 		revision: () => revision,
 		nextTurn() {},
 		endTurn() {},
@@ -48,6 +54,100 @@ it("restarts the complete transfer when A is revoked during B's decision", async
 		"/repo/B",
 		"/repo/A",
 	]);
+});
+
+it("batches all accumulated old/new source dependencies within the service's declared limit", async () => {
+	const h = liveScope(32);
+	const sources = Array.from({ length: 240 }, (_, index) => [
+		{ path: `/repo/file-${index}.ts`, side: "old" as const, version: "before" },
+		{ path: `/repo/file-${index}.ts`, side: "new" as const, version: "after" },
+	]).flat();
+	await h.scope.authorizeSources([...sources, ...sources], "Provider preflight");
+	expect(h.check).toHaveBeenCalledTimes(15);
+	expect(h.check.mock.calls.flatMap(([action]) => action.effects)).toEqual(sources);
+	expect(h.scope.dependencies).toEqual(sources);
+	await h.scope.beforeDispatch();
+	expect(h.check).toHaveBeenCalledTimes(30);
+});
+
+it("restarts batched disclosure from the first source after a later batch changes policy", async () => {
+	const h = liveScope(2);
+	h.check.mockImplementation(async (action) => {
+		if (action.effects?.[0]?.path === "/repo/C") {
+			h.revoke();
+		}
+		if (h.revision() === "new" && action.effects?.some((item) => item.path === "/repo/A")) {
+			return { kind: "denied", reason: "A was revoked" };
+		}
+		return { kind: "allowed", revision: h.revision() };
+	});
+	await expect(h.scope.authorizeSources([source("A"), source("B"), source("C")], "Publish")).rejects.toThrow(
+		"A was revoked",
+	);
+	expect(h.check.mock.calls.map(([action]) => action.effects?.map((item) => item.path))).toEqual([
+		["/repo/A", "/repo/B"],
+		["/repo/C"],
+		["/repo/A", "/repo/B"],
+	]);
+});
+
+it("reports the pending source and completed checks for each authorization pass", async () => {
+	const h = liveScope();
+	const progress: SourceAuthorizationProgress[] = [];
+	h.check.mockImplementation(async (action) => {
+		if (action.effects?.[0]?.path === "/repo/B") {
+			h.revoke();
+		}
+		return { kind: "allowed", revision: h.revision() };
+	});
+	await h.scope.authorizeSources([source("A"), source("A"), source("B")], "Publish", undefined, {
+		progress: (value) => progress.push(value),
+	});
+	expect(progress).toEqual([
+		{ completed: 0, total: 2, pass: 1 },
+		{ completed: 0, total: 2, pass: 1, currentSource: source("A") },
+		{ completed: 1, total: 2, pass: 1 },
+		{ completed: 1, total: 2, pass: 1, currentSource: source("B") },
+		{ completed: 2, total: 2, pass: 1 },
+		{ completed: 0, total: 2, pass: 2 },
+		{ completed: 0, total: 2, pass: 2, currentSource: source("A") },
+		{ completed: 1, total: 2, pass: 2 },
+		{ completed: 1, total: 2, pass: 2, currentSource: source("B") },
+		{ completed: 2, total: 2, pass: 2 },
+	]);
+});
+
+it("keeps progress-renderer failures outside permission authority", async () => {
+	const h = liveScope();
+	await expect(
+		h.scope.authorizeSources([source("A")], "Publish", undefined, {
+			progress() {
+				throw new Error("Retired renderer");
+			},
+		}),
+	).resolves.toBe("old");
+	expect(h.check).toHaveBeenCalledOnce();
+});
+
+it("cancels a source check even when the permission port ignores abort", async () => {
+	const h = liveScope();
+	const controller = new AbortController();
+	let release!: () => void;
+	h.check.mockImplementation(
+		() =>
+			new Promise((resolve) => {
+				release = () => resolve({ kind: "allowed", revision: "old" });
+			}),
+	);
+	const pending = h.scope.authorizeSources([source("A")], "Publish", controller.signal);
+	const cancelled = expect(pending).rejects.toMatchObject({
+		kind: "cancelled",
+		message: "Permission review cancelled.",
+	});
+	expect(h.check).toHaveBeenCalledOnce();
+	controller.abort();
+	await cancelled;
+	release();
 });
 
 it("returns a stable transfer revision and yields during both deduplication and allow sweeps", async () => {

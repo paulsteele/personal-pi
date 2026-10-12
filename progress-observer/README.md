@@ -1,6 +1,6 @@
 # Pi Progress Observer
 
-A globally loaded Pi extension that watches long-running TUI sessions with a separate model and publishes concise inferred progress to Pi Atelier. It does not steer, pause, or add messages to the primary agent conversation.
+A globally loaded Pi extension that watches long-running TUI sessions with a separate model and publishes concise inferred progress to Sidebar's Summary tab. It does not steer, pause, or add messages to the primary agent conversation.
 
 ## Behavior
 

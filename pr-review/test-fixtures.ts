@@ -64,8 +64,12 @@ export function testPermissionEvents() {
 	return {
 		on: (_name: string, _handler: (data: unknown) => void) => () => {},
 		emit(name: string, data: unknown) {
-			if (name === REVIEW_SERVICE_CHANNEL)
+			if (name === REVIEW_SERVICE_CHANNEL) {
 				(data as { accept(value: unknown): void }).accept({ version: 1, open: testOperationPort });
+			}
+			if (name === "sandbox:service:v1") {
+				(data as { accept(value: unknown): void }).accept({ authorizeHostSource: async () => {} });
+			}
 		},
 	};
 }

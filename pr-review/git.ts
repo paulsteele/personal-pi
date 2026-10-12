@@ -1,9 +1,8 @@
 import { execFile, spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
-import { realpath } from "node:fs/promises";
+import { resolveGitRepository } from "@paulsteele/pi-project-locations";
 import { promisify } from "node:util";
-import { hash } from "./prompts.js";
 import type { Repo, Scope } from "./types.js";
 
 const execute = promisify(execFile);
@@ -223,11 +222,10 @@ export async function firstParent(root: string, head: string, signal?: AbortSign
 	}
 }
 export async function resolveRepo(cwd: string, signal?: AbortSignal): Promise<Repo> {
-	const root = await realpath(line(await git(cwd, ["rev-parse", "--show-toplevel"], signal)));
-	const commonDir = await realpath(
-		line(await git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"], signal)),
-	);
-	return { root, commonDir, id: hash(commonDir) };
+	return resolveGitRepository(cwd, {
+		...(signal ? { signal } : {}),
+		git: async (directory, args, querySignal) => (await git(directory, args, querySignal)).toString("utf8"),
+	});
 }
 export async function resolveCommit(
 	root: string,

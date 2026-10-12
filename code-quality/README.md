@@ -1,6 +1,6 @@
 # Code Quality
 
-An interactive post-edit quality gate combining optional project-configured LSP diagnostics with isolated human-readability review. The main agent and isolated reviewer receive the same readability preferences as enforced requirements. The reviewer assesses exact changes and returns `approved` or `needs_work`. A rejection must identify the preference violated by the changed content and propose a bounded edit addressing that readability problem. A readability violation does not need to cause a functional defect. The reviewer cannot browse the repository, run commands, or change files.
+An interactive post-edit quality gate combining automatic LSP diagnostics with isolated human-readability review. The main agent and isolated reviewer receive the same readability preferences as enforced requirements. The reviewer assesses exact changes and returns `approved` or `needs_work`. A rejection must identify the preference violated by the changed content and propose a bounded edit addressing that readability problem. A readability violation does not need to cause a functional defect. The reviewer cannot browse the repository, run commands, or change files.
 
 ## Configuration
 
@@ -19,18 +19,20 @@ Use `/quality-model` to select an available provider/model, or `/quality-model p
 }
 ```
 
-The provider/model values above are placeholders, not defaults. `/quality status` shows current state; `/quality on|off` controls the gate. Disabling a pending gate requires confirmation and records a waiver. `/quality retry` resumes a pending review; `/quality resolve` reopens a proposal decision when one is available. Config changes can be loaded with `/reload`.
+The provider/model values above are placeholders, not defaults. `/quality status` shows current state; `/quality on|off` controls the gate. Disabling a pending gate requires confirmation and records a waiver. `/quality retry` resumes a pending review; `/quality resolve` reopens a proposal decision when one is available. Config changes can be loaded with `/reload`. `/quality on|off` is the persistent master switch for automatic readability and LSP checking. An enabled project LSP profile remains saved while the master switch is off; `/quality lsp status` reports it as suspended, and `/quality on` resumes checking.
 
-## LSP setup and operation
+## Automatic LSP operation and overrides
 
-Run `/quality lsp setup` in a trusted project. One checklist shows detected and already configured languages. Toggle languages with Space or Enter, then Continue. Setup reuses existing server configurations, automatically chooses an installed executable or offers a private installation, infers workspace roots, and generates server names. It asks about roots when there is no single clear choice. The C# picker lists solutions first without assuming project membership, retains standalone projects, and offers a relative-path override.
+Trusted TUI projects with quality enabled use provisioned language servers automatically, without `/quality lsp setup` or a saved profile. The sandbox installs all five servers and their private supporting runtimes; quality starts relevant servers when supported files are checked. Installation and image rebuilds are never part of LSP setup.
 
-Choose **Validate and enable** to authorize local analysis and activate checking if validation succeeds. There is no second activation prompt. New or changed routes disclose environment keys, initialization options, and settings before validation, including edited drafts submitted through the normal checklist. Cancelling, failed validation, or configuration changes during validation leave the active profile unchanged. Existing source diagnostics do not prevent activation, and operational summaries stay out of the main transcript.
+The client infers TypeScript/Python roots from project markers, prefers Go workspaces over individual modules, asks Cargo for its workspace, and opens an unambiguous C# solution/project. Missing or ambiguous project information is reported instead of silently choosing a solution or claiming clean diagnostics. Server settings and project dependencies still determine actual analysis. Use a private override for nonstandard interpreters, ambiguous workspaces, custom servers, or disabled languages.
 
-**Advanced** contains custom servers, explicit executable paths/root overrides, and editable configuration. Existing environment, settings, and timeout overrides are preserved for languages you keep selected. Deselecting a language removes its routes from the proposed configuration; selecting none disables LSP checking. Setup never installs SDKs, edits project dependencies, or changes shell PATH.
+Discovery runs against guest-accessible files using Git-listed files or a bounded directory scan. Dependency directories and symlinks are excluded; a truncated 10,000-entry scan is explicit. Approved external files remain eligible. Distinct session/container generations never share a host server.
+
+`/quality lsp setup` is now an optional override editor. Its checklist and Advanced controls retain custom servers, executable paths, roots, settings, and timeouts. Validate and enable saves the override only after runtime validation; no installation is proposed. Missing provisioned servers direct you to sandbox provisioning. Existing approved profiles retain their language subset and settings. A profile with `mode: "auto"` combines inference with explicit routes and `disabledLanguages`; absent mode retains legacy explicit-route behavior. Master quality-off and project LSP-off prevent automatic analysis.
 
 ```text
-/quality lsp setup                 Language checklist; validate and enable
+/quality lsp setup                 Optional language/workspace overrides
 /quality lsp setup edit            Open a private editable draft
 /quality lsp setup approve         Validate and approve that draft
 /quality lsp status                Configured servers, states, sharing, failures
@@ -39,11 +41,15 @@ Choose **Validate and enable** to authorize local analysis and activate checking
 /quality lsp on|off                Enable/disable the project profile
 ```
 
-Presets are Roslyn for C#, TypeScript/JavaScript, Pyright, rust-analyzer, and gopls. Custom **stdio servers with pull diagnostics** can be configured as well. ReSharper standalone is not supported. The pinned Roslyn package is a prerelease; TypeScript language server requires Node >=22.22.2 independently of Pi's minimum. Rust needs its toolchain and `rust-src`; Go and .NET likewise need their SDKs already installed. Setup explains these prerequisites rather than silently installing them.
+Presets are Roslyn for C#, TypeScript/JavaScript, Pyright, rust-analyzer, and gopls. Custom **stdio servers with pull diagnostics** remain supported; ReSharper standalone is not. The pinned Roslyn package is a prerelease. The sandbox's managed runtimes launch servers without replacing the application's Node/.NET/Go/Rust installation. Project-specific SDK versions, dependencies, virtual environments, and matching Rust source components may still be required; put those requirements in the project environment, not LSP setup.
 
 Profiles live under `getAgentDir()/extensions/code-quality/repos/<repo-id>/lsp-profile.json` (or `projects/<folder-id>/` for non-Git projects). Git worktrees share configuration using the same common-directory identity algorithm as PR profiles, but distinct worktrees have distinct servers. Roots and C# project/solution paths are relative to the checkout. Non-Git descendants use the closest configured ancestor. Multiple routes at the deepest matching root can check the same file. Edit the private draft to change environment overrides, server settings, roots, extensions, or deadlines; the active file rejects unapproved manual changes.
 
-Missing servers are installed only after confirmation into private `tools/<server>/<version>/<platform-arch>/` directories. These installations are shared across repositories using the same agent directory; each project still requires its own validation and approval. Setup reuses receipt-verified installations without reinstalling. It also discovers executables without a matching receipt in the expected layout, including .NET tools installed directly in the version/platform directory; these are treated as external servers rather than claiming a verified pinned version. Existing installation directories are never overwritten. Installation and configuration publication use locks so concurrent setup cannot expose partial installations or silently overwrite another draft. No configured server means the existing readability workflow continues unchanged.
+Managed servers live under `/opt/pi-tools/<server>/<version>/`; the sandbox inventory supplies executable paths and provisioned versions. Known legacy managed paths are resolved against that inventory. Custom executable paths remain explicit. Ordinary automatic routes stay in memory; private drafts/approvals are used only for overrides. A file without an applicable supported language proceeds to readability review without a claim of clean LSP coverage; failure of an applicable server enters the existing retry/waiver flow.
+
+### Local shared-broker migration reference
+
+The following shared-server lifecycle describes the retained local broker/probe implementation used by tests and migration tooling, not a host fallback for the loaded extension. The container implementation owns servers per session/container generation and retires them before recreation.
 
 ### Shared server lifecycle
 
@@ -89,13 +95,13 @@ Each review pass displays `quality check: lsp` when matching LSP checks run, the
 
 The outcome remains `approved`, `handling rejection N`, or an explicit `waived` rather than claiming approval for a waiver. Rejection numbering starts at 1 for the initial rejection and advances with unresolved response-and-review rounds. Rejections show the reviewer's rationale and file/line findings (or LSP diagnostics) without expansion. Expand feedback to inspect full case IDs, snapshot details, protocol instructions, and proposed edits; the executing agent still receives the full feedback. Checking lines and their completion updates are presentation-only and are not added to model context.
 
-## Atelier status
+## Sidebar status
 
-Atelier shows `󰅴 quality · provider/model` directly beneath its auto-mode header and above the Activity track. Configured LSPs append their names and running state, for example `roslyn ● ready ×2 · typescript ⟳ checking`; entries wrap at narrow widths. The multiplier is the number of attached clients. `ready` means the server is usable, not that all code is clean. Aggregate quality outcomes remain on the corresponding tool rows.
+Sidebar shows `󰅴 quality · provider/model` in its pinned status area above the turn indicator and Tools/Summary/Sandbox selectors. Configured LSPs append their names and running state, for example `roslyn ● ready ×2 · typescript ⟳ checking`; entries wrap at narrow widths. The multiplier is the number of attached clients. `ready` means the server is usable, not that all code is clean. Aggregate quality outcomes remain on the corresponding tool rows.
 
 Each corresponding edit/write entry has an inline `󰅴` badge beside its permission badges: `✓` for approval, `✕` for needs-work/blocked, `?` for pending review or intervention, and a dim `–` for skipped/unreviewed states. Colors match the classifier: model approval is purple, user approval cyan, negative outcomes red, and pending outcomes amber. There is no separate quality row; detailed state and counters remain in `/quality status` and the review feedback. Calls reviewed together share the batch result without adding model requests. Starting a correction batch preserves the previous batch's result rather than rewriting its history.
 
-Atelier consumes bounded, session-scoped `code-quality:status` and `code-quality:activity` events. No code, rationale, or case snapshots are sent through these presentation events. The header replays for late consumers; per-call display history is memory-only and clears on reload or branch changes. Gate recovery remains independent of the sidebar.
+Sidebar consumes bounded, session-scoped `code-quality:status` and `code-quality:activity` events. No code, rationale, or case snapshots are sent through these presentation events. The header replays for late consumers; per-call display history is memory-only and clears on reload or branch changes. Gate recovery remains independent of the sidebar.
 
 ## Desktop notifications
 
@@ -111,7 +117,7 @@ All edited text is eligible for readability review, with purpose-aware treatment
 
 The canonical rules are in [policy.md](policy.md), with calibrated contrasts in [examples.md](examples.md). They remain requirements, not advisory preferences. Without this extension, the policy can be copied into your personal AGENTS.md; the extension itself does not modify global instruction files.
 
-Known generated and lock filenames in `exclusions.ts` auto-approve without body capture or model calls. Receipts distinguish `auto_approved`/`reviewed: false` from a model verdict. Exclusions do not bypass ordinary permissions or make failed tools succeed. Binary/non-UTF-8 content is explicitly not reviewed. Sensitive, external, or over-budget content requires a user decision; never silently truncate changed hunks and claim complete review.
+Known generated and lock filenames in `exclusions.ts` auto-approve without body capture or model calls. Receipts distinguish `auto_approved`/`reviewed: false` from a model verdict. Exclusions do not bypass ordinary permissions or make failed tools succeed. Binary/non-UTF-8 content is explicitly not reviewed. Sensitive or over-budget content requires a user decision; external mounted files do not require repository-membership authorization; never silently truncate changed hunks and claim complete review.
 
 A style approval is not a correctness/security certification. Unapproved code has already been written when assessed. Keep ordinary tests and PR review, especially after structural changes.
 
@@ -129,7 +135,7 @@ When the reviewer provider is exactly `litellm`, all quality calls for one Pi se
 
 ## Development
 
-Normal tests use fake LSP processes and do not install servers. `bun run --cwd code-quality test:lsp-tui` runs an opt-in two-instance pseudoterminal smoke test with an isolated fake-server profile (requires Python 3 and `pi`). `bun run --cwd code-quality test:lsp-compatibility` explicitly runs the pinned local server probes; `QUALITY_LSP_TOOL_ROOT` selects the private tool directory. Package tests extract the tarball, load the extension through Pi, and launch the packed broker with existing declared dependencies. See the repository's compatibility notes for the fixture layout and remaining platform limits.
+Normal tests use fake LSP processes and do not install servers. `bun run --cwd code-quality test:lsp-tui` runs an opt-in two-instance pseudoterminal smoke with the loaded Permission System, Code Quality, and Sidebar entries (requires Python 3 and `pi`). It checks Sidebar tabs, the unavailable-sandbox recovery state, status, reload, and shutdown with Quality disabled and no container definition. It does not certify live language-server diagnostics or shared host servers. Protocol regressions use local synthetic servers and do not require nested Podman or private host-installed language servers. Package tests extract the tarball, load the extension through Pi, and launch the packed broker with existing declared dependencies. See the repository's compatibility notes for the fixture layout and remaining platform limits.
 
 
 Tested with Pi 1.0.0; host-provided packages use `*` peer ranges. The `quality_response` tool is model-only: it remains available to the main model but cannot be called from codemode or other tools. Load after Permission System. Run `bun run --cwd code-quality test` and `typecheck`; root `bun run check` includes packaging and integration tests. Live calibration is opt-in through `bun run --cwd code-quality calibrate` and requires an explicitly configured model; it incurs provider costs. Its scope-regression fixtures include unused imports, formatter-owned layout, readable code with a functional bug, partial assertions, changed UI expectations, and generation-guarded cleanup. Deterministic tests verify grouping, complete hunk coverage, proposal boundaries, and the isolated prompt; they do not measure a model's false-positive rate. Run `/reload` after policy/prompt changes so active sessions use the new instructions.

@@ -246,16 +246,10 @@ it("never requests LFS payload access during review or setup discovery", async (
 		checkedPaths.push(...(action.effects ?? []).map((effect) => effect.path));
 		return { kind: "allowed", revision: "fixture" };
 	});
-	for (const discovery of [false, true]) {
-		const snapshot = await captureSource(
-			repo,
-			{ kind: "local" },
-			testConfig,
-			permissions,
-			[],
-			undefined,
-			discovery,
-		);
+	for (const mode of ["review", "discovery"] as const) {
+		const snapshot = await captureSource(repo, { kind: "local" }, testConfig, permissions, [], undefined, {
+			mode,
+		});
 		try {
 			expect(snapshot.paths()).toContain("a.ts");
 			expect(snapshot.paths()).not.toContain("snapshot.png");

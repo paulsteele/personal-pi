@@ -1,6 +1,16 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_CONFIG, type ObserverConfig, loadConfig, saveEnabled, saveModel } from "./config.js";
+import {
+	DEFAULT_CONFIG,
+	type ObserverConfig,
+	loadConfig,
+	saveEnabled,
+	saveModel,
+	configPath,
+	validateObserverSettings,
+} from "./config.js";
+import { registerSettingsSection } from "@paulsteele/pi-shared-ui";
+import { fileSettingsDraft } from "@paulsteele/pi-shared-ui/storage";
 import { createObserverPublisher } from "./events.js";
 import { buildObservationPrompt, observe } from "./observer.js";
 import { createObserverScheduler, type ObserverScheduler } from "./scheduler.js";
@@ -57,6 +67,71 @@ export default function progressObserver(pi: ExtensionAPI): void {
 	};
 
 	const current = (ctx: ExtensionContext): Runtime => runtime ?? createRuntime(ctx);
+
+	registerSettingsSection(pi, {
+		id: "observer",
+		title: "Progress Observer",
+		description: "Model, cadence, freshness, and enablement",
+		effect: "Observer settings applied immediately; its previous observation is refreshed.",
+		fields: [
+			{ path: "enabledByDefault", label: "Enabled", kind: "boolean" },
+			{ path: "modelSelection", label: "Model", kind: "model" },
+			{ path: "timeoutMs", label: "Request timeout (ms)", kind: "number" },
+			{ path: "turnInterval", label: "Observe every N turns", kind: "number" },
+			{ path: "maxAgeMs", label: "Maximum observation age (ms)", kind: "number" },
+		],
+		async load(ctx) {
+			const loaded = loadConfig(getAgentDir());
+			if (!loaded.config) {
+				throw new Error(loaded.issues.join("; "));
+			}
+			const config = loaded.config;
+			const owner = current(ctx);
+			const persisted = await fileSettingsDraft(
+				configPath(getAgentDir()),
+				() => {},
+				config as unknown as Record<string, unknown>,
+			);
+			const settingsValue = { ...config, modelSelection: modelId(config) };
+			return {
+				value: settingsValue,
+				async apply(value, signal) {
+					const { modelSelection, ...observerSettings } = value;
+					const hasChangedModelSelection =
+						modelSelection !== undefined && modelSelection !== modelId(config);
+					let provider = modelSelection === undefined ? DEFAULT_CONFIG.provider : config.provider;
+					let model = modelSelection === undefined ? DEFAULT_CONFIG.model : config.model;
+					if (hasChangedModelSelection) {
+						const selected = ctx.modelRegistry
+							.getAvailable()
+							.find((entry) => `${entry.provider}/${entry.id}` === modelSelection);
+						if (!selected) {
+							throw new Error("Select an available observer model");
+						}
+						provider = selected.provider;
+						model = selected.id;
+					}
+					const nextConfig = validateObserverSettings({ ...observerSettings, provider, model });
+					if (runtime !== owner) {
+						throw new Error("Observer settings belong to a retired session");
+					}
+					await persisted.apply(nextConfig as unknown as Record<string, unknown>, signal);
+					signal?.throwIfAborted();
+					if (runtime !== owner) {
+						return;
+					}
+					const active = owner;
+					active.config = nextConfig;
+					active.configValid = true;
+					active.scheduler.setConfig(active.config, modelId(active.config));
+					active.scheduler.setEnabled(active.config.enabledByDefault && ctx.mode === "tui");
+					if (active.config.enabledByDefault && ctx.mode === "tui") {
+						active.scheduler.refresh();
+					}
+				},
+			};
+		},
+	});
 
 	pi.on("session_start", (event, ctx) => {
 		const next = createRuntime(ctx);

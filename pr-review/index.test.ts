@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { discoverSettingsSections } from "@paulsteele/pi-shared-ui";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -8,11 +9,13 @@ import { fixture, put, testDraft, testPermissionEvents } from "./test-fixtures.j
 import { uiHarness } from "./ui.test.helpers.js";
 import { DiscoverySubmission } from "./types.js";
 import { runWorker } from "./worker.js";
+import * as runtimeStorage from "./storage.js";
 vi.mock("./worker.js", () => ({ runWorker: vi.fn() }));
 
 const dirs: string[] = [];
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 afterEach(async () => {
+	vi.restoreAllMocks();
 	vi.resetAllMocks();
 	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
@@ -22,8 +25,23 @@ function harness() {
 	const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => Promise<void> }>();
 	const tools: Array<{ name: string }> = [];
 	const events = new Map<string, (...args: any[]) => unknown>();
+	const permissionEvents = testPermissionEvents();
+	const subscribers = new Map<string, Set<(value: unknown) => void>>();
 	const pi = {
-		events: testPermissionEvents(),
+		events: {
+			on(name: string, handler: (value: unknown) => void) {
+				const listeners = subscribers.get(name) ?? new Set();
+				listeners.add(handler);
+				subscribers.set(name, listeners);
+				return () => listeners.delete(handler);
+			},
+			emit(name: string, value: unknown) {
+				permissionEvents.emit(name, value);
+				for (const handler of subscribers.get(name) ?? []) {
+					handler(value);
+				}
+			},
+		},
 		registerCommand: (name: string, command: unknown) => commands.set(name, command as never),
 		registerTool: (tool: { name: string }) => tools.push(tool),
 		on: (name: string, handler: (...args: any[]) => unknown) => events.set(name, handler),
@@ -74,6 +92,64 @@ it("registers the unified command, review tool, and scoped result reader without
 	await h.commands.get("pr")!.handler("setup", ctx);
 	expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("interactive"), "warning");
 });
+it("selects the reviewer model without a sandbox service or repository source capture", async () => {
+  const h = await interactive();
+  const originalEmit = h.pi.events.emit;
+  h.pi.events.emit = (eventName, data) => {
+    const isSandboxServiceEvent = eventName === "sandbox:service:v1";
+    if (!isSandboxServiceEvent) {
+      originalEmit(eventName, data);
+    }
+  };
+  await h.commands.get("pr")!.handler("model", h.ctx);
+  expect(h.pi.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining("Independent review model") }), expect.anything());
+  expect(runWorker).not.toHaveBeenCalled();
+});
+
+it("refuses checkout-local private storage when loading PR Settings", async () => {
+	const h = await interactive();
+	process.env.PI_CODING_AGENT_DIR = join(h.repo.root, ".private-agent");
+	const prSettingsSection = discoverSettingsSections(h.pi).find((section) => section.id === "pr")!;
+	await expect(prSettingsSection.load(h.ctx)).rejects.toThrow("outside the reviewed checkout");
+	await expect(readFile(join(h.repo.root, ".private-agent/extensions/pr-review/config.json"), "utf8")).rejects.toThrow();
+});
+
+it("persists PR default values when required settings fields are unset", async () => {
+	const h = await interactive();
+	const prSettingsSection = discoverSettingsSections(h.pi).find((section) => section.id === "pr")!;
+	const draft = await prSettingsSection.load(h.ctx);
+	await draft.apply({ schemaVersion: 2, modelSelection: "fake/independent" });
+	const config = JSON.parse(await readFile(join(h.agentDir, "extensions/pr-review/config.json"), "utf8"));
+	expect(config).toMatchObject({ thinking: "off", concurrency: 4, requestTimeoutMs: 300000, historyLimit: 20 });
+});
+
+it("preserves PR configuration when the settings interaction is cancelled during publication", async () => {
+	const h = await interactive();
+	const prSettingsSection = discoverSettingsSections(h.pi).find((section) => section.id === "pr")!;
+	const initial = await prSettingsSection.load(h.ctx);
+	await initial.apply({ ...initial.value, modelSelection: "fake/independent" });
+	const path = join(h.agentDir, "extensions/pr-review/config.json");
+	const before = await readFile(path, "utf8");
+	const draft = await prSettingsSection.load(h.ctx);
+	let continuePublication!: () => void;
+	const publicationWait = new Promise<void>((resolve) => { continuePublication = resolve; });
+	const originalPublish = runtimeStorage.publish;
+	const publicationStarted = vi.fn();
+	vi.spyOn(runtimeStorage, "publish").mockImplementationOnce(async (...args) => {
+		publicationStarted();
+		await publicationWait;
+		return originalPublish(...args);
+	});
+	const cancellation = new AbortController();
+	const pending = draft.apply({ ...draft.value, concurrency: 2 }, cancellation.signal);
+	const rejected = expect(pending).rejects.toThrow("Cancelled PR settings");
+	await vi.waitFor(() => expect(publicationStarted).toHaveBeenCalledOnce());
+	cancellation.abort(new Error("Cancelled PR settings"));
+	continuePublication();
+	await rejected;
+	expect(await readFile(path, "utf8")).toBe(before);
+});
+
 it("rejects bare --base before opening a spinner or invoking Git/model work", async () => {
 	const h = await interactive();
 	await reviewCommand(h, "--base");

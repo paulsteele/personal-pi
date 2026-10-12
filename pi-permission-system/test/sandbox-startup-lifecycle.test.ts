@@ -1,0 +1,53 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, expect, it, vi } from "vitest";
+import sandboxExtension from "../src/sandbox-extension.ts";
+
+const resolveDefinition = vi.hoisted(() => vi.fn());
+vi.mock("../src/sandbox/definition.ts", async (original) => ({
+  ...(await original<typeof import("../src/sandbox/definition.ts")>()),
+  resolveDefinition,
+  selectDefinition: async (options: { choose(paths: string[]): Promise<unknown> }) => {
+    return options.choose(["first/devcontainer.json", "second/devcontainer.json"]);
+  },
+}));
+
+const directories: string[] = [];
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  vi.clearAllMocks();
+  await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
+
+it.each(["session_shutdown", "session_tree"])("%s retires a pending definition selection even when its UI ignores cancellation", async (retirementEvent) => {
+  const agentDir = await mkdtemp(join(tmpdir(), "sandbox-startup-owner-"));
+  directories.push(agentDir);
+  vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+  const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>();
+  let finishSelection!: (selection: string) => void;
+  const select = vi.fn(() => new Promise<string>((resolve) => {
+    finishSelection = resolve;
+  }));
+  const notify = vi.fn();
+  sandboxExtension({
+    on: (name: string, handler: (event: unknown, ctx: unknown) => Promise<void>) => handlers.set(name, handler),
+    events: { emit() {}, on: () => () => {} },
+    registerTool() {}, registerCommand() {}, registerEntryRenderer() {},
+  } as never);
+  const ctx = {
+    cwd: agentDir, mode: "rpc", hasUI: true,
+    sessionManager: { getSessionId: () => "session" },
+    ui: { select, notify, setStatus: vi.fn() },
+  };
+  const startup = handlers.get("session_start")!({}, ctx);
+  await vi.waitFor(() => expect(select).toHaveBeenCalledOnce());
+  await handlers.get(retirementEvent)!({}, ctx);
+  await startup;
+  expect(resolveDefinition).not.toHaveBeenCalled();
+  expect(notify).not.toHaveBeenCalled();
+  finishSelection("first/devcontainer.json");
+  await Promise.resolve();
+  expect(resolveDefinition).not.toHaveBeenCalled();
+  expect(notify).not.toHaveBeenCalled();
+});

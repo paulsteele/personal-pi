@@ -290,12 +290,16 @@ export async function capture(
 	permissions: PermissionScope,
 	exclusions: Array<{ glob: string; reason: string }> = [],
 	signal?: AbortSignal,
-	discovery = false,
+	options: { mode: "review" | "discovery" } = { mode: "review" },
+	progress: (message: string) => void = () => {},
 ): Promise<Snapshot> {
+	const discovery = options.mode === "discovery";
+	progress("Preparing private source capture");
 	permissions.revision();
 	const store = await SnapshotStore.create(repo);
 	const diffWorker = new ExactDiffWorker();
 	try {
+		progress("Scanning repository and Git attributes");
 		const head = await resolveCommit(repo.root, "HEAD", signal, true);
 		const live = await workingTree(repo, head, config, signal);
 		const committed = scope.kind !== "local" && scope.committedOnly;
@@ -314,6 +318,7 @@ export async function capture(
 		} else if (head && !(await hasLocalReviewChanges(repo, head, live, signal))) {
 			baseline = await firstParent(repo.root, head, signal);
 		}
+		progress("Reading review baseline");
 		const before = await tree(repo, baseline, signal);
 		const blobs = new Map<string, Promise<string>>();
 		const liveCopies = new Map<Entry, Promise<string>>();
@@ -369,28 +374,35 @@ export async function capture(
 		const omitted: Snapshot["omitted"] = [];
 		const denied = new Map<string, unknown>();
 		// Capture only needed dirty source. Excluded/discovery-only content stays metadata-only until requested.
-		if (!discovery)
-			for (const [path, entry] of target) {
-				if (!entry.live || entry.lfs || exclusions.some((item) => matchesGlob(path, item.glob))) {
-					continue;
+		const workingSources = discovery
+			? []
+			: [...target].filter(
+					([path, entry]) =>
+						entry.live && !entry.lfs && !exclusions.some((item) => matchesGlob(path, item.glob)),
+				);
+		for (const [sourceIndex, [path, entry]] of workingSources.entries()) {
+			progress(`Capturing working source ${sourceIndex + 1}/${workingSources.length}: ${path}`);
+			try {
+				await permissions.guard(
+					{
+						toolName: "read",
+						input: { path: join(repo.root, path) },
+						effects: [source(path, "new", entry)],
+						description: "Capture working source for local PR diff preparation",
+						...(signal ? { signal } : {}),
+					},
+					() => entryPath(entry),
+				);
+			} catch (error) {
+				if (!isPermissionBlocked(error)) {
+					throw error;
 				}
-				try {
-					await permissions.guard(
-						{
-							toolName: "read",
-							input: { path: join(repo.root, path) },
-							effects: [source(path, "new", entry)],
-							description: "Capture working source for local PR diff preparation",
-							...(signal ? { signal } : {}),
-						},
-						() => entryPath(entry),
-					);
-				} catch (error) {
-					if (!isPermissionBlocked(error)) throw error;
-					if (error.kind === "cancelled" || error.kind === "unavailable") throw error;
-					denied.set(path, error);
+				if (error.kind === "cancelled" || error.kind === "unavailable") {
+					throw error;
 				}
+				denied.set(path, error);
 			}
+		}
 		const objectId = (entry: Entry) => entry.contentOid ?? entry.oid;
 		const deleted = new Map<string, string>();
 		for (const [path, entry] of before)
@@ -405,14 +417,26 @@ export async function capture(
 					renamedOld.add(old);
 				}
 			}
-		for (const file of discovery ? [] : [...new Set([...before.keys(), ...target.keys()])].sort()) {
+		const changedFiles = discovery
+			? []
+			: [...new Set([...before.keys(), ...target.keys()])].sort().filter((file) => {
+					if (renamedOld.has(file)) {
+						return false;
+					}
+					const old = before.get(renames.get(file) ?? file);
+					const next = target.get(file);
+					const isRename = renames.has(file);
+					const isAddedOrDeleted = !old || !next;
+					const contentChanged = old && next && objectId(old) !== objectId(next);
+					const modeChanged = old && next && old.mode !== next.mode;
+					return isRename || isAddedOrDeleted || contentChanged || modeChanged;
+				});
+		for (const [changeIndex, file] of changedFiles.entries()) {
 			signal?.throwIfAborted();
-			if (renamedOld.has(file)) continue;
 			const oldPath = renames.get(file) ?? file;
 			const old = before.get(oldPath),
 				next = target.get(file);
-			if (oldPath === file && old && next && objectId(old) === objectId(next) && old.mode === next.mode)
-				continue;
+			progress(`Preparing source diff ${changeIndex + 1}/${changedFiles.length}: ${file}`);
 			// Unchanged metadata must not cost an event-loop turn (and potentially a full TUI redraw)
 			// per tracked path. Cooperate only for actual changes, including excluded/denied ones.
 			await new Promise<void>((resolve) => setImmediate(resolve));
@@ -489,6 +513,7 @@ export async function capture(
 			}
 		}
 		// A second independent capture detects edits made while the view was assembled.
+		progress("Verifying repository did not change during capture");
 		const currentHead = await resolveCommit(repo.root, "HEAD", signal, true);
 		if (
 			currentHead !== head ||
@@ -682,6 +707,7 @@ export async function capture(
 				},
 			};
 		};
+		progress(`Source capture ready: ${changes.length} changes, ${omitted.length} omitted`);
 		return view(permissions);
 	} catch (error) {
 		await diffWorker.dispose();

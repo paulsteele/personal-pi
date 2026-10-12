@@ -18,22 +18,24 @@ function fixture() {
 afterEach(() => {
 	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
-it("captures exact text and absence, rejects binary/oversize/sensitive/external content", () => {
+it("captures text from any path and absence while rejecting binary, oversize, sensitive, and symlink content", () => {
 	const { dir, cwd, path } = fixture();
-	expect(readSnapshot(path, DEFAULT_CONFIG, cwd)).toBeNull();
+	expect(readSnapshot(path, DEFAULT_CONFIG)).toBeNull();
 	writeFileSync(path, "\ufeffconst café = 1;\r\n");
-	expect(readSnapshot(path, DEFAULT_CONFIG, cwd)).toBe("\ufeffconst café = 1;\r\n");
-	expect(() => readSnapshot(path, { ...DEFAULT_CONFIG, maxFileBytes: 1 }, cwd)).toThrow(CoverageError);
+	expect(readSnapshot(path, DEFAULT_CONFIG)).toBe("\ufeffconst café = 1;\r\n");
+	expect(() => readSnapshot(path, { ...DEFAULT_CONFIG, maxFileBytes: 1 })).toThrow(CoverageError);
 	writeFileSync(path, Buffer.from([0, 255]));
-	expect(() => readSnapshot(path, DEFAULT_CONFIG, cwd)).toThrow(/Binary/);
+	expect(() => readSnapshot(path, DEFAULT_CONFIG)).toThrow(/Binary/);
 	writeFileSync(path, "Bearer " + "x".repeat(25));
-	expect(() => readSnapshot(path, DEFAULT_CONFIG, cwd)).toThrow(/secret/);
-	expect(readSnapshot(path, DEFAULT_CONFIG, cwd, true)).toContain("Bearer");
-	expect(() => readSnapshot(join(dir, "outside"), DEFAULT_CONFIG, cwd)).toThrow(/outside/);
-	expect(() => readSnapshot(join(cwd, ".env"), DEFAULT_CONFIG, cwd)).toThrow(/sensitive/);
+	expect(() => readSnapshot(path, DEFAULT_CONFIG)).toThrow(/secret/);
+	expect(readSnapshot(path, DEFAULT_CONFIG, true)).toContain("Bearer");
+	const externalPath = join(dir, "outside");
+	writeFileSync(externalPath, "external source");
+	expect(readSnapshot(externalPath, DEFAULT_CONFIG)).toBe("external source");
+	expect(() => readSnapshot(join(cwd, ".env"), DEFAULT_CONFIG)).toThrow(/sensitive/);
 	symlinkSync(path, join(cwd, "alias"));
 	expect(canonicalPath(join(cwd, "alias"))).toBe(path);
-	expect(() => readSnapshot(join(cwd, "alias"), DEFAULT_CONFIG, cwd, true)).toThrow();
+	expect(() => readSnapshot(join(cwd, "alias"), DEFAULT_CONFIG, true)).toThrow();
 });
 it("builds complete changed hunks and explicitly rejects indivisible over-budget changes", () => {
 	const { cwd, path } = fixture();

@@ -1,8 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { discoverSettingsSections } from "@paulsteele/pi-shared-ui";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import progressObserver from "./index.js";
+import { configPath, DEFAULT_CONFIG, saveConfig } from "./config.js";
 
 const dirs: string[] = [];
 function harness(mode: "tui" | "print" = "tui") {
@@ -60,7 +62,7 @@ function harness(mode: "tui" | "print" = "tui") {
 		},
 	};
 	progressObserver(pi as never);
-	return { agentDir, handlers, commands, emitted, complete, ctx };
+	return { agentDir, handlers, commands, emitted, complete, ctx, pi };
 }
 
 afterEach(() => {
@@ -144,6 +146,71 @@ describe("progress observer extension", () => {
 		await h.handlers.get("turn_end")?.({ turnIndex: 0 }, h.ctx);
 		await flush();
 		expect(h.complete).not.toHaveBeenCalled();
+	});
+
+	it("disables observation without requiring a replacement for an unavailable saved model", async () => {
+		const h = harness();
+		await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+		h.ctx.modelRegistry.getAvailable.mockReturnValue([]);
+		const section = discoverSettingsSections(h.pi).find((section) => section.id === "observer")!;
+		const draft = await section.load(h.ctx as never);
+		await draft.apply({ ...draft.value, enabledByDefault: false });
+		expect(JSON.parse(readFileSync(join(h.agentDir, "extensions/progress-observer/config.json"), "utf8"))).toMatchObject({ enabledByDefault: false });
+		expect(h.complete).not.toHaveBeenCalled();
+	});
+
+	it("saves an unset model as the default even when no models are available", async () => {
+		const h = harness();
+		saveConfig(h.agentDir, { ...DEFAULT_CONFIG, provider: "removed", model: "old-model", enabledByDefault: false });
+		await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+		h.ctx.modelRegistry.getAvailable.mockReturnValue([]);
+		const section = discoverSettingsSections(h.pi).find((section) => section.id === "observer")!;
+		const draft = await section.load(h.ctx as never);
+		const { modelSelection: _selection, ...settings } = draft.value;
+		await draft.apply(settings);
+		expect(JSON.parse(readFileSync(configPath(h.agentDir), "utf8"))).toMatchObject({
+			provider: DEFAULT_CONFIG.provider, model: DEFAULT_CONFIG.model, enabledByDefault: false,
+		});
+		expect(h.complete).not.toHaveBeenCalled();
+	});
+
+	it("rejects an explicit replacement model that is unavailable", async () => {
+		const h = harness();
+		await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+		h.ctx.modelRegistry.getAvailable.mockReturnValue([]);
+		const section = discoverSettingsSections(h.pi).find((section) => section.id === "observer")!;
+		const draft = await section.load(h.ctx as never);
+		await expect(draft.apply({ ...draft.value, modelSelection: "removed/replacement" })).rejects.toThrow("available observer model");
+		expect(h.complete).not.toHaveBeenCalled();
+	});
+
+	it("rejects stale settings without restarting observation or overwriting the newer off choice", async () => {
+		const h = harness();
+		await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+		const section = discoverSettingsSections(h.pi).find((section) => section.id === "observer")!;
+		const first = await section.load(h.ctx as never);
+		await first.apply({ ...first.value, enabledByDefault: false });
+		const stale = await section.load(h.ctx as never);
+		const path = join(h.agentDir, "extensions/progress-observer/config.json");
+		const changed = { ...JSON.parse(readFileSync(path, "utf8")), timeoutMs: 1000 };
+		writeFileSync(path, JSON.stringify(changed));
+		await expect(stale.apply({ ...stale.value, turnInterval: 10 })).rejects.toThrow("changed outside");
+		expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(changed);
+	});
+
+	it("retains the previous inference as stale when a settings-triggered refresh fails", async () => {
+		const h = harness();
+		await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+		await h.commands.get("observer").handler("refresh", h.ctx);
+		await vi.waitFor(() => expect(h.emitted.filter(([channel]) => channel === "progress-observer:state").at(-1)?.[1]).toMatchObject({ phase: "ready" }));
+		h.complete.mockRejectedValueOnce(new Error("Observer provider unavailable"));
+		const section = discoverSettingsSections(h.pi).find((section) => section.id === "observer")!;
+		const draft = await section.load(h.ctx as never);
+		await draft.apply({ ...draft.value, timeoutMs: 1000 });
+		await vi.waitFor(() => expect(h.emitted.filter(([channel]) => channel === "progress-observer:state").at(-1)?.[1]).toMatchObject({
+			phase: "error", stale: true, summary: { goal: "Goal", progress: "Done" },
+		}));
+		await h.handlers.get("session_shutdown")?.({}, h.ctx);
 	});
 
 	it("supports persistent toggles, manual refresh, and model selection", async () => {

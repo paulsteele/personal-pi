@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Repo } from "./types.js";
 import { deferToolCommit } from "./tool-commit.js";
+import { awaitWithSignal } from "./abort.js";
 
 // Versioned structural protocol. No runtime import/bundled copy of the permission extension.
 export const REVIEW_SERVICE_CHANNEL = "permissions:review-service:v1";
@@ -20,6 +21,12 @@ export interface SourceEffect {
 	version?: string;
 	range?: string;
 }
+export interface SourceAuthorizationProgress {
+	completed: number;
+	total: number;
+	pass: number;
+	currentSource?: SourceEffect;
+}
 export interface PermissionAction {
 	toolName: string;
 	input: unknown;
@@ -32,12 +39,13 @@ export type PermissionResult =
 	| { kind: "allowed"; revision: string }
 	| { kind: "denied" | "cancelled" | "unavailable"; reason: string };
 export interface TaskPort {
+	readonly maxSourcesPerBatch?: number;
 	check(action: PermissionAction): Promise<PermissionResult>;
 	checkLocalSearch?(action: PermissionAction): Promise<PermissionResult>;
 	revision(): string;
 	nextTurn(): void;
 	endTurn(): void;
-	close(): void;
+	close(): void | Promise<void>;
 }
 export interface TaskSpec {
 	id: string;
@@ -50,7 +58,7 @@ export interface TaskSpec {
 }
 export interface OperationPort {
 	task(spec: TaskSpec): TaskPort;
-	close(): void;
+	close(): void | Promise<void>;
 }
 interface HostSkill {
 	name: string;
@@ -88,6 +96,7 @@ export function isPermissionBlocked(error: unknown): error is PermissionBlocked 
 /** Source/turn state, not an approval cache. The service alone owns classifier memoization. */
 export class PermissionScope {
 	private readonly used = new Map<string, SourceEffect>();
+	private closePromise?: Promise<void>;
 	constructor(private readonly port: TaskPort) {}
 	get dependencies(): SourceEffect[] {
 		return [...this.used.values()].map((source) => ({ ...source }));
@@ -105,8 +114,9 @@ export class PermissionScope {
 	endTurn(): void {
 		this.port.endTurn();
 	}
-	close(): void {
-		this.port.close();
+	close(): Promise<void> {
+		this.closePromise ??= Promise.resolve().then(() => this.port.close());
+		return this.closePromise;
 	}
 	async authorize(action: PermissionAction): Promise<string> {
 		return this.checkedRevision(action, () => this.port.check(action));
@@ -123,8 +133,12 @@ export class PermissionScope {
 	): Promise<string> {
 		let result: PermissionResult;
 		try {
-			result = await check();
+			const pending = check();
+			result = await (action.signal ? awaitWithSignal(pending, action.signal) : pending);
 		} catch {
+			if (action.signal?.aborted) {
+				throw new PermissionBlocked("cancelled", "Permission review cancelled.");
+			}
 			throw new PermissionBlocked("unavailable", "Permission service/config unavailable.");
 		}
 		if (!result || !["allowed", "denied", "cancelled", "unavailable"].includes(result.kind))
@@ -165,10 +179,12 @@ export class PermissionScope {
 		sources: readonly SourceEffect[],
 		description: string,
 		signal?: AbortSignal,
+		progressReporting: { progress?: (value: SourceAuthorizationProgress) => void } = {},
 	): Promise<string> {
 		// This set and its revision belong to one transfer, never a reusable grant.
 		const unique = new Map<string, SourceEffect>();
 		let processed = 0;
+		const singleSourceYieldInterval = 32;
 		const yieldToUI = async () => {
 			signal?.throwIfAborted();
 			await new Promise<void>((resolve) => setImmediate(resolve));
@@ -177,24 +193,55 @@ export class PermissionScope {
 		for (const source of sources) {
 			signal?.throwIfAborted();
 			unique.set(JSON.stringify(source), source);
-			if (++processed % 32 === 0) await yieldToUI();
+			if (++processed % singleSourceYieldInterval === 0) {
+				await yieldToUI();
+			}
 		}
+		const requestedBatchLimit = this.port.maxSourcesPerBatch;
+		const batchLimit =
+			requestedBatchLimit !== undefined && Number.isInteger(requestedBatchLimit)
+				? Math.max(1, Math.min(32, requestedBatchLimit))
+				: 1;
+		const orderedSources = [...unique.values()];
+		let pass = 0;
+		const publishProgress = (completed: number, currentSource?: SourceEffect) => {
+			try {
+				progressReporting.progress?.({
+					completed,
+					total: unique.size,
+					pass,
+					...(currentSource ? { currentSource: { ...currentSource } } : {}),
+				});
+			} catch {
+				/* Presentation cannot authorize or block source transfer. */
+			}
+		};
 		for (;;) {
 			signal?.throwIfAborted();
+			pass++;
+			let completed = 0;
+			publishProgress(completed);
 			const revision = this.revision();
 			let stable = true;
-			for (const source of unique.values()) {
+			for (let start = 0; start < orderedSources.length; start += batchLimit) {
+				const batch = orderedSources.slice(start, start + batchLimit);
+				publishProgress(completed, batch[0]);
 				await this.guard(
 					{
 						toolName: "read",
-						input: { path: source.path },
-						effects: [source],
+						input: { path: batch[0]!.path },
+						effects: batch,
 						description,
 						...(signal ? { signal } : {}),
 					},
 					async () => undefined,
 				);
-				if (++processed % 32 === 0) await yieldToUI();
+				completed += batch.length;
+				publishProgress(completed);
+				processed += batch.length;
+				if (batchLimit > 1 || processed % singleSourceYieldInterval === 0) {
+					await yieldToUI();
+				}
 				if (revision !== this.revision()) {
 					stable = false;
 					break;
@@ -218,6 +265,8 @@ export class PermissionScope {
 
 export class ReviewPermissions {
 	private readonly scopes = new Set<PermissionScope>();
+	private readonly workerScopes = new Set<PermissionScope>();
+	private closePromise?: Promise<void>;
 	constructor(
 		readonly id: string,
 		private readonly port: OperationPort,
@@ -242,6 +291,9 @@ export class ReviewPermissions {
 			throw new PermissionBlocked("unavailable", "Incompatible permission task service.");
 		const scope = new PermissionScope(port);
 		this.scopes.add(scope);
+		if (spec.kind === "worker") {
+			this.workerScopes.add(scope);
+		}
 		return scope;
 	}
 	host(name: string, id = `host:${randomUUID()}`): PermissionScope {
@@ -254,11 +306,21 @@ export class ReviewPermissions {
 			kind: "host",
 		});
 	}
-	close(): void {
-		for (const scope of this.scopes) scope.close();
-		this.scopes.clear();
-		this.unsubscribe();
-		this.port.close();
+	async closeWorkers(): Promise<string[]> {
+		const results = await Promise.allSettled([...this.workerScopes].map((scope) => scope.close()));
+		this.workerScopes.clear();
+		return results
+			.filter((result): result is PromiseRejectedResult => result.status === "rejected")
+			.map((result) => String(result.reason));
+	}
+	close(): Promise<void> {
+		this.closePromise ??= (async () => {
+			this.unsubscribe();
+			await Promise.allSettled([...this.scopes].map((scope) => scope.close()));
+			this.scopes.clear();
+			await this.port.close();
+		})();
+		return this.closePromise;
 	}
 }
 

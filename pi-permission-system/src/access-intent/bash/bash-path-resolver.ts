@@ -182,7 +182,11 @@ export class BashPathResolver {
    */
   private collectStatefulCandidates(rootNode: TSNode, initialBase: EffectiveBase): PathCandidate[] {
     const out: PathCandidate[] = [];
-    this.walkStateful(rootNode, { base: initialBase, bindings: new Map() }, out);
+    const bindings: ShellBindings = new Map();
+    if (this.normalizer.guestHome) {
+      bindings.set("HOME", [this.normalizer.guestHome]);
+    }
+    this.walkStateful(rootNode, { base: initialBase, bindings }, out);
     return out;
   }
 
@@ -347,7 +351,7 @@ export class BashPathResolver {
       case "redirected_statement":
         return this.walkCurrentShellSequence(node, base, out);
       case "command":
-        tagTokens(collectCommandTokens(node), base, out);
+        tagTokens(collectCommandTokens(node, (name) => this.guestHomeBinding(name)), base, out);
         return this.foldCd(node, base);
       case "pipeline":
         // tree-sitter-bash mis-groups a redirect-bearing `&&`/`;` list as the
@@ -372,7 +376,7 @@ export class BashPathResolver {
         // substitution interiors: collect every candidate in the subtree tagged
         // with the enclosing base and do not fold their internal `cd`s. (Folding
         // inside substitutions is deferred — conservative, never under-flags.)
-        tagTokens(collectPathCandidateTokens(node), base, out);
+        tagTokens(collectPathCandidateTokens(node, (name) => this.guestHomeBinding(name)), base, out);
         return base;
     }
   }
@@ -467,7 +471,7 @@ export class BashPathResolver {
       return current;
     }
     // Bare `command` or any other shape: a true subshell first stage.
-    tagTokens(collectPathCandidateTokens(node), base, out);
+    tagTokens(collectPathCandidateTokens(node, (name) => this.guestHomeBinding(name)), base, out);
     return base;
   }
 
@@ -569,7 +573,7 @@ export class BashPathResolver {
     const externalPaths: AccessPath[] = [];
 
     for (const { token, base } of candidates) {
-      const candidate = classifyTokenAsPathCandidate(token);
+      const candidate = classifyTokenAsPathCandidate(this.expandHomeToken(token));
       if (!candidate) {
         // A bare token the strict shape gate rejects can still escape the tree
         // through a symlink, so probe it and apply the ordinary boundary
@@ -648,7 +652,7 @@ export class BashPathResolver {
     const result: BashPathRuleCandidate[] = [];
 
     for (const { token, base } of candidates) {
-      const shaped = classifyTokenAsRuleCandidate(token);
+      const shaped = classifyTokenAsRuleCandidate(this.expandHomeToken(token));
       const candidate =
         shaped === null
           ? this.probeBareToken(token, base)
@@ -685,6 +689,14 @@ export class BashPathResolver {
    * Shared by both projections so a promoted token is identical whether it is
    * being matched against `path` rules or tested against the cwd boundary.
    */
+  private guestHomeBinding(name: string): readonly string[] | undefined {
+    return name === "HOME" && this.normalizer.guestHome ? [this.normalizer.guestHome] : undefined;
+  }
+
+  private expandHomeToken(token: string): string {
+    return this.normalizer.guestHome ? token.replace(/^~(?=\/|$)/, this.normalizer.guestHome) : token;
+  }
+
   private probeBareToken(token: string, base: EffectiveBase): BashPathRuleCandidate | null {
     const bare = classifyBareTokenCandidate(token);
     if (bare === null) return null;

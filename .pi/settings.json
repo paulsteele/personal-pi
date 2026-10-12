@@ -11,7 +11,8 @@
         "-code-quality/index.ts",
         "-progress-observer/index.ts",
         "-pr-review/index.ts",
-        "-pi-atelier/extensions/index.ts"
+        "-pi-atelier/extensions/index.ts",
+        "-pi-sidebar/extensions/index.ts"
       ]
     }
   ],
@@ -23,6 +24,6 @@
     "../code-quality/index.ts",
     "../progress-observer/index.ts",
     "../pr-review/index.ts",
-    "../pi-atelier/extensions/index.ts"
+    "../pi-sidebar/extensions/index.ts"
   ]
 }

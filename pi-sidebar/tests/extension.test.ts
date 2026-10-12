@@ -1,0 +1,1432 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { discoverSettingsSections } from "@paulsteele/pi-shared-ui";
+import * as settingsStorage from "@paulsteele/pi-shared-ui/storage";
+import atelierExtension, { SIDEBAR_PANEL_EVENT_CHANNEL } from "../extensions/index.js";
+
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (error: unknown) => void;
+	const promise = new Promise<T>((done, fail) => {
+		resolve = done;
+		reject = fail;
+	});
+	return { promise, resolve, reject };
+}
+
+const execResult = (stdout: string, code = 0) => ({
+	stdout,
+	stderr: "",
+	code,
+	killed: false,
+});
+
+function harness(
+	mode: "tui" | "print" = "tui",
+	_legacyPlatform: NodeJS.Platform = "linux",
+	interactiveMenus = false,
+	_extensionDependencies: Record<string, never> = {},
+	options: { throwOnEventUnsubscribe?: readonly string[]; throwOnEventSubscribe?: readonly string[] } = {},
+) {
+	const handlers = new Map<string, (...args: any[]) => unknown>();
+	const commands = new Map<string, any>();
+	const eventBusHandlers = new Map<string, Set<(data: unknown) => void>>();
+	const shortcuts: string[] = [];
+	const setFooter = vi.fn();
+	const setWidget = vi.fn();
+	let terminalInput: ((data: string) => unknown) | undefined;
+	const terminalWrite = vi.fn();
+	const baseRender = vi.fn((width: number) => [`main:${width}`]);
+	const overlays: Array<{
+		component: any;
+		done: ReturnType<typeof vi.fn>;
+		closed: boolean;
+		handle: { hide: ReturnType<typeof vi.fn> };
+		options: any;
+		requestRender: ReturnType<typeof vi.fn>;
+		tui: any;
+	}> = [];
+	const pi = {
+		on: vi.fn((name: string, handler: (...args: any[]) => unknown) => handlers.set(name, handler)),
+		events: {
+			on: vi.fn((channel: string, handler: (data: unknown) => void) => {
+				if (options.throwOnEventSubscribe?.includes(channel)) throw new Error(`subscribe failed: ${channel}`);
+				const channelHandlers = eventBusHandlers.get(channel) ?? new Set();
+				channelHandlers.add(handler);
+				eventBusHandlers.set(channel, channelHandlers);
+				return () => {
+					if (options.throwOnEventUnsubscribe?.includes(channel))
+						throw new Error(`unsubscribe failed: ${channel}`);
+					return channelHandlers.delete(handler);
+				};
+			}),
+			emit: vi.fn((channel: string, data: unknown) => {
+				if (channel === "sandbox:service:v1") {
+					const request = data as { accept(value: unknown): void };
+					request.accept(createSandboxServiceResponse());
+				}
+				for (const handler of eventBusHandlers.get(channel) ?? []) handler(data);
+			}),
+		},
+		registerCommand: vi.fn((name: string, options: any) => commands.set(name, options)),
+		registerShortcut: vi.fn((key: string) => shortcuts.push(key)),
+		exec: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
+		getThinkingLevel: vi.fn().mockReturnValue("medium"),
+		getActiveTools: vi.fn().mockReturnValue(["read"]),
+		getAllTools: vi.fn().mockReturnValue([{ name: "read" }]),
+		setSessionName: vi.fn(),
+	};
+	function createSandboxServiceResponse() {
+		return {
+			session: {
+				environment: { workspace: "/tmp/project" },
+				execute: async (options: { command: string[]; cwd?: string }) => {
+					const result = await pi.exec(options.command[0], options.command.slice(1), { cwd: options.cwd });
+					return { output: Buffer.from(result.stdout), stderr: result.stderr, code: result.code };
+				},
+			},
+		};
+	}
+	const custom = vi.fn((factory: (...args: any[]) => any, options: any): Promise<any> => {
+		const requestRender = vi.fn();
+		const tui = {
+			render: baseRender,
+			terminal: { columns: 120, rows: 36, width: 120, write: terminalWrite },
+			requestRender,
+		};
+		let resolve!: (value: any) => void;
+		const pending = new Promise<any>((done) => {
+			resolve = done;
+		});
+		const done = vi.fn((value?: any) => {
+			// Pi pops the overlay off the stack inside `done`, so a closed overlay never renders again.
+			const entry = overlays.find((candidate) => candidate.done === done);
+			if (entry) entry.closed = true;
+			resolve(value);
+		});
+		const handle = { hide: vi.fn() };
+		const component = factory(
+			tui,
+			{
+				name: "dark",
+				fg: (_color: string, text: string) => text,
+				bold: (text: string) => text,
+				italic: (text: string) => text,
+			},
+			{},
+			done,
+		);
+		requestRender.mockClear();
+		overlays.push({ component, done, closed: false, handle, options, requestRender, tui });
+		options?.onHandle?.(handle);
+		const overlayOptions =
+			typeof options?.overlayOptions === "function" ? options.overlayOptions() : options?.overlayOptions;
+		if (!overlayOptions?.nonCapturing && !interactiveMenus) done();
+		return pending;
+	});
+	const ctx = {
+		mode,
+		cwd: "/tmp/project",
+		isProjectTrusted: vi.fn().mockReturnValue(false),
+		isIdle: vi.fn().mockReturnValue(true),
+		getContextUsage: vi.fn().mockReturnValue({ tokens: 10, contextWindow: 100, percent: 10 }),
+		model: undefined,
+		modelRegistry: { isUsingOAuth: vi.fn().mockReturnValue(false) },
+		compact: vi.fn(),
+		sessionManager: {
+			getSessionId: vi.fn().mockReturnValue("session-a"),
+			getEntries: vi.fn().mockReturnValue([]),
+			getBranch: vi.fn().mockReturnValue([]),
+			getSessionName: vi.fn().mockReturnValue("Test session"),
+			getSessionFile: vi.fn().mockReturnValue("/tmp/session.jsonl"),
+		},
+		ui: {
+			setFooter,
+			setWidget,
+			notify: vi.fn(),
+			theme: {},
+			select: vi.fn(),
+			custom,
+			onTerminalInput: vi.fn((handler) => {
+				terminalInput = handler;
+				return () => {
+					if (terminalInput === handler) terminalInput = undefined;
+				};
+			}),
+		},
+	};
+	atelierExtension(pi as never);
+	return {
+		handlers,
+		commands,
+		shortcuts,
+		setFooter,
+		setWidget,
+		ctx,
+		pi,
+		overlays,
+		custom,
+		terminalWrite,
+		baseRender,
+		getEventBusHandlerCount(channel: string) {
+			return eventBusHandlers.get(channel)?.size ?? 0;
+		},
+		get terminalInput() {
+			return terminalInput;
+		},
+	};
+}
+
+function replacementContext(
+	base: ReturnType<typeof harness>["ctx"],
+	sessionName: string,
+): ReturnType<typeof harness>["ctx"] {
+	return {
+		...base,
+		sessionManager: {
+			...base.sessionManager,
+			getSessionName: vi.fn().mockReturnValue(sessionName),
+			getSessionFile: vi.fn().mockReturnValue(`/tmp/${sessionName.toLowerCase().replace(/\s+/g, "-")}.jsonl`),
+		},
+	};
+}
+
+async function start(h: ReturnType<typeof harness>, ctx = h.ctx) {
+	await h.handlers.get("session_start")?.({ reason: "startup" }, ctx);
+}
+
+async function command(h: ReturnType<typeof harness>, args: string, ctx = h.ctx) {
+	await h.commands.get("sidebar").handler(args, ctx);
+}
+
+function renderOverlayText(h: ReturnType<typeof harness>, index = 0, width = 44): string {
+	const overlay = h.overlays[index];
+	if (!overlay) return "";
+	if (overlay.closed) throw new Error(`overlay ${index} is closed; Pi would not render it`);
+	return overlay.component.render(width).join("\n");
+}
+
+const FOOTER_THEME = {
+	fg: (_color: string, text: string) => text,
+	bold: (text: string) => text,
+	italic: (text: string) => text,
+};
+
+/** Builds a footer from a captured `setFooter` factory and renders it once, as Pi would. */
+function renderFooter(
+	factory: any,
+	requestRender: () => void,
+	getExtensionStatuses: () => Map<string, string> = () => new Map(),
+): any {
+	const component = factory({ requestRender }, FOOTER_THEME, {
+		getGitBranch: () => undefined,
+		getExtensionStatuses,
+		onBranchChange: () => () => undefined,
+	});
+	component.render(120);
+	return component;
+}
+
+function queueWorkspacePulseInspection(
+	h: ReturnType<typeof harness>,
+	firstResult: Promise<ReturnType<typeof execResult>> = Promise.resolve(execResult("true\n/tmp/project\n")),
+): void {
+	const results = [
+		firstResult,
+		Promise.resolve(
+			execResult(
+				"# branch.oid abcdef\0# branch.head stale-branch\0" +
+					"1 .M N... 100644 100644 100644 abcdef abcdef tracked.txt\0? untracked.txt\0",
+			),
+		),
+		Promise.resolve(execResult("treeish\n")),
+		Promise.resolve(execResult("5\t2\ttracked.txt\0")),
+	];
+	h.pi.exec.mockImplementation(() => results.shift() ?? Promise.resolve(execResult("", 1)));
+}
+
+async function waitForWorkspacePulseInspection(h: ReturnType<typeof harness>): Promise<void> {
+	await vi.waitFor(() => expect(h.pi.exec).toHaveBeenCalledTimes(4));
+	await Promise.resolve();
+}
+
+const settingsDirectories: string[] = [];
+afterEach(async () => {
+	vi.restoreAllMocks();
+	vi.unstubAllEnvs();
+	await Promise.all(settingsDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
+
+it("applies an empty Sidebar draft with default visibility and the Tools tab", async () => {
+	const agentDir = await mkdtemp(join(tmpdir(), "sidebar-default-preferences-"));
+	settingsDirectories.push(agentDir);
+	vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+	const path = join(agentDir, "extensions/pi-sidebar/config.json");
+	await mkdir(join(agentDir, "extensions/pi-sidebar"), { recursive: true });
+	await writeFile(path, '{"tab":"sandbox"}');
+	const h = harness();
+	await start(h);
+	const section = discoverSettingsSections(h.pi).find((section) => section.id === "sidebar")!;
+	const draft = await section.load(h.ctx as never);
+	await draft.apply({});
+	expect(JSON.parse(await readFile(path, "utf8"))).toEqual({});
+	expect(renderOverlayText(h)).toContain("[tools]");
+	await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+it("does not change replacement Sidebar presentation after a deferred old-session Apply", async () => {
+	const agentDir = await mkdtemp(join(tmpdir(), "sidebar-settings-owner-"));
+	settingsDirectories.push(agentDir);
+	vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+	const h = harness();
+	await start(h);
+	const original = settingsStorage.fileSettingsDraft;
+	const publicationWait = deferred<void>();
+	const applying = vi.fn();
+	vi.spyOn(settingsStorage, "fileSettingsDraft").mockImplementationOnce(async (...args) => {
+		const loaded = await original(...args);
+		return { ...loaded, apply: async (value, signal) => {
+			applying();
+			await publicationWait.promise;
+			await loaded.apply(value, signal);
+		} };
+	});
+	const section = discoverSettingsSections(h.pi).find((section) => section.id === "sidebar")!;
+	const draft = await section.load(h.ctx as never);
+	const pending = draft.apply({ visible: false, tab: "sandbox" });
+	await vi.waitFor(() => expect(applying).toHaveBeenCalledOnce());
+	const replacement = replacementContext(h.ctx, "Replacement");
+	await start(h, replacement);
+	publicationWait.resolve();
+	await pending;
+	expect(renderOverlayText(h, h.overlays.length - 1)).toContain("[tools]");
+	await h.handlers.get("session_shutdown")?.({}, replacement);
+});
+
+it("forwards cancellation through a deferred Sidebar preferences publication", async () => {
+	const agentDir = await mkdtemp(join(tmpdir(), "sidebar-settings-cancel-"));
+	settingsDirectories.push(agentDir);
+	vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+	const h = harness();
+	await start(h);
+	const original = settingsStorage.fileSettingsDraft;
+	const publicationWait = deferred<void>();
+	const applying = vi.fn();
+	vi.spyOn(settingsStorage, "fileSettingsDraft").mockImplementationOnce(async (...args) => {
+		const loaded = await original(...args);
+		return { ...loaded, apply: async (value, signal) => {
+			applying();
+			await publicationWait.promise;
+			await loaded.apply(value, signal);
+		} };
+	});
+	const section = discoverSettingsSections(h.pi).find((section) => section.id === "sidebar")!;
+	const draft = await section.load(h.ctx as never);
+	const cancellation = new AbortController();
+	const pending = draft.apply({ visible: false, tab: "sandbox" }, cancellation.signal);
+	const rejected = expect(pending).rejects.toThrow("Cancelled Sidebar settings");
+	await vi.waitFor(() => expect(applying).toHaveBeenCalledOnce());
+	cancellation.abort(new Error("Cancelled Sidebar settings"));
+	publicationWait.resolve();
+	await rejected;
+	await expect(readFile(join(agentDir, "extensions/pi-sidebar/config.json"), "utf8")).rejects.toThrow();
+	expect(renderOverlayText(h)).toContain("[tools]");
+	await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+describe("extension registration", () => {
+	it("discovers quality check totals and ignores stale or foreign header updates", async () => {
+		const h = harness();
+		let discoveredCount = 7;
+		let discoveredRejections = 2;
+		h.pi.events.on("code-quality:activity:discover", () => {
+			h.pi.events.emit("code-quality:status", {
+				version: 1,
+				sessionId: "session-a",
+				revision: 4,
+				phase: "ready",
+				modelId: "test/reviewer",
+				checkCount: discoveredCount,
+				rejectionCount: discoveredRejections,
+			});
+		});
+		const renderedText = () => renderOverlayText(h).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+		await start(h);
+		expect(renderedText()).toContain("󰅴 quality · test/reviewer");
+		expect(renderedText()).toContain("󰚩 0 · 󰀄 0 · 󰅴 7 2✕");
+		h.pi.events.emit("code-quality:status", {
+			version: 1,
+			sessionId: "other",
+			revision: 5,
+			phase: "paused",
+			modelId: "test/wrong",
+			checkCount: 99,
+			rejectionCount: 99,
+		});
+		h.pi.events.emit("code-quality:status", {
+			version: 1,
+			sessionId: "session-a",
+			revision: 3,
+			phase: "disabled",
+			modelId: "test/stale",
+			checkCount: 99,
+			rejectionCount: 99,
+		});
+		expect(renderOverlayText(h)).toContain("󰅴 quality · test/reviewer");
+		expect(renderOverlayText(h)).not.toContain("test/wrong");
+		expect(renderOverlayText(h)).not.toContain("test/stale");
+		expect(renderedText()).toContain("󰚩 0 · 󰀄 0 · 󰅴 7 2✕");
+		h.pi.events.emit("code-quality:status", {
+			version: 1,
+			sessionId: "session-a",
+			revision: 5,
+			phase: "checking",
+			modelId: "test/reviewer",
+			checkCount: 8,
+			rejectionCount: 3,
+		});
+		expect(renderedText()).toContain("󰚩 0 · 󰀄 0 · 󰅴 8 3✕");
+		await h.handlers.get("agent_start")?.({}, h.ctx);
+		expect(renderedText()).toContain("󰚩 0 · 󰀄 0 · 󰅴 8 3✕");
+		discoveredCount = 2;
+		discoveredRejections = 1;
+		await h.handlers.get("session_tree")?.({}, h.ctx);
+		expect(renderedText()).toContain("󰚩 0 · 󰀄 0 · 󰅴 2 1✕");
+		await h.handlers.get("session_shutdown")?.({}, h.ctx);
+		expect(h.getEventBusHandlerCount("code-quality:status")).toBe(0);
+	});
+
+	it("attaches inline quality badges to the matching call and ignores stale or foreign events", async () => {
+		const h = harness();
+		await start(h);
+		await h.handlers.get("tool_execution_start")?.(
+			{ type: "tool_execution_start", toolCallId: "edit-a", toolName: "edit", args: { path: "a.ts" } },
+			h.ctx,
+		);
+		await h.handlers.get("tool_execution_end")?.(
+			{ type: "tool_execution_end", toolCallId: "edit-a", toolName: "edit", result: {}, isError: false },
+			h.ctx,
+		);
+		h.pi.events.emit("code-quality:activity", {
+			version: 1,
+			sessionId: "session-a",
+			toolCallId: "edit-a",
+			revision: 1,
+			phase: "checking",
+			reviewAttempt: 2,
+		});
+		const renderedText = () => renderOverlayText(h).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+		const checkingRow = renderedText()
+			.split("\n")
+			.find((line) => line.includes("a.ts"));
+		expect(checkingRow).toContain("󰅴 ?");
+		h.pi.events.emit("code-quality:activity", {
+			version: 1,
+			sessionId: "other",
+			toolCallId: "edit-a",
+			revision: 2,
+			phase: "approved",
+		});
+		expect(renderedText()).not.toContain("󰅴 ✓");
+		h.pi.events.emit("code-quality:activity", {
+			version: 1,
+			sessionId: "session-a",
+			toolCallId: "edit-a",
+			revision: 3,
+			phase: "approved",
+		});
+		h.pi.events.emit("code-quality:activity", {
+			version: 1,
+			sessionId: "session-a",
+			toolCallId: "edit-a",
+			revision: 2,
+			phase: "checking",
+		});
+		const approvedRow = renderedText()
+			.split("\n")
+			.find((line) => line.includes("a.ts"));
+		expect(approvedRow).toContain("󰅴 ✓");
+		expect(renderedText()).not.toContain("󰅴 ?");
+		await h.handlers.get("session_tree")?.({}, h.ctx);
+		expect(renderedText()).not.toContain("󰅴 ✓");
+		await h.handlers.get("session_shutdown")?.({}, h.ctx);
+		expect(h.getEventBusHandlerCount("code-quality:activity")).toBe(0);
+	});
+	it("discovers and renders a structured contributed panel through pi.events", async () => {
+		const h = harness();
+		await start(h);
+		h.pi.events.emit(SIDEBAR_PANEL_EVENT_CHANNEL, {
+			version: 1,
+			type: "register",
+			source: "vendor",
+			revision: 1,
+			panel: { id: "vendor:queue", title: "Queue", rows: ["queued 2"] },
+		});
+		await command(h, "on");
+		const rendered = h.overlays.at(-1)?.component.render(44).join("\\n") ?? "";
+		expect(rendered).not.toContain("QUEUE");
+		expect(rendered).not.toContain("queued 2");
+		const footer = renderFooter(h.setFooter.mock.calls[0]?.[0], vi.fn());
+		expect(footer.render(240).join("\n")).toContain("Queue");
+		expect(footer.render(240).join("\n")).toContain("queued 2");
+	});
+
+	it("renders Plannotator planning as a native panel and clears only its duplicate widget", async () => {
+		const h = harness();
+		h.ctx.sessionManager.getBranch.mockReturnValue([
+			{ type: "custom", customType: "plannotator", data: { phase: "planning", lastSubmittedPath: null } },
+		]);
+		await start(h);
+		const rendered = renderOverlayText(h);
+		expect(rendered).not.toContain("PLAN");
+		expect(rendered).not.toContain("Planning");
+		const footer = renderFooter(
+			h.setFooter.mock.calls[0]?.[0],
+			vi.fn(),
+			() => new Map([["plannotator", "⏸ plan"]]),
+		);
+		expect(footer.render(160).join("\n")).toContain("⏸ plan");
+		await vi.waitFor(() => expect(h.setWidget).toHaveBeenCalledWith("plannotator-progress", undefined));
+	});
+
+	it("registers the command, no shortcuts, and one footer in TUI mode", async () => {
+		const h = harness();
+		expect(h.commands.has("sidebar")).toBe(true);
+		await start(h);
+		expect(h.setFooter).toHaveBeenCalledTimes(1);
+		expect(h.shortcuts).toEqual([]);
+	});
+
+	it("does not install terminal UI outside TUI mode", async () => {
+		const h = harness("print");
+		await start(h);
+		expect(h.setFooter).not.toHaveBeenCalled();
+	});
+
+	it("retires active TUI state when a non-TUI session starts", async () => {
+		const h = harness("tui", "darwin");
+		await start(h);
+		expect(h.getEventBusHandlerCount(SIDEBAR_PANEL_EVENT_CHANNEL)).toBe(1);
+
+		const printContext = { ...replacementContext(h.ctx, "Print session"), mode: "print" as const };
+		await start(h, printContext);
+
+		expect(h.getEventBusHandlerCount(SIDEBAR_PANEL_EVENT_CHANNEL)).toBe(0);
+		expect(h.overlays[0]?.done).toHaveBeenCalledOnce();
+		expect(h.setFooter).toHaveBeenLastCalledWith(undefined);
+		await command(h, "on", h.ctx);
+		expect(h.ctx.ui.notify).toHaveBeenLastCalledWith("Sidebar is not active in this session", "warning");
+	});
+
+	it("clears the retired footer when a TUI session with a distinct UI replaces it", async () => {
+		const h = harness();
+		await start(h);
+		const replacementSetFooter = vi.fn();
+		const replacementNotify = vi.fn();
+		const replacementCtx = {
+			...replacementContext(h.ctx, "Distinct UI replacement"),
+			ui: {
+				...h.ctx.ui,
+				setFooter: replacementSetFooter,
+				notify: replacementNotify,
+			},
+		};
+
+		await start(h, replacementCtx);
+
+		expect(h.setFooter).toHaveBeenLastCalledWith(undefined);
+		expect(replacementSetFooter).toHaveBeenCalledOnce();
+		expect(replacementSetFooter).toHaveBeenLastCalledWith(expect.any(Function));
+		expect(replacementSetFooter).not.toHaveBeenCalledWith(undefined);
+		expect(h.overlays[0]?.done).toHaveBeenCalledOnce();
+		expect(renderOverlayText(h, 1)).toContain("READY · ┃ 󰄋 ┃");
+	});
+
+	it("keeps cleanup exception-safe when independent disposers throw", async () => {
+		const h = harness(
+			"tui",
+			"darwin",
+			false,
+			{},
+			{
+				throwOnEventUnsubscribe: [SIDEBAR_PANEL_EVENT_CHANNEL],
+			},
+		);
+		await start(h);
+		h.setFooter.mockImplementation((value) => {
+			if (value === undefined) throw new Error("footer cleanup failed");
+		});
+
+		await h.handlers.get("session_shutdown")?.({ reason: "quit" }, h.ctx);
+
+		expect(h.overlays[0]?.done).toHaveBeenCalledOnce();
+		await command(h, "on");
+		expect(h.ctx.ui.notify).toHaveBeenLastCalledWith("Sidebar is not active in this session", "warning");
+	});
+
+	it("does not read session history while rendering the activity sidebar", async () => {
+		const h = harness();
+		await start(h);
+		h.ctx.sessionManager.getBranch.mockImplementation(() => {
+			throw new Error("snapshot read failed");
+		});
+
+		const sidebar = renderOverlayText(h);
+		expect(sidebar).toContain("READY · ┃ 󰄋 ┃");
+		expect(sidebar).not.toContain("snapshot read failed");
+	});
+
+	it("starts enabled and toggles the persistent sidebar on -> off -> on", async () => {
+		const h = harness();
+		await start(h);
+		expect(h.overlays).toHaveLength(1);
+		expect(h.overlays[0]?.options).toMatchObject({
+			overlay: true,
+			overlayOptions: expect.any(Function),
+			onHandle: expect.any(Function),
+		});
+		expect(h.overlays[0]?.options.overlayOptions()).toMatchObject({ nonCapturing: true });
+		await command(h, "");
+		expect(h.overlays[0]?.done).toHaveBeenCalledOnce();
+		await command(h, "");
+		expect(h.custom).toHaveBeenCalledTimes(2);
+	});
+
+	it("supports idempotent sidebar on and off commands", async () => {
+		const h = harness();
+		await start(h);
+		await command(h, "on");
+		await command(h, "on");
+		expect(h.custom).toHaveBeenCalledOnce();
+		await command(h, "off");
+		await command(h, "off");
+		expect(h.overlays[0]?.done).toHaveBeenCalledOnce();
+	});
+
+	it("keeps Pi rendering untouched beneath the visible sidebar", async () => {
+		const h = harness();
+		await start(h);
+		await command(h, "on");
+
+		expect(h.overlays[0]?.options.overlayOptions()).toMatchObject({ width: 44 });
+		expect(h.overlays[0]?.tui.render(120)).toEqual(["main:120"]);
+
+		await command(h, "off");
+		expect(h.overlays[0]?.tui.render(120)).toEqual(["main:120"]);
+	});
+
+	it("closes an enabled sidebar during shutdown", async () => {
+		const h = harness();
+		await start(h);
+		await command(h, "on");
+
+		await h.handlers.get("session_shutdown")?.({ reason: "quit" }, h.ctx);
+
+		expect(h.overlays[0]?.done).toHaveBeenCalledOnce();
+		expect(h.setFooter).toHaveBeenLastCalledWith(undefined);
+		expect(h.terminalWrite).not.toHaveBeenCalled();
+		expect(h.terminalInput).toBeUndefined();
+	});
+
+	it("does not retain published state when initialization fails", async () => {
+		const h = harness("tui", "darwin");
+		await start(h);
+
+		const failingCtx = replacementContext(h.ctx, "Failing session");
+		const failedFooterRender = vi.fn();
+		h.setFooter.mockImplementation((footer) => {
+			if (typeof footer !== "function") return;
+			renderFooter(footer, failedFooterRender);
+			throw new Error("footer install failed");
+		});
+
+		await start(h, failingCtx);
+
+		expect(h.overlays[0]?.done).toHaveBeenCalledOnce();
+		expect(h.setFooter).toHaveBeenLastCalledWith(undefined);
+		expect(h.ctx.ui.notify).toHaveBeenCalledWith(
+			"Pi Atelier could not start: footer install failed",
+			"error",
+		);
+		// A failing initializer never opens a sidebar, so only the first session's overlay exists.
+		expect(h.overlays).toHaveLength(1);
+
+		failedFooterRender.mockClear();
+		await h.handlers.get("session_tree")?.({ type: "session_tree" }, failingCtx);
+		expect(failedFooterRender).not.toHaveBeenCalled();
+
+		const overlayCount = h.overlays.length;
+		await command(h, "on", failingCtx);
+		expect(h.overlays).toHaveLength(overlayCount);
+		expect(h.ctx.ui.notify).toHaveBeenLastCalledWith("Sidebar is not active in this session", "warning");
+	});
+
+	it("stops a scheduled workspace pulse refresh after shutdown", async () => {
+		vi.useFakeTimers();
+		try {
+			const h = harness();
+			await start(h);
+			const timersBeforeSchedule = vi.getTimerCount();
+			await h.handlers.get("tool_execution_end")?.(
+				{
+					type: "tool_execution_end",
+					toolCallId: "pulse-tool",
+					toolName: "write",
+					result: { output: "" },
+				},
+				h.ctx,
+			);
+			expect(vi.getTimerCount()).toBeGreaterThan(timersBeforeSchedule);
+			const execCallsBeforeShutdown = h.pi.exec.mock.calls.length;
+
+			await h.handlers.get("session_shutdown")?.({ reason: "quit" }, h.ctx);
+			expect(vi.getTimerCount()).toBeLessThanOrEqual(timersBeforeSchedule);
+			await vi.advanceTimersByTimeAsync(1_000);
+
+			expect(h.pi.exec.mock.calls.length).toBe(execCallsBeforeShutdown);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not publish an in-flight workspace pulse refresh after shutdown", async () => {
+		const active = harness();
+		queueWorkspacePulseInspection(active);
+		await start(active);
+		await waitForWorkspacePulseInspection(active);
+		// Positive control: a published pulse reaches the footer telemetry.
+		const footer = renderFooter(active.setFooter.mock.calls[0]?.[0], vi.fn());
+		expect(footer.render(160).join("\n")).toContain("stale-branch");
+		await active.handlers.get("session_shutdown")?.({ reason: "quit" }, active.ctx);
+		expect(active.overlays[0]?.done).toHaveBeenCalledOnce();
+
+		const discovery = deferred<ReturnType<typeof execResult>>();
+		const h = harness();
+		queueWorkspacePulseInspection(h, discovery.promise);
+		await start(h);
+		await vi.waitFor(() => expect(h.pi.exec).toHaveBeenCalledOnce());
+
+		await h.handlers.get("session_shutdown")?.({ reason: "quit" }, h.ctx);
+		h.overlays[0]?.requestRender.mockClear();
+		discovery.resolve(execResult("true\n/tmp/project\n"));
+		await waitForWorkspacePulseInspection(h);
+
+		expect(h.overlays[0]?.requestRender).not.toHaveBeenCalled();
+	});
+
+	it("disposes a mounted footer when setFooter removal throws", async () => {
+		const h = harness();
+		let mountedFooter: any;
+		const unsubscribe = vi.fn();
+		let branchChange: (() => void) | undefined;
+		h.setFooter.mockImplementation((value: unknown) => {
+			if (value === undefined) throw new Error("footer removal failed");
+			if (typeof value === "function") {
+				mountedFooter = value({ requestRender: vi.fn() }, FOOTER_THEME, {
+					getGitBranch: () => undefined,
+					getExtensionStatuses: () => new Map(),
+					onBranchChange: (callback: () => void) => {
+						branchChange = callback;
+						return unsubscribe;
+					},
+				});
+			}
+		});
+		await start(h);
+		mountedFooter.render(120);
+
+		await h.handlers.get("session_shutdown")?.({ reason: "quit" }, h.ctx);
+
+		expect(mountedFooter).toBeDefined();
+		expect(unsubscribe).toHaveBeenCalledOnce();
+		branchChange?.();
+		await h.handlers.get("session_shutdown")?.({ reason: "quit" }, h.ctx);
+		expect(unsubscribe).toHaveBeenCalledOnce();
+	});
+
+	it("detaches branch callbacks from a retired footer after removal fails", async () => {
+		const h = harness();
+		await start(h);
+		let branchChange: (() => void) | undefined;
+		const requestRender = vi.fn();
+		const factory = h.setFooter.mock.calls[0]?.[0];
+		expect(factory).toEqual(expect.any(Function));
+		const footer = factory({ requestRender }, FOOTER_THEME, {
+			getGitBranch: () => undefined,
+			getExtensionStatuses: () => new Map(),
+			onBranchChange: (callback: () => void) => {
+				branchChange = callback;
+				return () => undefined;
+			},
+		});
+		footer.render(120);
+		h.setFooter.mockImplementation((value: unknown) => {
+			if (value === undefined) throw new Error("footer removal failed");
+		});
+
+		await h.handlers.get("session_shutdown")?.({ reason: "quit" }, h.ctx);
+		branchChange?.();
+		expect(branchChange).toEqual(expect.any(Function));
+		expect(requestRender).not.toHaveBeenCalled();
+	});
+
+	it("stops reporting retired data from a footer that outlives its own removal", async () => {
+		const h = harness();
+		await start(h);
+		const footer = renderFooter(
+			h.setFooter.mock.calls[0]?.[0],
+			vi.fn(),
+			() => new Map([["one", "atelier index failed"]]),
+		);
+		expect(footer.render(240).join("\n")).toContain("atelier index failed");
+		// Pi disposes the mounted footer inside `setFooter`; if that throws, the old footer stays live.
+		h.setFooter.mockImplementation((value: unknown) => {
+			if (value === undefined) throw new Error("footer removal failed");
+		});
+		await h.handlers.get("session_shutdown")?.({ reason: "quit" }, h.ctx);
+
+		expect(() => footer.render(120)).not.toThrow();
+		expect(footer.render(120).join("\n")).not.toContain("atelier index failed");
+	});
+
+	it("closes the old sidebar and starts the replacement visible on session reload", async () => {
+		const h = harness();
+		await start(h);
+
+		await start(h);
+
+		expect(h.overlays[0]?.done).toHaveBeenCalledOnce();
+		expect(h.custom).toHaveBeenCalledTimes(2);
+		expect(h.overlays[1]?.done).not.toHaveBeenCalled();
+	});
+
+	it.each(["off", "on", "toggle"])("ignores stale session command: %s", async (args) => {
+		const h = harness();
+		const staleContext = h.ctx;
+		await start(h, staleContext);
+		const currentContext = replacementContext(h.ctx, "Replacement session");
+		await start(h, currentContext);
+		h.setFooter.mockClear();
+
+		await command(h, args, staleContext);
+
+		expect(h.overlays[1]?.done).not.toHaveBeenCalled();
+		expect(renderOverlayText(h, 1)).toContain("READY · ┃ 󰄋 ┃");
+		expect(h.setFooter).not.toHaveBeenCalled();
+		expect(staleContext.ui.notify).toHaveBeenLastCalledWith(
+			"Sidebar is not active in this session",
+			"warning",
+		);
+	});
+
+	it("reopens by default on reload after an explicit session-scoped close", async () => {
+		const h = harness();
+		await start(h);
+		await command(h, "off");
+		expect(h.overlays[0]?.done).toHaveBeenCalledOnce();
+
+		await start(h);
+
+		expect(h.custom).toHaveBeenCalledTimes(2);
+		expect(h.overlays[1]?.done).not.toHaveBeenCalled();
+	});
+
+	it("passes NO_COLOR through to sidebar rendering", async () => {
+		const h = harness();
+		vi.stubEnv("NO_COLOR", "1");
+		try {
+			await start(h);
+			await command(h, "on");
+			expect(h.overlays[0]?.component.render(44).join("\n")).not.toContain("\u001b[38;2;");
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
+
+	it("warns instead of opening the sidebar outside TUI mode", async () => {
+		const h = harness("print");
+		await command(h, "");
+		expect(h.custom).not.toHaveBeenCalled();
+		expect(h.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("TUI mode"), "warning");
+	});
+
+	it("invalidates the sidebar once per actual footer status change", async () => {
+		const h = harness();
+		await start(h);
+		await command(h, "on");
+		h.overlays[0]?.requestRender.mockClear();
+		let statuses = new Map([["one", "extension one"]]);
+		const footer = h.setFooter.mock.calls[0]?.[0](
+			{ requestRender: vi.fn() },
+			{
+				fg: (_color: string, text: string) => text,
+				bold: (text: string) => text,
+				italic: (text: string) => text,
+			},
+			{
+				getGitBranch: () => undefined,
+				getExtensionStatuses: () => statuses,
+				onBranchChange: () => () => undefined,
+			},
+		);
+		footer.render(120);
+		footer.render(120);
+		expect(h.overlays[0]?.requestRender).toHaveBeenCalledTimes(2);
+		statuses = new Map([["one", "extension two"]]);
+		footer.render(120);
+		expect(h.overlays[0]?.requestRender).toHaveBeenCalledTimes(4);
+	});
+
+	it("attaches correlated policy and auto decisions to their own tool rows", async () => {
+		const h = harness();
+		await start(h);
+		await command(h, "on");
+		await h.handlers.get("agent_start")?.({ type: "agent_start" }, h.ctx);
+		for (const [toolCallId, toolName, args, event] of [
+			[
+				"read-policy",
+				"read",
+				{ path: "/tmp/project/policy.ts" },
+				{
+					requestId: "policy-1",
+					toolCallId: "read-policy",
+					surface: "read",
+					value: "/tmp/project/policy.ts",
+					result: "allow",
+					resolution: "policy_allow",
+					decidedBy: { kind: "policy", pattern: "*" },
+				},
+			],
+			[
+				"bash-auto",
+				"bash",
+				{ command: "npm test" },
+				{
+					requestId: "auto-1",
+					toolCallId: "bash-auto",
+					surface: "bash",
+					value: "npm test",
+					result: "allow",
+					resolution: "auto_approved",
+					decidedBy: { kind: "auto", verdict: "allow" },
+				},
+			],
+		] as const) {
+			await h.handlers.get("tool_execution_start")?.(
+				{ type: "tool_execution_start", toolCallId, toolName, args },
+				h.ctx,
+			);
+			h.pi.events.emit("permissions:decision", event);
+		}
+		const rows = h.overlays[0]?.component.render(44).join("\n") ?? "";
+		const plain = rows.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+		expect(plain).toMatch(/read.+󰒃 ✓/);
+		expect(plain).toMatch(/bash.+󰚩 ✓/);
+		expect(plain).not.toContain("↳ 󰒃 ✓  read");
+	});
+
+	it("renders classifier and security requests as provenance chains to human outcomes", async () => {
+		const h = harness();
+		await start(h);
+		await command(h, "on");
+		await h.handlers.get("agent_start")?.({ type: "agent_start" }, h.ctx);
+		for (const item of [
+			{
+				requestId: "classifier-review",
+				toolCallId: "bash-review",
+				toolName: "bash",
+				args: { command: "curl https://unknown.example" },
+				mechanism: "model",
+				allowed: false,
+			},
+			{
+				requestId: "security-review",
+				toolCallId: "read-review",
+				toolName: "read",
+				args: { path: "/home/me/.ssh/id" },
+				mechanism: "guard",
+				allowed: true,
+			},
+		] as const) {
+			await h.handlers.get("tool_execution_start")?.(
+				{
+					type: "tool_execution_start",
+					toolCallId: item.toolCallId,
+					toolName: item.toolName,
+					args: item.args,
+				},
+				h.ctx,
+			);
+			h.pi.events.emit("auto-mode:decision", {
+				requestId: item.requestId,
+				toolCallId: item.toolCallId,
+				surface: item.toolName,
+				value: item.toolCallId,
+				mechanism: item.mechanism,
+				verdict: "require_human",
+				reason: "operator review required",
+				at: 1,
+			});
+			h.pi.events.emit("permissions:decision", {
+				requestId: item.requestId,
+				toolCallId: item.toolCallId,
+				surface: item.toolName,
+				value: item.toolCallId,
+				result: item.allowed ? "allow" : "deny",
+				resolution: item.allowed ? "user_approved" : "user_denied",
+				decidedBy: { kind: "human" },
+			});
+		}
+		const plain = (h.overlays[0]?.component.render(70).join("\n") ?? "").replace(
+			/\u001b\[[0-?]*[ -/]*[@-~]/g,
+			"",
+		);
+		expect(plain).toMatch(/bash.+󰒃 \? → 󰀄 ✕/);
+		expect(plain).toMatch(/read.+󰒃 \? → 󰀄 ✓/);
+	});
+
+	it("keeps all correlated decision sources on their tool rows across reload and timing", async () => {
+		const h = harness();
+		await start(h);
+		await command(h, "on");
+		await h.handlers.get("agent_start")?.({ type: "agent_start" }, h.ctx);
+		const cases = [
+			["policy-deny", "write", { path: "/tmp/project/deny.ts" }, "policy_deny", "policy", "deny"],
+			["auto-allow", "bash", { command: "npm test" }, "auto_approved", "auto", "allow"],
+			["auto-human", "bash", { command: "unknown" }, "user_denied", "human", "deny"],
+			["guard-human", "read", { path: "/home/me/.ssh/id" }, "user_denied", "human", "deny"],
+			["guard-approved", "bash", { command: "git push" }, "user_approved", "human", "allow"],
+			["skill-check", "skill", { name: "release" }, "policy_deny", "policy", "deny"],
+			["gate-error", "bash", { command: "broken" }, "gate_error", "gate_error", "deny"],
+		] as const;
+		for (const [index, [toolCallId, toolName, args, resolution, kind, result]] of cases.entries()) {
+			const event = {
+				requestId: `edge-${index}`,
+				toolCallId,
+				surface: toolName,
+				value: toolCallId,
+				result,
+				resolution,
+				decidedBy: kind === "auto" ? { kind, verdict: result } : { kind },
+			};
+			if (index % 2 === 0) h.pi.events.emit("permissions:decision", event);
+			await h.handlers.get("tool_execution_start")?.(
+				{ type: "tool_execution_start", toolCallId, toolName, args },
+				h.ctx,
+			);
+			if (index % 2 !== 0) h.pi.events.emit("permissions:decision", event);
+			await h.handlers.get("tool_execution_end")?.(
+				{ type: "tool_execution_end", toolCallId, toolName, args, result: { content: [], isError: false } },
+				h.ctx,
+			);
+		}
+		const beforeReload = (h.overlays.at(-1)?.component.render(70).join("\n") ?? "").replace(
+			/\u001b\[[0-?]*[ -/]*[@-~]/g,
+			"",
+		);
+		await h.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "reload" }, h.ctx);
+		await h.handlers.get("session_start")?.({ type: "session_start" }, h.ctx);
+		const reloaded = (h.overlays.at(-1)?.component.render(70).join("\n") ?? "").replace(
+			/\u001b\[[0-?]*[ -/]*[@-~]/g,
+			"",
+		);
+		for (const [, toolName] of cases) expect(beforeReload).toContain(toolName);
+		expect(beforeReload).not.toMatch(
+			/↳.*(policy-deny|auto-allow|auto-human|guard-human|guard-approved|skill-check|gate-error)/,
+		);
+		expect(reloaded).toContain("READY · ┃ 󰄋 ┃");
+	});
+
+	it("discovers and renders bounded progress-observer state through the event seam", async () => {
+		const h = harness();
+		await start(h);
+		expect(h.pi.events.emit).toHaveBeenCalledWith("progress-observer:discover", { version: 1 });
+		h.pi.events.emit("progress-observer:state", {
+			version: 1,
+			phase: "ready",
+			modelId: "litellm/luna",
+			summary: {
+				goal: "Ship progress UI",
+				progress: "Observer connected",
+				current: "Rendering the split",
+				next: "Run tests",
+				blockers: "None",
+			},
+		});
+		await command(h, "summary");
+		const text = renderOverlayText(h);
+		expect(text).not.toContain("PROGRESS");
+		expect(text).toContain("Ship progress UI");
+		expect(text).not.toContain("ACTIVITY");
+
+		h.pi.events.emit("progress-observer:state", { version: 2, phase: "ready", modelId: "bad" });
+		expect(renderOverlayText(h)).toContain("Ship progress UI");
+		await h.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, h.ctx);
+		expect(h.getEventBusHandlerCount("progress-observer:state")).toBe(0);
+	});
+
+	it("forwards run and turn events into sidebar activity without putting tool history in the footer", async () => {
+		const h = harness();
+		await start(h);
+		await command(h, "on");
+
+		expect(h.handlers.has("turn_start")).toBe(true);
+		expect(h.handlers.has("tool_execution_start")).toBe(true);
+		expect(h.handlers.has("tool_execution_end")).toBe(true);
+
+		await h.handlers.get("agent_start")?.({ type: "agent_start" }, h.ctx);
+		await h.handlers.get("turn_start")?.({ type: "turn_start", turnIndex: 2, timestamp: 1_000 }, h.ctx);
+		await h.handlers.get("tool_execution_start")?.(
+			{
+				type: "tool_execution_start",
+				toolCallId: "tool-1",
+				toolName: "bash",
+				args: { command: "npm test -- tests/extension.test.ts" },
+			},
+			h.ctx,
+		);
+
+		const sidebarText = h.overlays[0]?.component.render(44).join("\n") ?? "";
+		expect(sidebarText).not.toContain("ACTIVITY");
+		expect(sidebarText).toContain("Turn 3");
+		expect(sidebarText).toContain("bash");
+		expect(sidebarText).toContain("npm test");
+		expect(sidebarText).not.toContain("WORKING");
+		expect(h.overlays[0]?.requestRender.mock.calls.length).toBeGreaterThan(0);
+
+		const footer = h.setFooter.mock.calls[0]?.[0](
+			{ requestRender: vi.fn() },
+			{
+				fg: (_color: string, text: string) => text,
+				bold: (text: string) => text,
+				italic: (text: string) => text,
+			},
+			{
+				getGitBranch: () => undefined,
+				getExtensionStatuses: () => new Map(),
+				onBranchChange: () => () => undefined,
+			},
+		);
+		await command(h, "off");
+		const footerText = footer.render(160).join("\n");
+		expect(footerText).not.toContain("READY");
+		expect(footerText).not.toContain("bash");
+		expect(footerText).not.toContain("npm test");
+	});
+
+	it("measures TTFT from provider dispatch and final TPS from streamed generation", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(1_000);
+		try {
+			const h = harness();
+			await start(h);
+			await command(h, "on");
+			await h.handlers.get("agent_start")?.({ type: "agent_start" }, h.ctx);
+
+			vi.setSystemTime(1_100);
+			await h.handlers.get("before_provider_request")?.(
+				{ type: "before_provider_request", payload: {} },
+				h.ctx,
+			);
+			vi.setSystemTime(1_920);
+			await h.handlers.get("message_update")?.(
+				{
+					type: "message_update",
+					message: { role: "assistant", content: [{ type: "thinking", thinking: "token" }] },
+					assistantMessageEvent: { type: "thinking_delta", delta: "token" },
+				},
+				h.ctx,
+			);
+
+			const streamingText = h.overlays[0]?.component.render(44).join("\n") ?? "";
+			expect(streamingText).toMatch(/󰔛.*820ms.*RUNNING.*~.*󰓅/);
+
+			vi.setSystemTime(2_920);
+			await h.handlers.get("message_update")?.(
+				{
+					type: "message_update",
+					message: { role: "assistant", content: [{ type: "text", text: "x".repeat(80) }] },
+					assistantMessageEvent: { type: "text_delta", delta: "more output" },
+				},
+				h.ctx,
+			);
+			const estimatedText = h.overlays[0]?.component.render(44).join("\n") ?? "";
+			expect(estimatedText).toMatch(/󰔛.*820ms.*RUNNING.*~20\.0.*󰓅/);
+
+			vi.setSystemTime(4_420);
+			await h.handlers.get("message_end")?.(
+				{
+					type: "message_end",
+					message: { role: "assistant", usage: { output: 120 } },
+				},
+				h.ctx,
+			);
+
+			const completedText = h.overlays[0]?.component.render(44).join("\n") ?? "";
+			expect(completedText).toMatch(/󰔛.*820ms.*RUNNING.*48\.0.*󰓅/);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("coalesces a Turn-start Workspace Pulse refresh for 250ms", async () => {
+		vi.useFakeTimers();
+		try {
+			const h = harness();
+			await start(h);
+			const inspectionsAfterStart = h.pi.exec.mock.calls.length;
+
+			await h.handlers.get("turn_start")?.({ type: "turn_start", turnIndex: 0 }, h.ctx);
+			await vi.advanceTimersByTimeAsync(249);
+			expect(h.pi.exec).toHaveBeenCalledTimes(inspectionsAfterStart);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(h.pi.exec).toHaveBeenCalledTimes(inspectionsAfterStart + 1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("flushes a fresh Workspace Pulse at Turn end without leaving a scheduled duplicate", async () => {
+		vi.useFakeTimers();
+		try {
+			const h = harness();
+			await start(h);
+			const inspectionsAfterStart = h.pi.exec.mock.calls.length;
+
+			await h.handlers.get("turn_start")?.({ type: "turn_start", turnIndex: 0 }, h.ctx);
+			await h.handlers.get("turn_end")?.({ type: "turn_end" }, h.ctx);
+			expect(h.pi.exec).toHaveBeenCalledTimes(inspectionsAfterStart + 1);
+
+			await vi.advanceTimersByTimeAsync(1_000);
+			expect(h.pi.exec).toHaveBeenCalledTimes(inspectionsAfterStart + 1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("coalesces rapid tool completions into one Workspace Pulse refresh", async () => {
+		vi.useFakeTimers();
+		try {
+			const h = harness();
+			await start(h);
+			const inspectionsAfterStart = h.pi.exec.mock.calls.length;
+
+			for (const toolCallId of ["one", "two", "three"]) {
+				await h.handlers.get("tool_execution_end")?.(
+					{
+						type: "tool_execution_end",
+						toolCallId,
+						toolName: "write",
+						result: { content: [] },
+						isError: false,
+					},
+					h.ctx,
+				);
+			}
+
+			await vi.advanceTimersByTimeAsync(249);
+			expect(h.pi.exec).toHaveBeenCalledTimes(inspectionsAfterStart);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(h.pi.exec).toHaveBeenCalledTimes(inspectionsAfterStart + 1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("updates recent tool results and settles the sidebar without continuing animation", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(1_000);
+		try {
+			const h = harness();
+			await start(h);
+			await command(h, "on");
+
+			await h.handlers.get("agent_start")?.({ type: "agent_start" }, h.ctx);
+			await h.handlers.get("tool_execution_start")?.(
+				{
+					type: "tool_execution_start",
+					toolCallId: "read-1",
+					toolName: "read",
+					args: { path: "/tmp/project/src/run-activity.ts" },
+				},
+				h.ctx,
+			);
+			vi.setSystemTime(2_500);
+			await h.handlers.get("tool_execution_end")?.(
+				{
+					type: "tool_execution_end",
+					toolCallId: "read-1",
+					toolName: "read",
+					result: { content: [] },
+					isError: false,
+				},
+				h.ctx,
+			);
+
+			const withResult = h.overlays[0]?.component.render(44).join("\n") ?? "";
+			expect(withResult).toContain("read");
+			expect(withResult).toContain("src/run-activity.ts");
+			expect(withResult).toContain("done 1s");
+			expect(withResult.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")).toContain("1✓ · 0✕");
+
+			const rendersBeforeTick = h.overlays[0]?.requestRender.mock.calls.length ?? 0;
+			vi.advanceTimersByTime(1_000);
+			expect(h.overlays[0]?.requestRender.mock.calls.length).toBeGreaterThan(rendersBeforeTick);
+
+			vi.setSystemTime(4_000);
+			await h.handlers.get("agent_settled")?.({ type: "agent_settled" }, h.ctx);
+			const settledRenderCount = h.overlays[0]?.requestRender.mock.calls.length ?? 0;
+			const settledText = h.overlays[0]?.component.render(44).join("\n") ?? "";
+			expect(settledText).toContain("FINISH · 3s");
+			expect(settledText).not.toContain("settled 3s");
+			expect(settledText).not.toContain("WORKING");
+
+			vi.advanceTimersByTime(3_000);
+			expect(h.overlays[0]?.requestRender.mock.calls.length).toBe(settledRenderCount);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("clears run activity across session reload and shutdown", async () => {
+		const h = harness();
+		await start(h);
+		await command(h, "on");
+		await h.handlers.get("agent_start")?.({ type: "agent_start" }, h.ctx);
+		await h.handlers.get("turn_start")?.({ type: "turn_start", turnIndex: 5, timestamp: 1_000 }, h.ctx);
+		await h.handlers.get("tool_execution_start")?.(
+			{
+				type: "tool_execution_start",
+				toolCallId: "old-tool",
+				toolName: "read",
+				args: { path: "/tmp/project/old.ts" },
+			},
+			h.ctx,
+		);
+		expect(h.overlays[0]?.component.render(44).join("\n")).toContain("old.ts");
+
+		await start(h);
+		expect(h.overlays[0]?.done).toHaveBeenCalledOnce();
+		await command(h, "on");
+		const replacementText = h.overlays[1]?.component.render(44).join("\n") ?? "";
+		expect(replacementText).toContain("READY · ┃ 󰄋 ┃");
+		expect(replacementText).toMatch(/󰔛.*READY · ┃ 󰄋 ┃.*󰓅/);
+		expect(replacementText).not.toContain("old.ts");
+
+		const replacementRenderCount = h.overlays[1]?.requestRender.mock.calls.length ?? 0;
+		await h.handlers.get("tool_execution_end")?.(
+			{
+				type: "tool_execution_end",
+				toolCallId: "old-tool",
+				toolName: "read",
+				result: { content: [] },
+				isError: false,
+			},
+			h.ctx,
+		);
+		expect(h.overlays[1]?.requestRender.mock.calls.length).toBe(replacementRenderCount);
+		expect(h.overlays[1]?.component.render(44).join("\n")).not.toContain("old.ts");
+
+		await h.handlers.get("session_shutdown")?.({ reason: "quit" }, h.ctx);
+		expect(h.overlays[1]?.done).toHaveBeenCalledOnce();
+		const shutdownRenderCount = h.overlays[1]?.requestRender.mock.calls.length ?? 0;
+		await h.handlers.get("agent_start")?.({ type: "agent_start" }, h.ctx);
+		expect(h.overlays[1]?.requestRender.mock.calls.length).toBe(shutdownRenderCount);
+	});
+
+	it("accepts fresh Pi event contexts for the active session", async () => {
+		const h = harness();
+		await start(h);
+		await command(h, "on");
+		const eventCtx = { ...h.ctx };
+
+		await h.handlers.get("agent_start")?.({ type: "agent_start" }, eventCtx);
+		await h.handlers.get("turn_start")?.({ type: "turn_start", turnIndex: 0, timestamp: 1_000 }, eventCtx);
+
+		const text = h.overlays[0]?.component.render(44).join("\n") ?? "";
+		expect(text).not.toContain("WORKING");
+		expect(text).not.toContain("ACTIVITY");
+		expect(text).toContain("Turn 1");
+	});
+
+	it("ignores stale activity events after a replacement session becomes active", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(1_000);
+		try {
+			const h = harness();
+			const oldCtx = h.ctx;
+			const currentCtx = replacementContext(h.ctx, "Replacement session");
+			await start(h, oldCtx);
+			await command(h, "on", oldCtx);
+
+			await start(h, currentCtx);
+			expect(h.overlays[0]?.done).toHaveBeenCalledOnce();
+			await command(h, "on", currentCtx);
+
+			await h.handlers.get("agent_start")?.({ type: "agent_start" }, currentCtx);
+			await h.handlers.get("turn_start")?.(
+				{ type: "turn_start", turnIndex: 6, timestamp: 1_000 },
+				currentCtx,
+			);
+			await h.handlers.get("tool_execution_start")?.(
+				{
+					type: "tool_execution_start",
+					toolCallId: "current-tool",
+					toolName: "bash",
+					args: { command: "npm run current" },
+				},
+				currentCtx,
+			);
+
+			const activeRenderCount = h.overlays[1]?.requestRender.mock.calls.length ?? 0;
+			const activeText = h.overlays[1]?.component.render(44).join("\n") ?? "";
+			expect(activeText).not.toContain("Replacement session");
+			expect(activeText).not.toContain("ACTIVITY");
+			expect(activeText).toContain("Turn 7");
+			expect(activeText).toContain("bash");
+			expect(activeText).toContain("npm run current");
+			expect(activeText).not.toContain("WORKING");
+
+			await h.handlers.get("agent_start")?.({ type: "agent_start" }, oldCtx);
+			await h.handlers.get("tool_execution_start")?.(
+				{
+					type: "tool_execution_start",
+					toolCallId: "stale-tool",
+					toolName: "read",
+					args: { path: "/tmp/project/stale.ts" },
+				},
+				oldCtx,
+			);
+			await h.handlers.get("agent_settled")?.({ type: "agent_settled" }, oldCtx);
+
+			expect(h.overlays[1]?.requestRender.mock.calls.length).toBe(activeRenderCount);
+			expect(h.overlays[1]?.component.render(44).join("\n")).toBe(activeText);
+			expect(h.overlays[1]?.component.render(44).join("\n")).not.toContain("stale.ts");
+
+			await h.handlers.get("tool_execution_end")?.(
+				{
+					type: "tool_execution_end",
+					toolCallId: "current-tool",
+					toolName: "bash",
+					result: { stdout: "" },
+					isError: false,
+				},
+				currentCtx,
+			);
+			await h.handlers.get("agent_settled")?.({ type: "agent_settled" }, currentCtx);
+
+			expect(h.overlays[1]?.requestRender.mock.calls.length).toBeGreaterThan(activeRenderCount);
+			const settledText = h.overlays[1]?.component.render(44).join("\n") ?? "";
+			expect(settledText).toContain("FINISH · <1s");
+			expect(settledText).not.toContain("Turn 7");
+			expect(settledText).not.toContain("settled");
+			expect(settledText).toContain("done");
+			expect(settledText).not.toContain("WORKING");
+			expect(settledText).not.toContain("stale.ts");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});

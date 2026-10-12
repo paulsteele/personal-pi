@@ -37,6 +37,15 @@ export class AccessPath {
     );
   }
 
+  static forGuestPath(
+    pathValue: string,
+    options: { cwd: string; resolveBase?: string },
+  ): AccessPath {
+    const resolveBase = options.resolveBase ?? options.cwd;
+    const guestPath = pathValue.startsWith("/") ? pathValue : `${resolveBase}/${pathValue}`;
+    return new AccessPath(guestPath, [guestPath, pathValue], "");
+  }
+
   static forLiteral(literal: string): AccessPath {
     return literal ? new AccessPath(literal, [literal], "") : new AccessPath("", [], "");
   }

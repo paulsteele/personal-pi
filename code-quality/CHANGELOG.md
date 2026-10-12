@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.0.0 — 2026-10-12
+
+- Remove tests tied to private host-installed language servers and nested Podman containers, along with their compatibility launch command. Retain the historical probe observations and container-runnable protocol, client, lifecycle, and real-Pi regressions.
+
+- Contribute Code Quality and Language Server settings menus with section-wide Apply, runtime updates, and existing pending-case waiver/LSP validation checks.
+
+- Infer language-server routes automatically in trusted projects without a saved profile. Use the sandbox's provisioned executable inventory, start relevant servers on demand, and retain explicit project overrides and quality-off controls.
+- Remove software installation and image rebuilds from LSP setup. Keep setup as an optional override editor and allow status/doctor/on/off commands without an existing profile.
+
+- Load saved LSP profiles across reloads even when the master quality gate is off. Report enabled-but-suspended profiles explicitly and keep automatic servers/checks stopped until `/quality on`, without changing the profile's enabled flag.
+
+- Handle LSP connection closure before cancelling pending requests, avoiding JSON-RPC callbacks that print `Connection is closed` directly over the terminal UI. Preserve failure status and graceful shutdown without global console suppression.
+
+- Capture and review guest-accessible edits asynchronously, including approved external mounts without repository-membership authorization.
+- Run language-server setup and analysis inside the session devcontainer, reusing diagnostic behavior and retiring servers with the container. Preserve independent host reviewer and private case metadata.
+- Restore the detected-language checklist in container LSP setup with guest-only Git/directory discovery, inferred workspace roots and C# project choices, and one validate-and-enable flow. Preserve pending overrides and existing selections; warn on discovery limits.
+- Attach the current sandbox during LSP setup validation even when quality startup was skipped or previously unavailable; reconnect validation clients after container recreation.
+- Disable host-PID monitoring for container language servers so Pyright does not exit when the Pi PID is absent from its namespace. Report startup exit codes and stderr, and clean up failed validation launches before retry.
+- Start enabled container servers after profile loading instead of leaving them connecting until the first edit. Confirm successful setup with current server status and retain startup failure reasons in `/quality lsp status`.
+- Propose pinned LSP installations as image-build layers in the active devcontainer definition. Preview and approve definition/recipe changes before rebuilding and validating; retain route overrides and persist the new definition revision for reload/resume.
+
 ## 1.5.6 — 2026-10-02
 
 - Fix standalone LSP broker startup in Git-installed packages by separating path and snapshot-hash utilities from host-provided Pi and TypeBox imports.

@@ -6,11 +6,19 @@ import {
 	resolveLspProject,
 	saveLspDraft,
 	type LspProject,
+	type LspRoute,
 } from "./lsp-profile.js";
+import type { StoredLspProfile } from "./lsp-profile.js";
 import { setupLsp, type LspSetupPorts } from "./lsp-setup.js";
 
 export interface LspCommandPorts extends LspSetupPorts {
+	setup?(
+		mode: "setup" | "edit" | "approve",
+		project: LspProject,
+		signal: AbortSignal,
+	): Promise<StoredLspProfile | undefined>;
 	status(project: LspProject): string;
+	effectiveRoutes?(): LspRoute[];
 	restart(serverId: string | undefined, signal: AbortSignal): Promise<void>;
 	reload(signal: AbortSignal): Promise<void>;
 	hasPendingCase(): boolean;
@@ -39,8 +47,18 @@ export async function handleLspCommand(
 		if (argument && !["edit", "approve"].includes(argument))
 			throw new Error("Usage: /quality lsp setup [edit|approve]");
 		const setupMode = argument === "edit" || argument === "approve" ? argument : "setup";
-		const approved = await setupLsp(ctx, agentDir, project, setupMode, ports, signal);
-		if (approved) await ports.reload(signal);
+		const approved = ports.setup
+			? await ports.setup(setupMode, project, signal)
+			: await setupLsp(ctx, agentDir, project, setupMode, ports, signal);
+		if (approved) {
+			await ports.reload(signal);
+			ctx.ui.notify(
+				approved.profile.enabled
+					? `LSP setup approved.\n${ports.status(project)}`
+					: "LSP setup approved; checking is disabled.",
+				"info",
+			);
+		}
 		return;
 	}
 	if (action === "restart") {
@@ -56,11 +74,21 @@ export async function handleLspCommand(
 		return;
 	}
 	const active = await loadLspProfile(agentDir, project);
-	if (!active) throw new Error("No LSP profile; run /quality lsp setup");
 	if (action === "doctor") {
 		if (!ctx.isProjectTrusted()) throw new Error("Trust this project before validating its language servers");
-		const routes = active.profile.routes.filter((route) => !argument || route.id === argument);
-		if (!routes.length) throw new Error(`Unknown configured server: ${argument}`);
+		const routes = (ports.effectiveRoutes?.() ?? active?.profile.routes ?? []).filter(
+			(route) => !argument || route.id === argument,
+		);
+		if (!routes.length) {
+			if (argument) {
+				throw new Error(`Unknown active server: ${argument}`);
+			}
+			ctx.ui.notify(
+				"Automatic LSPs start when supported files are checked; no active routes to validate yet.",
+				"info",
+			);
+			return;
+		}
 		for (const route of routes) {
 			const result = await ports.validate(route, project, signal);
 			if (!result.ready) {
@@ -78,14 +106,18 @@ export async function handleLspCommand(
 		if (!(await ctx.ui.confirm("Change project LSP checking?", message, { signal }))) return;
 		const draft = await loadLspDraft(agentDir, project);
 		const hasEditedDraft =
-			draft !== undefined && JSON.stringify(draft.draft.profile) !== JSON.stringify(active.profile);
+			draft !== undefined && JSON.stringify(draft.draft.profile) !== JSON.stringify(active?.profile);
 		if (hasEditedDraft)
 			throw new Error("An edited LSP draft is pending; approve or discard it before changing enabled state");
+		const initialProfile = { version: 1 as const, projectId: project.id, mode: "auto" as const, routes: [] };
 		await saveLspDraft(
 			agentDir,
 			project,
-			{ ...active.profile, enabled: action === "on" },
-			active.revision,
+			{
+				...(active?.profile ?? initialProfile),
+				enabled: action === "on",
+			},
+			active?.revision ?? null,
 			draft?.revision ?? null,
 		);
 		await approveLspDraft(agentDir, project, (await loadLspDraft(agentDir, project))!.revision);

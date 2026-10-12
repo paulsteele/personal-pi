@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.0.0 — 2026-10-12
+
+- Run Pi compatibility checks against the project's declared dependency without private host paths or skipped setup. Remove installed-Plannotator-only tests and their manual browser launcher; retain fixture-based viewer and handoff coverage.
+
+- Route logical review/setup workers through dedicated read-only containers with persistent path probes rather than per-source Podman exec. Await task/operation cleanup and retain independent source checks; host output/capture uses bounded batches with full revision-change rechecks.
+
+- Show final parent-output authorization as a distinct live task with source-check counts, current path, and pass number. Finish journal publication and snapshot cleanup before final source validation and honor cancellation even when a permission port leaves its check pending.
+
+- Keep the review dashboard open and `/pr status` reopenable between work phases. Suspend only for actual permission or specialist-selection UI rather than treating all between-phase preparation as approval.
+
+- Publish source-capture scan/copy/diff/validation progress and current source counts in the dashboard/journal instead of an undifferentiated running phase.
+
+- Share the dashboard frame and overlay presenter with plugin settings. Contribute independent reviewer/runtime settings and repository setup actions without changing active-review configuration or approvals.
+
+- Reuse shared worktree-aware project identities without changing existing private profile paths.
+- Require approved sandbox mappings for host repository/common-directory capture, retaining immutable read-only review and exact-result retrieval.
+
 ## 1.5.5 — 2026-10-02
 
 - Test against Pi 1.0.0 with wildcard host-package peer ranges. Keep `pr_review` model-only so codemode and other tools cannot invoke its interactive review workflow.

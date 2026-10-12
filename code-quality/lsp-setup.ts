@@ -12,10 +12,11 @@ import {
 	presetRoute,
 	type LspPresetDefinition,
 } from "./lsp-presets.js";
-import { selectLspLanguages, type LspLanguageChoice } from "./lsp-setup-ui.js";
+import { selectLspLanguages } from "./lsp-setup-ui.js";
 import {
 	chooseCsharpProject,
 	chooseWorkspaceRoot,
+	languageChoices,
 	nextRouteId,
 	WORKSPACE_MARKERS,
 } from "./lsp-setup-defaults.js";
@@ -290,37 +291,6 @@ async function chooseAdvancedRoute(
 	return route;
 }
 
-function languageChoices(files: string[], profile: LspProfile) {
-	const configured = new Set(profile.routes.map((route) => route.preset));
-	const choices: LspLanguageChoice[] = LSP_PRESETS.flatMap((preset) => {
-		const detected = files.some((file) =>
-			Object.keys(preset.extensions).some((extension) => file.endsWith(extension)),
-		);
-		if (!detected && !configured.has(preset.id)) {
-			return [];
-		}
-		const isConfigured = configured.has(preset.id);
-		const selectedByDefault = isConfigured || profile.routes.length === 0;
-		return [
-			{
-				id: preset.id,
-				label: preset.label,
-				description: isConfigured ? "Keep existing configuration" : "Detected in this project",
-				selected: selectedByDefault,
-			},
-		];
-	});
-	if (configured.has("custom")) {
-		choices.push({
-			id: "custom",
-			label: "Custom servers",
-			description: "Keep existing custom configurations",
-			selected: true,
-		});
-	}
-	return choices;
-}
-
 async function configureDetectedServer(
 	ctx: ExtensionContext,
 	project: LspProject,
@@ -365,7 +335,11 @@ export async function approveLspSetup(
 	project: LspProject,
 	ports: LspSetupPorts,
 	signal: AbortSignal,
-	options: { showDetails?: boolean } = {},
+	options: {
+		showDetails?: boolean;
+		additionalPreview?: string;
+		beforeValidation?: () => Promise<void>;
+	} = {},
 ): Promise<StoredLspProfile | undefined> {
 	const pending = await loadLspDraft(agentDir, project);
 	if (!pending) throw new Error("No LSP draft. Run /quality lsp setup first.");
@@ -384,10 +358,15 @@ export async function approveLspSetup(
 		pending.draft.profile.enabled
 			? "Validate and enable LSP checking?"
 			: "Validate and save disabled LSP configuration?",
-		`${summary || "No languages selected; LSP checking will be disabled."}\n\n${pending.draft.profile.enabled ? "Enable automatic checks after validation succeeds. All diagnostic severities enter the quality correction flow." : "Save this configuration with automatic LSP checking disabled."}\nServers can read dependencies, run analyzers/build tooling, and write caches. No formatting or server-requested edits will be applied.`,
+		`${summary || "No languages selected; LSP checking will be disabled."}\n\n${options.additionalPreview ?? ""}\n\n${pending.draft.profile.enabled ? "Enable automatic checks after validation succeeds. All diagnostic severities enter the quality correction flow." : "Save this configuration with automatic LSP checking disabled."}\nServers can read dependencies, run analyzers/build tooling, and write caches. No formatting or server-requested edits will be applied.`,
 		{ signal },
 	);
-	if (!consent) return undefined;
+	if (!consent) {
+		return undefined;
+	}
+	if (options.beforeValidation) {
+		await options.beforeValidation();
+	}
 	for (const route of pending.draft.profile.routes) {
 		ports.progress(`Validating ${route.id}`);
 		const validation = await ports.validate(route, project, signal);

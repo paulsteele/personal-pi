@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SYSTEM_PROMPT } from "#src/auto/classifier.ts";
-import permissionSystem from "#src/index.ts";
+import permissionSystem from "#src/permission-system.ts";
 import { REVIEW_SERVICE_CHANNEL, type DelegatedReviewService } from "#src/delegated-review.ts";
 
 type Handler = (event: any, ctx: any) => unknown;
@@ -1613,7 +1613,7 @@ describe("integrated permission system", () => {
     await task.check(action);
     await task.check(action);
     expect(h.ctx.modelRegistry.complete).toHaveBeenCalledTimes(2);
-    operation.close();
+    await operation.close();
     rmSync(join(h.agentDir, "extensions/pi-permission-system/config.json"));
     expect(() => service.open(options)).toThrow("config");
     rmSync(h.agentDir, { recursive: true, force: true });

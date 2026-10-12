@@ -3,7 +3,6 @@ import { relative } from "node:path";
 import { generateUnifiedPatch } from "@earendil-works/pi-coding-agent";
 import type { QualityConfig } from "./config.js";
 import type { ReviewFile } from "./proposal.js";
-import { canonicalPath, inside } from "./paths.js";
 
 export { canonicalPath, inside } from "./paths.js";
 
@@ -26,14 +25,7 @@ export function containsSecrets(text: string): boolean {
 		text,
 	);
 }
-export function readSnapshot(
-	path: string,
-	config: QualityConfig,
-	cwd: string,
-	authorized = false,
-): string | null {
-	if (!authorized && !inside(canonicalPath(cwd), path))
-		throw new CoverageError(path, "external", "Path is outside the workspace");
+export function readSnapshot(path: string, config: QualityConfig, authorized = false): string | null {
 	if (!authorized && sensitivePath(path))
 		throw new CoverageError(
 			path,

@@ -1,6 +1,14 @@
-# LSP compatibility probes
+# Historical LSP compatibility observations
 
-## Verified environment
+## Layered sandbox verification status
+
+The layered implementation has deterministic tests for private profile composition, independent artifact caching across different bases, linked-copy recipe generation, staged project-tool publication, automatic routing without an LSP profile, and existing-profile compatibility. The code-quality unit suite and workspace typechecks pass in the development container.
+
+Real Debian/Ubuntu/Alpine builds and the ARM64/x86-64 matrix are **not yet verified**. The development container's Podman client cannot start a nested engine (`uid_map: operation not permitted`). Do not treat pinned download availability or generated recipes as runtime compatibility evidence.
+
+Repository tests run in the supported Podman devcontainer and require neither a nested engine nor private host-installed servers. They exercise configuration, image recipes, caching, native/Python transport, LSP protocol, and lifecycle behavior using explicit fixtures. The observations below record earlier macOS experiments; they do not certify the current Linux image matrix.
+
+## Historical probe environment
 
 2026-09-28–29: macOS arm64, Node 26.8.1, .NET SDK 10.0.102. Private Go 1.27.1 and Rust 1.98.1 toolchains were installed with explicit operator approval. No project LSP profile was activated.
 
@@ -50,7 +58,7 @@ These tiny-fixture measurements include file synchronization and diagnostic coll
 
 ## Integrated verification
 
-The production diagnostics client passed all five real-server broken/non-error/clean scenarios. The full protocol sequences and production-client tests run together as ten opt-in tests. gopls 0.23.0 returns an empty `kind` discriminator for full reports; the adapter accepts that shape only for the gopls preset.
+The diagnostics client passed all five real-server broken/non-error/clean scenarios during the historical probe run. Those host-installation-dependent tests have been removed from the current suite. gopls 0.23.0 returned an empty `kind` discriminator for full reports; the adapter accepts that shape only for the gopls preset.
 
 Deterministic tests cover all severities in the shared correction gate, missing coverage after a pending check, restored cases/counters, LSP-only waivers, no-proposal arbitration, and fresh checks after an approved readability patch. A real Pi session verifies that a warning appears in the successful write result, the agent fixes it, and only then the readability reviewer runs.
 
@@ -58,15 +66,14 @@ Broker tests cover simultaneous attachment, stale hash rejection, shared cancell
 
 An automated pseudoterminal smoke run started two actual fullscreen Pi processes with Atelier and an isolated fake-server profile. Both showed the same shared server with `×2`; closing the first left the second usable. Status, reload, and final shutdown completed without logged extension errors. No broker, guard, server, or build-host processes remained. This was an automated terminal run, not a human visual inspection.
 
-## Running the probes
+## Running current verification
 
 ```sh
 bun run --cwd code-quality test
 bun run --cwd code-quality typecheck
-bun run --cwd code-quality test:lsp-compatibility
 bun run --cwd code-quality test:lsp-tui
 ```
 
-Normal tests skip real-server execution. `test:lsp-compatibility` explicitly enables it and expects the approved private tool layout in `lsp-compatibility.test.ts`; `QUALITY_LSP_TOOL_ROOT` overrides the base directory. It never installs servers. Fixtures and raw traces are retained under the private Pi quality compatibility directory for inspection.
+Current tests use local synthetic servers and explicit engine fixtures; none require nested container creation or the historical private SDK paths. The current TUI smoke checks two Pi processes with Sidebar and an unavailable mandatory sandbox, including reload and shutdown. It does not repeat the historical shared-host-server experiment. It requires Python 3 and the project Pi executable and retains temporary terminal/event logs for inspection.
 
-The real-server and TUI runs were performed on macOS arm64 only. Linux/WSL validation, large/multi-target solutions, third-party analyzers, production contention benchmarks, and arbitrary custom servers remain unverified. The TUI smoke command requires Python 3 and a `pi` executable and retains temporary terminal/event logs for inspection. Custom servers must supply reliable pull diagnostics; push-only custom servers are refused rather than accepted after a silence timeout.
+The historical real-server runs were performed on macOS arm64 only. Linux image compatibility, large/multi-target solutions, third-party analyzers, production contention benchmarks, and arbitrary custom servers remain unverified. Removing unsupported tests does not turn those observations into current compatibility evidence. Custom servers must supply reliable pull diagnostics; push-only custom servers are refused rather than accepted after a silence timeout.

@@ -1,8 +1,39 @@
 import { dirname, relative, resolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { inside } from "./capture.js";
-import type { LspPresetDefinition } from "./lsp-presets.js";
-import type { LspProject } from "./lsp-profile.js";
+import { LSP_PRESETS, type LspPresetDefinition } from "./lsp-presets.js";
+import type { LspProfile, LspProject } from "./lsp-profile.js";
+import type { LspLanguageChoice } from "./lsp-setup-ui.js";
+
+export function languageChoices(files: string[], profile: LspProfile): LspLanguageChoice[] {
+	const configured = new Set(profile.routes.map((route) => route.preset));
+	const choices: LspLanguageChoice[] = LSP_PRESETS.flatMap((preset) => {
+		const detected = files.some((file) =>
+			Object.keys(preset.extensions).some((extension) => file.endsWith(extension)),
+		);
+		if (!detected && !configured.has(preset.id)) {
+			return [];
+		}
+		const isConfigured = configured.has(preset.id);
+		return [
+			{
+				id: preset.id,
+				label: preset.label,
+				description: isConfigured ? "Keep existing configuration" : "Detected in this project",
+				selected: isConfigured || profile.routes.length === 0,
+			},
+		];
+	});
+	if (configured.has("custom")) {
+		choices.push({
+			id: "custom",
+			label: "Custom servers",
+			description: "Keep existing custom configurations",
+			selected: true,
+		});
+	}
+	return choices;
+}
 
 export const WORKSPACE_MARKERS: Record<LspPresetDefinition["id"], readonly string[]> = {
 	roslyn: [],

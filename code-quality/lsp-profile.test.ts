@@ -13,6 +13,7 @@ import {
 	parseLspProfile,
 	resolveLspProject,
 	saveLspDraft,
+	publishLspDraft,
 	type LspProfile,
 	type LspRoute,
 } from "./lsp-profile.js";
@@ -68,6 +69,16 @@ it("rejects a draft saved from an outdated setup preview", async () => {
 	await expect(saveLspDraft(agentDir, project, profile, null, original.revision)).rejects.toThrow(
 		"changed since preview",
 	);
+	expect((await loadLspDraft(agentDir, project))!.draft.profile.enabled).toBe(false);
+});
+
+it("returns the published draft revision without adopting a subsequent writer's revision", async () => {
+	const { agentDir, project, profile } = await projectFixture();
+	const publication = await publishLspDraft(agentDir, project, profile, null, null);
+	const saved = (await loadLspDraft(agentDir, project))!;
+	expect(publication).toEqual({ path: lspProfilePath(agentDir, project, true), revision: saved.revision });
+	await publishLspDraft(agentDir, project, { ...profile, enabled: false }, null, publication.revision);
+	await expect(publishLspDraft(agentDir, project, profile, null, publication.revision)).rejects.toThrow("changed since preview");
 	expect((await loadLspDraft(agentDir, project))!.draft.profile.enabled).toBe(false);
 });
 

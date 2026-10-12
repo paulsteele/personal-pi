@@ -1,15 +1,15 @@
 {
   "name": "@paulsteele/pi-permission-system",
-  "version": "1.6.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Personal source-owned Pi permission and auto-mode fork",
+  "description": "Mandatory Podman devcontainer tools and host mount approvals",
   "type": "module",
   "license": "MIT",
   "keywords": [
     "pi-package",
     "pi",
     "permissions",
-    "auto-mode"
+    "sandbox"
   ],
   "files": [
     "src",
@@ -17,7 +17,8 @@
     "FORK.md",
     "CHANGELOG.md",
     "LICENSE",
-    "schemas/permissions.schema.json"
+    "schemas/permissions.schema.json",
+    "schemas/sandbox-settings.schema.json"
   ],
   "pi": {
     "extensions": [
@@ -35,6 +36,10 @@
     "check": "npm run typecheck && npm run lint && npm run format:check && npm test && npm run check:pack"
   },
   "dependencies": {
+    "@paulsteele/pi-shared-ui": "workspace:*",
+    "@devcontainers/cli": "0.89.0",
+    "@paulsteele/pi-project-locations": "workspace:*",
+    "jsonc-parser": "3.3.1",
     "tree-sitter-bash": "0.25.1",
     "web-tree-sitter": "0.26.12",
     "zod": "4.4.3"

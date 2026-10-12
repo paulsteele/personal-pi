@@ -115,6 +115,7 @@ export async function setup(
 	work: WorkPhase = directWork,
 	mode: "normal" | "edit" | "regenerate" = "normal",
 	openPermissions?: () => ReviewPermissions,
+	authorizeCapture?: () => Promise<void>,
 ): Promise<string> {
 	const piSessionId = ctx.sessionManager.getSessionId();
 	const prior = await loadProfile(root, repo.id);
@@ -141,12 +142,13 @@ export async function setup(
 	}
 	if (!openPermissions)
 		throw new PermissionBlocked("unavailable", "PR setup requires the permission service.");
+	await work("Authorizing setup capture sources", () => authorizeCapture?.() ?? Promise.resolve());
 	const permissions = openPermissions();
 	const captureAccess = permissions.host("Prepare PR setup source");
 	const config = (await loadConfig(root)) ?? (await chooseModel(ctx, root, signal, work));
 	const prompts = await loadPrompts();
 	const snapshot = await work("Capturing repository context", () =>
-		capture(repo, { kind: "local" }, config, captureAccess, [], signal, true),
+		capture(repo, { kind: "local" }, config, captureAccess, [], signal, { mode: "discovery" }, progress),
 	);
 	const toolNames = snapshotTools(snapshot).map((tool) => tool.name);
 	const discoveryAccess = permissions.task({
@@ -193,6 +195,7 @@ export async function setup(
 				progress,
 			}),
 		);
+		await discoveryAccess.close();
 		if (!discovery.ok)
 			throw new Error(`Repository discovery failed: ${discovery.error}. No approved profile was changed.`);
 		const answers: Array<{ question: string; answer: string }> = [];
@@ -243,6 +246,7 @@ export async function setup(
 		if (!generated.ok)
 			throw new Error(`Profile generation failed: ${generated.error}. No approved profile was changed.`);
 		await profileAccess.beforeDispatch(signal);
+		await profileAccess.close();
 		return saveDraft(
 			root,
 			repo,

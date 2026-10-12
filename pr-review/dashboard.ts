@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text, truncateToWidth, visibleWidth, type OverlayHandle } from "@earendil-works/pi-tui";
+import { createPanelFrame, presentPanel } from "@paulsteele/pi-shared-ui";
+import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { redact } from "./report.js";
 import { formatUsage, formatCost, REQUEST_KINDS } from "./usage.js";
 import { TaskStore, type RecoveryGate, type TaskRecord, type TaskState } from "./tasks.js";
@@ -106,13 +107,7 @@ export class DashboardComponent {
 				: `↑↓ / PgUp/PgDn scroll · Enter ${this.detail ? "queue" : "details"} · ${cancelKey} hide · r retry · c cancel`;
 		// Truncation and Text wrapping can emit full SGR resets. Reapply the fill
 		// after each reset so even ellipses and trailing padding stay opaque.
-		const paint = (value: string, selected = false) =>
-			value
-				.split("\x1b[0m")
-				.map((part) =>
-					this.theme.bg(selected ? "selectedBg" : "customMessageBg", this.theme.fg("text", part)),
-				)
-				.join("\x1b[0m");
+		const { paint, line, rule } = createPanelFrame(this.theme, width);
 		const helpColor = this.confirmCancel ? "warning" : "muted";
 		if (width < 6 || height < 5) {
 			this.pageSize = 1;
@@ -130,18 +125,8 @@ export class DashboardComponent {
 					),
 				);
 		}
-		const contentWidth = width - 4,
-			innerWidth = width - 2;
-		const line = (value: string, selected = false) =>
-			paint(this.theme.fg("borderAccent", "│")) +
-			paint(` ${truncateToWidth(value, contentWidth, "…", true)} `, selected) +
-			paint(this.theme.fg("borderAccent", "│"));
+		const contentWidth = width - 4;
 		const plain = (value: string) => line(singleLine(value));
-		const rule = (left: string, right: string, title = "") => {
-			const label = truncateToWidth(title, innerWidth, "…"),
-				fill = "─".repeat(Math.max(0, innerWidth - visibleWidth(label)));
-			return paint(this.theme.fg("borderAccent", `${left}${label}${fill}${right}`));
-		};
 		const footer = new Text(help, 0, 0)
 			.render(contentWidth)
 			.slice(0, Math.min(3, Math.max(1, height - 8)))
@@ -261,6 +246,7 @@ export function trackPermissionPrompts(events: ExtensionAPI["events"], changed: 
 
 export interface ReviewDashboard {
 	work: WorkPhase;
+	approval: WorkPhase;
 	setPermissionPromptActive(active: boolean): void;
 	show(): void;
 	hide(): void;
@@ -274,10 +260,9 @@ export function createReviewDashboard(
 ): ReviewDashboard {
 	let disposed = false,
 		permissionPromptActive = false,
+		approvalPromptActive = false,
 		visible = false,
 		dismissed = false,
-		inWork = false,
-		shown = false,
 		previousBlocked = 0;
 	let generation = 0,
 		close: (() => void) | undefined,
@@ -308,105 +293,84 @@ export function createReviewDashboard(
 		if (ownedClose) safely(ownedClose);
 	};
 	const show = () => {
-		if (disposed || visible || ctx.mode !== "tui") return;
+		if (disposed || visible || ctx.mode !== "tui") {
+			return;
+		}
 		if (permissionPromptActive) {
 			safely(() => ctx.ui.notify("Finish the permission prompt before reopening PR status.", "info"));
 			return;
 		}
-		if (!inWork && !options.readonly) {
+		if (approvalPromptActive) {
 			safely(() => ctx.ui.notify("Review dashboard is suspended while approval UI is active.", "info"));
 			return;
 		}
 		dismissed = false;
 		visible = true;
-		shown = true;
 		const owner = ++generation;
-		let mounted: OverlayHandle | undefined,
-			finish: (() => void) | undefined,
-			closeRequested = false;
-		const closeOwned = () => {
-			closeRequested = true;
-			// done() on older Pi pops the front overlay. Never call it before ours mounts.
-			if (!mounted || !finish) return;
-			// A permission is non-overlay UI. Never steal its focus during a deferred dashboard close.
-			if (!permissionPromptActive) mounted.focus();
-			finish();
-		};
-		close = closeOwned;
 		try {
-			void ctx.ui
-				.custom<void>(
-					(tui, theme, keys, done) => {
-						let finished = false;
-						finish = () => {
-							if (!finished) {
-								finished = true;
-								done(undefined);
-							}
-						};
-						if (!disposed && owner === generation) requestRender = () => tui.requestRender();
-						const component = new DashboardComponent(
-							store,
-							theme,
-							keys,
-							() => Math.max(1, (tui.terminal?.rows ?? 24) - 2),
-							() => tui.requestRender(),
-							() => {
-								hide(true);
-								updateSummary();
-							},
-							options.cancel,
-							() => options.recovery?.retry(),
-						);
-						return {
-							render: (width: number) => (permissionPromptActive ? [] : component.render(width)),
-							invalidate: () => component.invalidate(),
-							handleInput: (data: string) => {
-								if (!permissionPromptActive) component.handleInput(data);
-							},
-							dispose: () => {
-								if (owner === generation) {
-									stopTimers();
-									visible = false;
-									requestRender = undefined;
-									close = undefined;
-								}
-							},
-						};
-					},
-					{
-						overlay: true,
-						overlayOptions: {
-							anchor: "center",
-							width: 120,
-							maxHeight: "100%",
-							margin: 1,
-							// Also suppress visibility before a deferred overlay has delivered its handle.
-							visible: () => !permissionPromptActive,
+			const panel = presentPanel<void>(
+				ctx,
+				(tui, theme, keys, _done) => {
+					if (!disposed && owner === generation) requestRender = () => tui.requestRender();
+					const component = new DashboardComponent(
+						store,
+						theme,
+						keys,
+						() => Math.max(1, (tui.terminal?.rows ?? 24) - 2),
+						() => tui.requestRender(),
+						() => {
+							hide(true);
+							updateSummary();
 						},
-						onHandle: (value) => {
-							mounted = value;
-							if (disposed || owner !== generation || closeRequested) safely(closeOwned);
-							else {
-								heartbeat = setInterval(() => safely(() => requestRender?.()), 1000);
-								heartbeat.unref?.();
-							}
-						},
-					},
-				)
-				.catch(() => {
-					if (owner !== generation) return;
-					visible = false;
-					stopTimers();
-					close = undefined;
-					requestRender = undefined;
-					safely(() =>
-						ctx.ui.notify(
-							"Review dashboard unavailable; progress continues in text. Use /pr retry or /pr cancel if blocked.",
-							"warning",
-						),
+						options.cancel,
+						() => options.recovery?.retry(),
 					);
-				});
+					return {
+						render: (width: number) =>
+							permissionPromptActive || approvalPromptActive ? [] : component.render(width),
+						invalidate: () => component.invalidate(),
+						handleInput: (data: string) => {
+							if (!permissionPromptActive && !approvalPromptActive) {
+								component.handleInput(data);
+							}
+						},
+						dispose: () => {
+							if (owner === generation) {
+								stopTimers();
+								visible = false;
+								requestRender = undefined;
+								close = undefined;
+							}
+						},
+					};
+				},
+				{
+					visible: () => !permissionPromptActive && !approvalPromptActive,
+					onRenderReady: () => {
+						if (!disposed && owner === generation) {
+							heartbeat = setInterval(() => safely(() => requestRender?.()), 1000);
+							heartbeat.unref?.();
+						}
+					},
+				},
+			);
+			close = panel.close;
+			if (disposed || owner !== generation) {
+				panel.close();
+			}
+			void panel.result.catch(() => {
+				if (owner !== generation) return;
+				visible = false;
+				stopTimers();
+				close = undefined;
+				requestRender = undefined;
+				safely(() =>
+					ctx.ui.notify(
+						"Review dashboard unavailable; progress continues in text. Use /pr retry or /pr cancel if blocked.",
+						"warning",
+					),
+				);
+			});
 		} catch {
 			visible = false;
 			stopTimers();
@@ -469,14 +433,20 @@ export function createReviewDashboard(
 			}
 		},
 		async work<T>(label: string, task: () => Promise<T>): Promise<T> {
-			inWork = true;
 			store.setPhase(label);
-			if (!dismissed && (!shown || !visible)) show();
+			if (!dismissed) {
+				show();
+			}
+			return await task();
+		},
+		async approval<T>(label: string, task: () => Promise<T>): Promise<T> {
+			approvalPromptActive = true;
+			hide(false);
+			store.setPhase(label);
 			try {
 				return await task();
 			} finally {
-				hide(false);
-				inWork = false;
+				approvalPromptActive = false;
 				updateSummary();
 			}
 		},

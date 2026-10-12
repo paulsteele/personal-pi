@@ -30,16 +30,17 @@ export interface DelegatedTaskSpec {
   signal?: AbortSignal;
 }
 export interface DelegatedTask {
+  readonly maxSourcesPerBatch: number;
   check(action: DelegatedAction): Promise<ToolReviewResult>;
   checkLocalSearch(action: DelegatedAction): Promise<ToolReviewResult>;
   revision(): string;
   nextTurn(): void;
   endTurn(): void;
-  close(): void;
+  close(): Promise<void>;
 }
 export interface DelegatedOperation {
   task(spec: DelegatedTaskSpec): DelegatedTask;
-  close(): void;
+  close(): Promise<void>;
 }
 export interface OpenDelegatedOperation {
   sessionId: string;
@@ -95,15 +96,29 @@ function signal(value: unknown): value is AbortSignal {
   return value instanceof AbortSignal;
 }
 
+const MAX_SOURCES_PER_BATCH = 32;
+
 export function createDelegatedReviewService(host: {
   sessionId(): string;
   /** Refreshes strict live policy. Throws when the owner/config is unavailable. */
   revision(): string;
   authority(): readonly string[];
+  maxSourcesPerBatch?: number;
+  openTask?(
+    spec: DelegatedTaskSpec,
+    operation: OpenDelegatedOperation,
+  ):
+    | {
+        readonly maxSourcesPerBatch?: number;
+        authorize(request: ToolReviewRequest): Promise<ToolReviewResult>;
+        close(): Promise<void>;
+      }
+    | undefined;
+  cleanupError?(error: unknown): void;
   authorize(request: ToolReviewRequest, actor: DelegatedActor): Promise<ToolReviewResult>;
 }) {
   const lifetime = new AbortController();
-  const operations = new Map<string, () => void>();
+  const operations = new Map<string, () => Promise<void>>();
   const service: DelegatedReviewService = {
     version: 1,
     open(options) {
@@ -144,12 +159,19 @@ export function createDelegatedReviewService(host: {
       ];
       const controller = new AbortController();
       const combined = AbortSignal.any([lifetime.signal, options.signal, controller.signal]);
-      const tasks = new Map<string, () => void>();
+      const tasks = new Map<string, () => Promise<void>>();
+      let operationClosePromise: Promise<void> | undefined;
       const close = () => {
-        controller.abort();
-        for (const dispose of tasks.values()) dispose();
-        tasks.clear();
-        operations.delete(options.id);
+        operationClosePromise ??= (async () => {
+          controller.abort();
+          try {
+            await Promise.all([...tasks.values()].map((dispose) => dispose()));
+          } finally {
+            tasks.clear();
+            operations.delete(options.id);
+          }
+        })();
+        return operationClosePromise;
       };
       operations.set(options.id, close);
       const assertActive = () => {
@@ -187,10 +209,19 @@ export function createDelegatedReviewService(host: {
             sequence = 0,
             turn = 0,
             inTurn = false;
+          const resource = host.openTask?.({ ...spec, signal: taskSignal }, options);
+          let taskClosePromise: Promise<void> | undefined;
           const closeTask = () => {
-            taskController.abort();
-            cache.clear();
-            tasks.delete(spec.id);
+            taskClosePromise ??= (async () => {
+              taskController.abort();
+              cache.clear();
+              try {
+                await resource?.close();
+              } finally {
+                tasks.delete(spec.id);
+              }
+            })();
+            return taskClosePromise;
           };
           tasks.set(spec.id, closeTask);
           const currentRevision = () => {
@@ -227,7 +258,7 @@ export function createDelegatedReviewService(host: {
                 (action.signal !== undefined && !signal(action.signal)) ||
                 (action.effects !== undefined &&
                   (!Array.isArray(action.effects) ||
-                    action.effects.length > 32 ||
+                    action.effects.length > MAX_SOURCES_PER_BATCH ||
                     action.effects.some(
                       (effect) =>
                         !effect ||
@@ -269,7 +300,9 @@ export function createDelegatedReviewService(host: {
                 ...(mode === "local-search" ? { localSearch: true as const } : {}),
               };
               for (;;) {
-                const result = await host.authorize(request, actor);
+                const result = await (resource
+                  ? resource.authorize(request)
+                  : host.authorize(request, actor));
                 callSignal.throwIfAborted();
                 if (result.kind !== "allowed") return result;
                 // Never stamp an old verdict with a newer policy's revision.
@@ -284,7 +317,15 @@ export function createDelegatedReviewService(host: {
                   };
             }
           };
+          const hostMaxSourcesPerBatch = host.maxSourcesPerBatch ?? 1;
+          const requestedMaxSourcesPerBatch =
+            resource?.maxSourcesPerBatch ?? hostMaxSourcesPerBatch;
+          const maxSourcesPerBatch = Math.max(
+            1,
+            Math.min(MAX_SOURCES_PER_BATCH, requestedMaxSourcesPerBatch),
+          );
           return {
+            maxSourcesPerBatch,
             revision: currentRevision,
             nextTurn() {
               currentRevision();
@@ -304,12 +345,21 @@ export function createDelegatedReviewService(host: {
       };
     },
   };
+  const retireOperations = async () => {
+    const results = await Promise.allSettled([...operations.values()].map((close) => close()));
+    operations.clear();
+    for (const result of results) {
+      if (result.status === "rejected") {
+        host.cleanupError?.(result.reason);
+      }
+    }
+  };
   return {
     service,
-    dispose() {
+    retireOperations,
+    async dispose() {
       lifetime.abort();
-      for (const close of operations.values()) close();
-      operations.clear();
+      await retireOperations();
     },
   };
 }

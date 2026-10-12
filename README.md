@@ -9,20 +9,22 @@ Pi loads the entries in this deliberate order:
 1. `claude-skills` — exposes trusted project `.claude/skills` directories.
 2. `code-blocks` — renders copyable fenced code blocks.
 3. `desktop-notifications` — provides actionable terminal-window notifications.
-4. `pi-permission-system` — source-owned permission and auto-mode fork.
+4. `pi-permission-system` — mandatory Podman devcontainer tools and host mount approvals.
 5. `code-quality` — isolated post-edit style gate with bounded corrections and human arbitration.
 6. `progress-observer` — passive side-model progress inference.
 7. `pr-review` — code-owned reviews with private generated repo context and Plannotator findings.
-8. `pi-atelier` — source-owned fullscreen sidebar/footer fork.
+8. `pi-sidebar` — fullscreen Sidebar with pinned status/turn headers and Tools, Summary, Sandbox, and Settings tabs.
 
-Permission System and Progress Observer load before Atelier so their replayable event state is available when Atelier subscribes. Desktop Notifications remains the sole notification owner.
+The non-extension `project-locations` workspace shares worktree-aware profile locations across PR, LSP, and sandbox setup. The non-extension `shared-ui` workspace provides the common PR/settings frame, overlay lifecycle, and plugin-owned settings flows.
+
+Permission System and Progress Observer load before Sidebar so their replayable event state is available when Sidebar subscribes. Desktop Notifications remains the sole notification owner.
 
 ## Install
 
 After the public repository and release tag exist:
 
 ```sh
-pi install https://github.com/paulsteele/personal-pi@v1.6.0
+pi install https://github.com/paulsteele/personal-pi@v2.0.0
 ```
 
 The dotfiles repository normally records the same pinned source in `~/.pi/agent/settings.json`, so Pi installs a missing user package automatically at startup when online. The public HTTPS URL requires no SSH alias or repository credentials.
@@ -65,7 +67,7 @@ bun run check:pack
 
 ## Releases
 
-The repository and all eight workspace packages share one version.
+The repository and all workspace packages share one version.
 
 1. Start from a clean `main` checkout.
 2. Write release notes under `## Unreleased` in the affected workspace changelogs.
@@ -78,7 +80,7 @@ The repository and all eight workspace packages share one version.
 
    Use `minor`, `major`, or an explicit stable version such as `1.6.0` (also accepts `v1.6.0`). The target must be newer than the current version.
 
-   [`scripts/bump-version.ts`](scripts/bump-version.ts) discovers workspaces from the root manifest and updates all nine package versions, only the corresponding workspace version fields in `bun.lock`, and the README install pin. It promotes nonempty `## Unreleased` or `## [Unreleased]` sections to the new version with today's UTC date. Empty sections, historical notes, dependency versions, and lockfile resolutions remain unchanged; missing changelogs are not created. Existing version mismatches or a stale README pin stop preparation before any writes.
+   [`scripts/bump-version.ts`](scripts/bump-version.ts) discovers workspaces from the root manifest and updates all package versions, only the corresponding workspace version fields in `bun.lock`, and the README install pin. It promotes nonempty `## Unreleased` or `## [Unreleased]` sections to the new version with today's UTC date. Empty sections, historical notes, dependency versions, and lockfile resolutions remain unchanged; missing changelogs are not created. Existing version mismatches or a stale README pin stop preparation before any writes.
 
    Preparation can run on a dirty checkout and preserves unrelated edits, but does not enforce branch or Git state. Review the diff and finish any release notes before proceeding.
 4. Run `bun install --frozen-lockfile && bun run check` against the bumped files.
@@ -111,19 +113,22 @@ To roll back, restore the previous tag in settings and run the same command. Pin
 Source and dependencies live in Pi's managed git checkout. Runtime Permission System policy and logs remain outside it:
 
 - config: `~/.pi/agent/extensions/pi-permission-system/config.json`
-- logs: `~/.pi/agent/extensions/pi-permission-system/logs/`
+- global devcontainer: `~/.pi/agent/extensions/pi-permission-system/global/devcontainer.json`
+- private project definitions and session authority: `~/.pi/agent/extensions/pi-permission-system/`
 - code quality config: `~/.pi/agent/extensions/code-quality/config.json` (select the reviewer with `/quality-model`; no default model)
 - progress observer config: `~/.pi/agent/extensions/progress-observer/config.json`
 - PR review settings/profiles/reports: `~/.pi/agent/extensions/pr-review/`
 
+Use `/sandbox setup global` for a complete fallback base, `/sandbox setup global tools` for shared tooling, and `/sandbox setup` for private worktree-shared project requirements. All five LSPs are built into reusable tool images and added to the generated devcontainer without modifying repository definitions. `/sandbox setup base` explicitly creates a private base replacement. Local devcontainer definitions are also supported. `/sandbox setup model on` enables explicit current-model proposals; nothing is written or executed before approval. `request_host_mount` asks the operator for more host access. Sandboxing has no off switch or automatic host fallback. `/sandbox host-commands` shows the private project file where you can manually authorize exact scripts or named executables to run natively with any arguments; the surrounding Bash shell stays in the container. Web and Plannotator package tools also retain their explicitly authorized host execution. See [`pi-permission-system/README.md`](pi-permission-system/README.md) for limits, migration, and setup.
+
 PR review methodology and personal-global rules are versioned here in `pr-review/prompts/`; only generated repo semantics and runtime settings live in Pi config. Run `/pr setup` to create a private context draft, inspect it, then run `/pr setup approve` to activate it before the first review. Use `/pr model` to choose the independent model and `/pr` to review changes. Existing approved context is reused; `/pr setup regenerate` explicitly creates a replacement draft that also requires inspection and `/pr setup approve`. Verified findings open in the already-loaded Plannotator UI without a version allowlist; submitted feedback goes to the main agent without a second fix-selection screen. The harness never installs or updates Plannotator. See [`pr-review/README.md`](pr-review/README.md) for compatibility, privacy, scope, and verification details.
 
-The Code Quality gate injects its versioned clarity policy and reviews explicit edit/write batches in interactive sessions. Configure its independent reviewer with `/quality-model` and optional project LSP diagnostics with `/quality lsp setup`. LSPs share warm servers across matching Pi instances; all diagnostic severities enter the existing correction flow before readability review. It pauses unrelated work while feedback is unresolved. Corrections and bounded disagreements return to the reviewer, sharing five response-and-review rounds before automatic terminal arbitration. Known generated/lock filenames auto-approve without model review. See [`code-quality/README.md`](code-quality/README.md) for coverage, privacy, controls, and recovery. It does not replace tests, permissions, or PR review.
+The Code Quality gate injects its versioned clarity policy and reviews explicit edit/write batches in interactive sessions. Configure its independent reviewer with `/quality-model`. Provisioned LSPs work automatically in trusted projects; `/quality lsp setup` is only for exceptional project overrides and never installs software. Servers execute inside the session devcontainer; distinct sandbox generations never share a host server. All diagnostic severities enter the existing correction flow before readability review. Quality reviews accessible files without an outside-repository filter. It pauses unrelated work while feedback is unresolved. Corrections and bounded disagreements return to the reviewer, sharing five response-and-review rounds before automatic terminal arbitration. Known generated/lock filenames auto-approve without model review. See [`code-quality/README.md`](code-quality/README.md) for coverage, privacy, controls, and recovery. It does not replace tests, permissions, or PR review.
 
-The Progress Observer uses a separate model to infer goal/progress/current/next state for Atelier's upper sidebar pane. It is TUI-only, memory-only, never injects into the main agent conversation, and degrades without interrupting work. See [`progress-observer/README.md`](progress-observer/README.md) for cadence, commands, privacy, and cost details.
+The Progress Observer uses a separate model to infer goal/progress/current/next state for Sidebar's Summary tab. It is TUI-only, memory-only, never injects into the main agent conversation, and degrades without interrupting work. See [`progress-observer/README.md`](progress-observer/README.md) for cadence, commands, privacy, and cost details.
 
 The Hammerspoon bridge remains machine configuration in the dotfiles repository under `~/.hammerspoon/`; it is not packaged here.
 
 ## Provenance and license
 
-Original repository code is MIT licensed; see [`LICENSE`](LICENSE). The `pi-atelier` and `pi-permission-system` directories are source-owned forks with their own retained MIT license and detailed upstream provenance in each `FORK.md`.
+Original repository code is MIT licensed; see [`LICENSE`](LICENSE). The `pi-sidebar` and `pi-permission-system` directories are source-owned forks with their own retained MIT license and detailed upstream provenance in each `FORK.md`.

@@ -1,6 +1,6 @@
-import { readFileSync, mkdirSync, writeFileSync, renameSync, lstatSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, renameSync, lstatSync, openSync, closeSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { canonicalPath } from "./capture.js";
 
 export interface QualityConfig {
@@ -71,11 +71,20 @@ export function loadConfig(agentDir: string): { config: QualityConfig; error?: s
 	}
 }
 
-export function saveConfig(agentDir: string, patch: Partial<QualityConfig>): QualityConfig {
-	const loaded = loadConfig(agentDir);
-	if (loaded.error) throw new Error(loaded.error);
-	const next = parseConfig({ ...loaded.config, ...patch });
-	const path = configPath(canonicalPath(agentDir));
+export function qualityConfigRevision(agentDir: string): string {
+	try {
+		return createHash("sha256").update(readFileSync(configPath(agentDir))).digest("hex");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+			return "missing";
+		}
+		throw error;
+	}
+}
+
+export function saveConfig(agentDir: string, patch: Partial<QualityConfig>, expectedRevision?: string): QualityConfig {
+	const canonicalAgentDir = canonicalPath(agentDir);
+	const path = configPath(canonicalAgentDir);
 	for (let candidate = path; ; candidate = dirname(candidate)) {
 		try {
 			if (lstatSync(candidate).isSymbolicLink()) throw new Error("Refusing symlink quality configuration");
@@ -85,8 +94,31 @@ export function saveConfig(agentDir: string, patch: Partial<QualityConfig>): Qua
 		if (dirname(candidate) === candidate) break;
 	}
 	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+	const lockPath = `${path}.lock`;
+	const lock = openSync(lockPath, "wx", 0o600);
 	const temp = `${path}.${randomUUID()}.tmp`;
-	writeFileSync(temp, JSON.stringify(next, null, 2) + "\n", { mode: 0o600, flag: "wx" });
-	renameSync(temp, path);
-	return next;
+	try {
+		if (expectedRevision !== undefined && qualityConfigRevision(canonicalAgentDir) !== expectedRevision) {
+			throw new Error("Quality settings changed outside this menu; reopen before applying");
+		}
+		const loaded = loadConfig(canonicalAgentDir);
+		if (loaded.error) {
+			throw new Error(loaded.error);
+		}
+		const next = parseConfig({ ...loaded.config, ...patch });
+		writeFileSync(temp, JSON.stringify(next, null, 2) + "\n", { mode: 0o600, flag: "wx" });
+		renameSync(temp, path);
+		return next;
+	} finally {
+		try {
+			unlinkSync(temp);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+				throw error;
+			}
+		} finally {
+			closeSync(lock);
+			unlinkSync(lockPath);
+		}
+	}
 }

@@ -84,6 +84,116 @@ function harness(piSessionId = "session") {
 		path: join(cwd, "a.ts"),
 	};
 }
+it("disabling settings requires confirming the waiver for a pending case", async () => {
+	const h = harness();
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	writeFileSync(h.path, "pending");
+	await h.runtime.boundary(h.ctx, "aborted");
+	vi.mocked(h.ctx.ui.confirm).mockResolvedValue(false);
+	await expect(h.runtime.applySettings(h.ctx, { ...h.runtime.config, enabled: false })).rejects.toThrow(
+		"waiver cancelled",
+	);
+	expect(h.runtime.active).toBe(true);
+	expect(h.runtime.pending).toBe(true);
+	vi.mocked(h.ctx.ui.confirm).mockResolvedValue(true);
+	await h.runtime.applySettings(h.ctx, { ...h.runtime.config, enabled: false });
+	expect(h.runtime.active).toBe(false);
+	expect(h.runtime.state?.resolution).toBe("waived");
+});
+
+it("does not waive or save settings after the owning interaction is cancelled", async () => {
+	const h = harness();
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	writeFileSync(h.path, "pending");
+	await h.runtime.boundary(h.ctx, "aborted");
+	let resolveConfirmation!: (value: boolean) => void;
+	vi.mocked(h.ctx.ui.confirm).mockImplementation(() => new Promise<boolean>((resolve) => { resolveConfirmation = resolve; }));
+	const controller = new AbortController();
+	const applying = h.runtime.applySettings(h.ctx, { ...h.runtime.config, enabled: false }, controller.signal);
+	const rejected = expect(applying).rejects.toThrow();
+	await vi.waitFor(() => expect(resolveConfirmation).toBeDefined());
+	controller.abort();
+	resolveConfirmation(true);
+	await rejected;
+	expect(h.runtime.active).toBe(true);
+	expect(h.runtime.pending).toBe(true);
+});
+
+it("rejects a snapshot returned after branch restoration without mutating the replacement case", async () => {
+	const h = harness();
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	writeFileSync(h.path, "pending");
+	h.review.mockResolvedValue({
+		kind: "verdict",
+		value: { verdict: "needs_work", rationale: "Clarify pending source", findings: [], edits: [], proposed: {} },
+		metrics: { input: 0, output: 0, cost: 0 },
+	});
+	await h.runtime.boundary(h.ctx, "completed");
+	let resolveSnapshot!: (value: string | null) => void;
+	h.runtime.ports.filesystem = {
+		canonical: async (path) => path,
+		snapshot: () => new Promise<string | null>((resolve) => { resolveSnapshot = resolve; }),
+	};
+	const checking = h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	await vi.waitFor(() => expect(resolveSnapshot).toBeDefined());
+	const replacement = { ...h.ctx, sessionManager: { getSessionId: () => "replacement", getBranch: () => [] } } as unknown as ExtensionContext;
+	await h.runtime.start(replacement);
+	resolveSnapshot("late snapshot");
+	await expect(checking).resolves.toMatchObject({ block: true });
+	expect(h.runtime.state).toBeUndefined();
+	expect(h.ctx.abort).not.toHaveBeenCalled();
+});
+
+it("discards a retired prepare read failure before opening replacement-session coverage UI", async () => {
+	const h = harness();
+	let rejectSnapshot!: (error: Error) => void;
+	h.runtime.ports.filesystem = {
+		canonical: async (path) => path,
+		snapshot: () => new Promise((_resolve, reject) => {
+			rejectSnapshot = reject;
+		}),
+	};
+	const pending = h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	await vi.waitFor(() => expect(rejectSnapshot).toBeDefined());
+	const restoredContext = {
+		...h.ctx,
+		sessionManager: { getSessionId: () => "session", getBranch: () => [] },
+	} as unknown as ExtensionContext;
+	await h.runtime.start(restoredContext);
+	rejectSnapshot(new Error("Guest filesystem stopped during branch replacement"));
+	await pending;
+	expect(h.ui.coverage).not.toHaveBeenCalled();
+	expect(h.ctx.abort).not.toHaveBeenCalled();
+	expect(h.runtime.state).toBeUndefined();
+	expect(h.runtime.pending).toBe(false);
+});
+
+it("discards a retired reconcile read failure before opening replacement-session coverage UI", async () => {
+	const h = harness();
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	writeFileSync(h.path, "pending");
+	let rejectSnapshot!: (error: Error) => void;
+	h.runtime.ports.filesystem = {
+		canonical: async (path) => path,
+		snapshot: () => new Promise((_resolve, reject) => {
+			rejectSnapshot = reject;
+		}),
+	};
+	const pending = h.runtime.boundary(h.ctx, "completed");
+	await vi.waitFor(() => expect(rejectSnapshot).toBeDefined());
+	const restoredContext = {
+		...h.ctx,
+		sessionManager: { getSessionId: () => "session", getBranch: () => [] },
+	} as unknown as ExtensionContext;
+	await h.runtime.start(restoredContext);
+	rejectSnapshot(new Error("Guest filesystem stopped during branch replacement"));
+	await pending;
+	expect(h.ui.coverage).not.toHaveBeenCalled();
+	expect(h.ctx.abort).not.toHaveBeenCalled();
+	expect(h.runtime.state).toBeUndefined();
+	expect(h.runtime.pending).toBe(false);
+});
+
 function approved(): ReviewResult {
 	return {
 		kind: "verdict",
@@ -429,6 +539,28 @@ it("marks a stale review without approving its outdated snapshot", async () => {
 		caseId: h.runtime.state!.id,
 		stages: [{ source: "readability", outcome: "stale" }],
 	});
+});
+
+it("marks readability stale when guest dependency refresh changes the workspace revision", async () => {
+	const h = harness();
+	let workspaceRevision = 0;
+	const refreshWorkspace = vi.fn(async () => {
+		workspaceRevision++;
+	});
+	h.runtime.ports.lsp = {
+		get revision() { return workspaceRevision; },
+		configRevision: "profile",
+		refreshWorkspace,
+		check: vi.fn(async () => ({
+			kind: "checked" as const, findings: [], generation: "server", workspaceRevision: 0,
+			hashes: {}, elapsedMs: 1,
+		})),
+	};
+	const result = await edit(h, "const count = 1;");
+	expect(refreshWorkspace).toHaveBeenCalledOnce();
+	expect(result?.entries?.[0]).toMatchObject({ details: { outcome: "stale" } });
+	expect(h.runtime.state?.phase).toBe("captured");
+	expect(h.runtime.state?.lsp).toBeUndefined();
 });
 
 it("marks cancelled readability checks as interrupted", async () => {

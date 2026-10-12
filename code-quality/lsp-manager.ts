@@ -24,6 +24,7 @@ export class LspManager {
 	private profile?: StoredLspProfile;
 	project?: LspProject;
 	private trusted = false;
+	private automaticChecksEnabled = true;
 	private refreshing?: Promise<boolean>;
 	constructor(
 		readonly agentDir: string,
@@ -42,9 +43,10 @@ export class LspManager {
 		return [...this.statuses.values()];
 	}
 
-	async start(cwd: string, trusted: boolean): Promise<void> {
+	async start(cwd: string, trusted: boolean, automaticChecksEnabled = true): Promise<void> {
 		if (this.lifetime.signal.aborted) this.lifetime = new AbortController();
 		this.trusted = trusted;
+		this.automaticChecksEnabled = automaticChecksEnabled;
 		this.project = await resolveLspProject(cwd, this.agentDir);
 		this.profile = await loadLspProfile(this.agentDir, this.project);
 		this.statuses.clear();
@@ -53,11 +55,19 @@ export class LspManager {
 				id: route.id,
 				name: route.preset,
 				root: route.root,
-				phase: !this.profile?.profile.enabled ? "disabled" : trusted ? "connecting" : "failed",
+				phase: !this.profile?.profile.enabled
+					? "disabled"
+					: !automaticChecksEnabled
+						? "stopped"
+						: trusted
+							? "connecting"
+							: "failed",
 				clients: 0,
 				...(!trusted ? { reason: "Project is not trusted" } : {}),
 			});
-			if (trusted && this.profile?.profile.enabled) void this.connection(route, this.project).catch(() => {});
+			if (trusted && automaticChecksEnabled && this.profile?.profile.enabled) {
+				void this.connection(route, this.project).catch(() => {});
+			}
 		}
 		this.changed();
 	}
@@ -121,7 +131,7 @@ export class LspManager {
 		const { root } = this.project;
 		await this.stop();
 		this.lifetime = new AbortController();
-		await this.start(root, this.trusted);
+		await this.start(root, this.trusted, this.automaticChecksEnabled);
 		this.epoch++;
 		return true;
 	}
@@ -132,7 +142,9 @@ export class LspManager {
 		onStart?: () => void,
 	): Promise<LspCheckResult | undefined> {
 		await this.refreshConfiguration();
-		if (!this.project || !this.profile?.profile.enabled) return undefined;
+		if (!this.automaticChecksEnabled || !this.project || !this.profile?.profile.enabled) {
+			return undefined;
+		}
 		const grouped = new Map<LspRoute, { path: string; hash: string; languageId: string }[]>();
 		for (const file of files) {
 			if (file.after === null) continue;
@@ -252,6 +264,9 @@ export class LspManager {
 	}
 	statusText(): string {
 		if (!this.profile) return "LSP unconfigured — /quality lsp setup";
+		if (this.profile.profile.enabled && !this.automaticChecksEnabled) {
+			return "LSP profile enabled; automatic checks suspended because quality is off. Run /quality on.";
+		}
 		if (!this.profile.profile.routes.length) return "LSP: no configured servers — /quality lsp setup";
 		return this.header
 			.map(

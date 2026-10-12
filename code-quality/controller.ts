@@ -65,7 +65,14 @@ export interface RuntimePorts {
 	ui: QualityUI;
 	review?: typeof review;
 	activity?: QualityActivityPublisher;
-	lsp?: Pick<LspManager, "check" | "revision" | "configRevision"> & Partial<Pick<LspManager, "restart">>;
+	lsp?: Pick<LspManager, "check" | "revision" | "configRevision"> & Partial<Pick<LspManager, "restart">> & {
+		refreshWorkspace?(signal: AbortSignal): Promise<void>;
+	};
+	createLspManager?: (changed: () => void) => LspManager;
+	filesystem?: {
+		canonical(path: string, signal?: AbortSignal): Promise<string>;
+		snapshot(path: string, config: QualityConfig, authorized: boolean, signal?: AbortSignal): Promise<string | null>;
+	};
 }
 interface MutationPreparation {
 	result: { block: true; reason: string } | undefined;
@@ -281,9 +288,10 @@ export class QualityController {
 		ctx.ui.notify(reason, "warning");
 		ctx.abort();
 	}
-	start(ctx: ExtensionContext): void {
+	async start(ctx: ExtensionContext): Promise<void> {
 		this.dispose();
 		this.lifetime = new AbortController();
+		const generation = this.generation;
 		this.sessionId = ctx.sessionManager.getSessionId();
 		this.activityContext = ctx;
 		this.activityOverride = undefined;
@@ -323,10 +331,16 @@ export class QualityController {
 				if (this.state.phase === "human" && this.state.attempts < this.state.limit) {
 					requestReconsideration(this.state, this.state.objection);
 				}
-				this.checkFresh(ctx);
+				await this.checkFresh(ctx);
 			}
 		} catch (error) {
+			if (!this.valid(ctx, generation) || this.signal(ctx).aborted) {
+				return;
+			}
 			this.blockedReason = `Quality recovery requires a user decision: ${String(error)}`;
+		}
+		if (!this.valid(ctx, generation) || this.signal(ctx).aborted) {
+			return;
 		}
 		this.status(ctx, this.configError ? "invalid configuration" : undefined);
 	}
@@ -351,14 +365,30 @@ export class QualityController {
 	private authorized(path: string): boolean {
 		return this.state?.authorized.includes(path) ?? false;
 	}
-	private snapshot(path: string): string | null {
-		return readSnapshot(path, this.config, this.cwd, this.authorized(path));
+	private async snapshot(path: string, callerSignal?: AbortSignal): Promise<string | null> {
+		const generation = this.generation;
+		const state = this.state;
+		const store = this.store;
+		const signal = callerSignal ? AbortSignal.any([this.lifetime.signal, callerSignal]) : this.lifetime.signal;
+		signal.throwIfAborted();
+		const value = this.ports.filesystem
+			? await this.ports.filesystem.snapshot(path, this.config, this.authorized(path), signal)
+			: readSnapshot(path, this.config, this.authorized(path));
+		if (signal.aborted || generation !== this.generation || state !== this.state || store !== this.store) {
+			throw new Error("Quality snapshot belongs to a retired case");
+		}
+		return value;
 	}
-	private checkFresh(ctx: ExtensionContext): boolean {
+	private async checkFresh(ctx: ExtensionContext): Promise<boolean> {
 		if (!this.state || this.state.phase === "closed") return true;
-		for (const file of this.state.files) {
-			if (this.state.pendingPaths.includes(file.path)) continue;
-			const actual = this.snapshot(file.path);
+		const state = this.state;
+		const generation = this.generation;
+		for (const file of state.files) {
+			if (state.pendingPaths.includes(file.path)) continue;
+			const actual = await this.snapshot(file.path, this.signal(ctx));
+			if (!this.valid(ctx, generation) || this.state !== state || this.signal(ctx).aborted) {
+				throw new Error("Quality freshness check belongs to a retired case");
+			}
 			if (actual !== file.after) {
 				file.after = actual;
 				this.state.verdict = undefined;
@@ -409,6 +439,7 @@ export class QualityController {
 		input: Record<string, unknown>,
 		ctx: ExtensionContext,
 	): Promise<MutationPreparation> {
+		const generation = this.generation;
 		if (!this.config.enabled) return { result: undefined, phase: "disabled" };
 		let path: string | undefined;
 		const blocked = (reason: string): MutationPreparation => ({
@@ -421,7 +452,13 @@ export class QualityController {
 			if (typeof rawPath !== "string" || !rawPath.trim())
 				return blocked("Quality gate requires an explicit file path");
 			const requested = resolve(ctx.cwd, rawPath);
-			path = canonicalPath(requested);
+			const captureGeneration = this.generation;
+			path = this.ports.filesystem
+				? await this.ports.filesystem.canonical(rawPath, this.signal(ctx))
+				: canonicalPath(requested);
+			if (!this.valid(ctx, captureGeneration) || this.signal(ctx).aborted) {
+				return blocked("Quality capture belongs to a retired session");
+			}
 			const excluded = exclusionRule(requested, path);
 			if (excluded) {
 				this.pi.appendEntry("code-quality:excluded", {
@@ -449,22 +486,24 @@ export class QualityController {
 				return blocked(
 					`Resolve case ${state.id} first, or request this helper/test path using quality_response(request_scope).`,
 				);
-			if (!this.checkFresh(ctx))
+			if (!(await this.checkFresh(ctx)))
 				return blocked("Review snapshot became stale; wait for a fresh verdict before editing.");
-			if (state.phase === "applying" && state.approvedTargets?.[path] === digest(this.snapshot(path)))
+			if (state.phase === "applying" && state.approvedTargets?.[path] === digest(await this.snapshot(path, this.signal(ctx))))
 				return blocked(
 					"This file already matches the user-approved proposal. Apply only its remaining files.",
 				);
 			let before: string | null;
 			try {
-				before = this.snapshot(path);
+				before = await this.snapshot(path, this.signal(ctx));
 			} catch (error) {
+				if (!this.valid(ctx, generation) || this.state !== state || this.signal(ctx).aborted) {
+					throw error;
+				}
 				if (error instanceof CoverageError && error.kind === "binary") {
 					this.ignoredPaths.add(path);
 					this.receipt(`Not reviewed (binary/non-UTF-8): ${path}`);
 					return { result: undefined, path, phase: "not_reviewed" };
 				}
-				const generation = this.generation;
 				const coveragePath = path;
 				const decision = await this.awaitDecision(ctx, "coverage", () =>
 					this.ports.ui.coverage(ctx, coveragePath, String(error), this.modelKey(), this.signal(ctx)),
@@ -476,15 +515,15 @@ export class QualityController {
 					this.pi.appendEntry("code-quality:waiver", { path, reason: String(error) });
 					return { result: undefined, path, phase: "not_reviewed" };
 				}
-				if (
-					decision !== "authorize" ||
-					(error instanceof CoverageError && !["sensitive", "external"].includes(error.kind))
-				) {
+				if (decision !== "authorize" || (error instanceof CoverageError && error.kind !== "sensitive")) {
 					this.pause(ctx, String(error));
 					return blocked("Quality review requires a coverage decision");
 				}
 				state.authorized.push(path);
-				before = this.snapshot(path);
+				before = await this.snapshot(path, this.signal(ctx));
+			}
+			if (!this.valid(ctx, generation) || this.state !== state || this.signal(ctx).aborted) {
+				return blocked("Quality capture belongs to a retired case");
 			}
 			if (!state.files.some((file) => file.path === path)) state.files.push({ path, before, after: before });
 			if (!state.scope.includes(path)) state.scope.push(path);
@@ -492,56 +531,63 @@ export class QualityController {
 			this.persist();
 			return { result: undefined, path };
 		} catch (error) {
+			if (this.signal(ctx).aborted || !this.valid(ctx, generation)) {
+				return blocked("Quality capture belongs to a retired session");
+			}
 			this.pause(ctx, `Quality capture failed: ${String(error)}`);
 			return blocked("Quality capture failed; resolve before retrying");
 		}
 	}
 	private async reconcile(ctx: ExtensionContext): Promise<boolean> {
-		if (!this.state) return false;
+		const state = this.state;
+		if (!state) return false;
+		const generation = this.generation;
+		const assertOwner = () => {
+			if (!this.valid(ctx, generation) || this.state !== state || this.signal(ctx).aborted) {
+				throw new Error("Quality capture belongs to a retired case");
+			}
+		};
 		let changed = false;
-		for (const path of this.state.pendingPaths) {
-			const file = this.state.files.find((file) => file.path === path);
+		for (const path of state.pendingPaths) {
+			const file = state.files.find((file) => file.path === path);
 			if (!file || this.ignoredPaths.has(path)) continue;
 			let after: string | null;
 			try {
-				after = this.snapshot(path);
+				after = await this.snapshot(path, this.signal(ctx));
 			} catch (error) {
-				const generation = this.generation;
+				assertOwner();
 				const decision =
 					error instanceof CoverageError && error.kind === "binary"
 						? "waive"
 						: await this.awaitDecision(ctx, "coverage", () =>
 								this.ports.ui.coverage(ctx, path, String(error), this.modelKey(), this.signal(ctx)),
 							);
-				if (!this.valid(ctx, generation) || this.signal(ctx).aborted)
-					throw new Error("Quality capture cancelled");
+				assertOwner();
 				if (decision === "waive") {
-					this.state.files = this.state.files.filter((candidate) => candidate.path !== path);
-					this.state.verdict = undefined;
-					this.state.approvedTargets = undefined;
-					this.state.phase = "captured";
+					state.files = state.files.filter((candidate) => candidate.path !== path);
+					state.verdict = undefined;
+					state.approvedTargets = undefined;
+					state.phase = "captured";
 					this.pi.appendEntry("code-quality:waiver", { path, reason: String(error), reviewed: false });
 					this.receipt(`Quality not reviewed: ${path} (${String(error)})`);
 					continue;
 				}
-				if (
-					decision !== "authorize" ||
-					!(error instanceof CoverageError) ||
-					!["sensitive", "external"].includes(error.kind)
-				)
+				if (decision !== "authorize" || !(error instanceof CoverageError) || error.kind !== "sensitive")
 					throw new Error(String(error));
-				this.state.authorized.push(path);
-				after = this.snapshot(path);
+				state.authorized.push(path);
+				after = await this.snapshot(path, this.signal(ctx));
 			}
+			assertOwner();
 			changed ||= after !== file.after;
 			file.after = after;
 		}
-		this.state.pendingPaths = [];
+		assertOwner();
+		state.pendingPaths = [];
 		this.captureChanged ||= changed;
-		if (changed && this.state.reviewed) {
-			this.state.correctionPending = true;
-			this.state.reconsiderationPending = false;
-			this.state.objection = undefined;
+		if (changed && state.reviewed) {
+			state.correctionPending = true;
+			state.reconsiderationPending = false;
+			state.objection = undefined;
 		}
 		this.persist();
 		return changed;
@@ -632,7 +678,7 @@ export class QualityController {
 				this.pause(ctx, this.configError);
 				return;
 			}
-			this.checkFresh(ctx);
+			await this.checkFresh(ctx);
 			if (state.phase === "paused") {
 				this.pause(ctx, state.reason ?? "Quality decision pending");
 				return;
@@ -708,24 +754,33 @@ export class QualityController {
 				});
 				if (!this.valid(ctx, generation) || this.signal(ctx).aborted) return;
 				this.pi.appendEntry("code-quality:usage", { caseId: state.id, ...response.metrics });
-				if (!state.lspWaived && lspRevision !== this.ports.lsp?.revision) {
-					this.finishCurrentCheckStage(ctx, "stale");
-					state.phase = "captured";
-					state.lsp = undefined;
-					this.persist();
-					return this.result(
-						"LSP workspace changed during readability review; fresh checks are required.",
-						true,
-						{ outcome: "stale" },
-					);
-				}
-				if (!this.checkFresh(ctx)) {
+				if (!(await this.checkFresh(ctx))) {
 					this.finishCurrentCheckStage(ctx, "stale");
 					return this.result(
 						"Quality snapshot changed during review; inspect the current code before continuing.",
 						true,
 						{ outcome: "stale" },
 					);
+				}
+				if (!this.valid(ctx, generation) || this.state !== state || this.signal(ctx).aborted) {
+					return;
+				}
+				if (!state.lspWaived) {
+					await this.ports.lsp?.refreshWorkspace?.(this.signal(ctx));
+					if (!this.valid(ctx, generation) || this.state !== state || this.signal(ctx).aborted) {
+						return;
+					}
+					if (lspRevision !== this.ports.lsp?.revision) {
+						this.finishCurrentCheckStage(ctx, "stale");
+						state.phase = "captured";
+						state.lsp = undefined;
+						this.persist();
+						return this.result(
+							"LSP workspace changed during readability review; fresh checks are required.",
+							true,
+							{ outcome: "stale" },
+						);
+					}
 				}
 				if (response.kind !== "verdict") {
 					this.finishCurrentCheckStage(ctx, response.kind === "cancelled" ? "interrupted" : "failed");
@@ -772,6 +827,9 @@ export class QualityController {
 				verdict.verdict !== "approved",
 			);
 		} catch (error) {
+			if (!this.valid(ctx, generation) || this.signal(ctx).aborted) {
+				return;
+			}
 			if (this.valid(ctx, generation)) {
 				this.finishCurrentCheckStage(ctx, this.signal(ctx).aborted ? "interrupted" : "failed");
 			}
@@ -828,7 +886,7 @@ export class QualityController {
 		this.ensureCheckStageStarted(ctx, "lsp");
 		state.lspRequired = true;
 		this.persist();
-		if (!this.checkFresh(ctx) || revision(state) !== expected || checked.kind === "stale") {
+		if (!(await this.checkFresh(ctx)) || revision(state) !== expected || checked.kind === "stale") {
 			this.finishCurrentCheckStage(ctx, "stale");
 			state.phase = "captured";
 			state.lsp = undefined;
@@ -848,7 +906,7 @@ export class QualityController {
 			);
 			if (!this.valid(ctx, generation) || this.signal(ctx).aborted)
 				return this.result("LSP recovery interrupted.", false);
-			if (!this.checkFresh(ctx) || revision(state) !== expected) {
+			if (!(await this.checkFresh(ctx)) || revision(state) !== expected) {
 				state.phase = "captured";
 				this.persist();
 				return this.result("Code changed during LSP recovery; review the new snapshot.", true, {
@@ -917,11 +975,18 @@ export class QualityController {
 			this.pause(ctx, "Quality arbitration cancelled; /quality resolve to reopen");
 			return;
 		}
+		const sourceIsFresh = await this.checkFresh(ctx);
+		if (!state.lspWaived) {
+			await this.ports.lsp?.refreshWorkspace?.(this.signal(ctx));
+		}
+		if (!this.valid(ctx, generation) || this.state !== state || this.signal(ctx).aborted) {
+			return;
+		}
 		const lspWorkspaceChanged =
 			state.lsp !== undefined &&
 			this.ports.lsp !== undefined &&
 			state.lsp.workspaceRevision !== this.ports.lsp.revision;
-		if (!this.checkFresh(ctx) || revision(state) !== expected || lspWorkspaceChanged) {
+		if (!sourceIsFresh || revision(state) !== expected || lspWorkspaceChanged) {
 			this.pause(ctx, "Code or LSP workspace changed while deciding; review again");
 			return;
 		}
@@ -964,7 +1029,7 @@ export class QualityController {
 		}
 		if (!this.valid(ctx, generation) || this.signal(ctx).aborted) return;
 		if (choice === "waive") {
-			if (!this.checkFresh(ctx) || revision(this.state!) !== expected) {
+			if (!(await this.checkFresh(ctx)) || revision(this.state!) !== expected) {
 				this.pause(ctx, "Code changed during the waiver decision; retry review");
 				return;
 			}
@@ -999,7 +1064,7 @@ export class QualityController {
 			this.ports.ui.coverage(ctx, error.path, error.message, this.modelKey(), this.signal(ctx)),
 		);
 		if (!this.valid(ctx, generation) || this.signal(ctx).aborted) return;
-		if (choice === "authorize" && ["sensitive", "external"].includes(error.kind)) {
+		if (choice === "authorize" && error.kind === "sensitive") {
 			if (!this.state!.authorized.includes(error.path)) this.state!.authorized.push(error.path);
 			this.state!.phase = "captured";
 			this.persist();
@@ -1044,7 +1109,7 @@ export class QualityController {
 		const state = this.state;
 		if (!state || state.phase === "closed" || args.caseId !== state.id || args.revision !== revision(state))
 			throw new Error("No matching current quality case");
-		if (!this.checkFresh(ctx))
+		if (!(await this.checkFresh(ctx)))
 			throw new Error("Quality snapshot changed; obtain a fresh review before responding");
 		if (args.action === "disagree") {
 			if (state.phase !== "correcting" || state.pendingPaths.length) {
@@ -1059,9 +1124,20 @@ export class QualityController {
 				? `Disagreement queued for fresh LSP diagnostics under the shared round budget:\n\n${args.rationale}`
 				: `Disagreement queued for reviewer reconsideration:\n\n${args.rationale}`;
 		}
-		const paths = (args.paths ?? []).map((path) => canonicalPath(resolve(ctx.cwd, path)));
-		if (!paths.length) throw new Error("Provide helper/test paths for scope expansion");
 		const generation = this.generation;
+		const signal = this.signal(ctx);
+		const paths = await Promise.all(
+			(args.paths ?? []).map((path) => {
+				if (this.ports.filesystem) {
+					return this.ports.filesystem.canonical(path, signal);
+				}
+				return Promise.resolve(canonicalPath(resolve(ctx.cwd, path)));
+			}),
+		);
+		if (!this.valid(ctx, generation) || this.state !== state || signal.aborted) {
+			return "Scope expansion cancelled";
+		}
+		if (!paths.length) throw new Error("Provide helper/test paths for scope expansion");
 		const confirmed = await this.awaitDecision(ctx, "scope", () =>
 			ctx.ui.confirm("Expand quality correction scope?", `${args.rationale}\n${paths.join("\n")}`, {
 				signal: this.signal(ctx),
@@ -1099,6 +1175,46 @@ export class QualityController {
 		this.status(ctx);
 		return true;
 	}
+	async applySettings(ctx: ExtensionContext, value: unknown, interactionSignal?: AbortSignal, expectedConfigRevision?: string): Promise<void> {
+		const generation = this.generation;
+		const state = this.state;
+		const signal = AbortSignal.any([this.signal(ctx), ...(interactionSignal ? [interactionSignal] : [])]);
+		const assertOwner = () => {
+			signal.throwIfAborted();
+			if (!this.valid(ctx, generation) || this.state !== state || ctx.isIdle?.() === false) {
+				throw new Error("Quality settings belong to a retired interaction");
+			}
+		};
+		const { parseConfig } = await import("./config.js");
+		assertOwner();
+		const next = parseConfig(value);
+		if (!next.enabled && this.pending) {
+			const confirmed = await this.awaitDecision(ctx, "waiver", () =>
+				ctx.ui.confirm("Disable pending quality gate?", "This explicitly waives the unresolved case.", { signal }),
+			);
+			assertOwner();
+			if (!confirmed) {
+				throw new Error("Quality waiver cancelled; settings were not applied");
+			}
+		}
+		assertOwner();
+		const modelChanged = next.provider !== this.config.provider || next.model !== this.config.model;
+		this.config = saveConfig(this.agentDir, next, expectedConfigRevision);
+		this.configError = undefined;
+		if (!next.enabled && this.state) {
+			this.state.phase = "closed";
+			this.state.resolution = "waived";
+			this.blockedReason = undefined;
+			this.persist();
+		} else if (modelChanged && this.pending && this.state) {
+			this.state.authorized = [];
+			this.state.providerKey = this.modelKey();
+			this.state.phase = "captured";
+			this.persist();
+		}
+		this.status(ctx);
+	}
+
 	async command(action: string, ctx: ExtensionContext): Promise<void> {
 		if (ctx.mode !== "tui") {
 			ctx.ui.notify("Quality gate inactive outside TUI", "info");

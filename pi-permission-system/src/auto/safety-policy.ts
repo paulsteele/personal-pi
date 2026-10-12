@@ -396,6 +396,7 @@ export function evaluateSafety(
   context: SafetyContext,
   autoEnabled: boolean,
   environment: SafetyEnvironment,
+  requireCommandApproval: (category: string) => boolean = () => true,
 ): SafetyDecision {
   const risks = new Set(context.riskMarkers);
   for (const path of context.paths) {
@@ -419,10 +420,11 @@ export function evaluateSafety(
       continue;
     }
     const category = guardedCommand(command.argv, context.platform);
-    if (category) {
+    const approvalCategory = category?.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+    if (approvalCategory && requireCommandApproval(approvalCategory)) {
       return {
         kind: "require_human",
-        category: category.toLowerCase().replace(/[^a-z0-9]+/g, "_"),
+        category: approvalCategory,
         reason: `${category} requires fresh human approval.`,
         riskMarkers: [...risks],
       };

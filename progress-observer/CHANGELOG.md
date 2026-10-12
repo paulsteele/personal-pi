@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.0.0 — 2026-10-12
+
+- Contribute a Progress Observer settings section for model, enablement, cadence, timeout, and freshness; Apply updates the live scheduler through validated configuration.
+
 ## 1.5.0 — 2026-09-29
 
 - Correlate LiteLLM progress observations in a separate per-Pi activity log session, retaining grouping on resume and assigning new groups to new or forked sessions.

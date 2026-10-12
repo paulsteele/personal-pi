@@ -1,5 +1,46 @@
 # Changelog
 
+## 2.0.0 — 2026-10-12
+
+- Remove tests that require creating nested Podman containers. Retain the engine-contract, lifecycle, native-shell, and Python-process tests that run in the container. This change does not verify compatibility with a live engine.
+
+- Resolve selected devcontainer configuration through the pinned CLI without contacting Podman or executing initialization. A configuration-only engine adapter reports no existing containers and rejects all other operations; build/startup retain their authorized engine adapter.
+- Validate build inputs against the actual agent private-storage root when environment layers are not requested, rather than deriving a false boundary beneath the selected definition. Restore JSONC/substitution and project Containerfile/context resolution tests.
+
+- Remove disposable reviewer containers with zero graceful-stop delay and a separate 15-second command timeout.
+- Ignore already-removed containers; retain Podman stderr and termination details, along with both transport and removal failures.
+
+- Give each logical PR worker a dedicated read-only, network-disabled container from the prepared image and a persistent path-only probe transport. Retain individual live worker source checks.
+- Await cleanup on completion, cancellation, and parent sandbox retirement. Recreate failed transports only on explicit retry.
+- Keep 32-source batches for host preparation and output.
+
+- Batch source mappings into one guest probe per delegated action and reuse the validated canonical path for policy checks. Propagate review cancellation, bound canonical probes to ten seconds, and authorize deleted historical paths through approved canonical parents without weakening mount or path-deny checks.
+
+- Group sandbox settings under one plugin root and style the fullscreen startup console with a themed frame, current/previous stage, labeled logs, and live-follow status. Retain compact tiny-terminal rendering and approval/lifecycle behavior.
+
+- Contribute settings sections for Sandbox, project host commands, tool profiles, and the environment.
+- User Apply authorizes private host rules; existing rebuild approvals and mandatory sandbox boundaries remain unchanged.
+
+- Add manually authorized private project host-command rules for exact scripts and named executables with unrestricted arguments. Route agent/user Bash through a Tree-sitter rewrite and supervised native argv bridge; guest Bash retains chains, pipes, redirects, and expansion.
+- Show the profile with `/sandbox host-commands`. Recheck live rules and mapped cwd, preserve explicit denies, and cancel native processes on timeout, shutdown, or recreation. No automatic host fallback or agent-generated host grants.
+
+- Retain complete fallback and repository base definitions while storing private project requirements separately. Build reusable language-server and runtime images, then add project installations without rewriting the base definitions.
+- Add pinned recipes for all five language servers on Debian, Ubuntu, and Alpine. Probe linked-copy support, track installed tools, and bound image-build time. Publish requested project tools after a successful candidate build. Real-container platform and cache verification remains pending.
+
+- Bound post-install executable probes to ten seconds and guest-process termination to five seconds. Keep installation progress visible through verification and report distinct rebuild completion and probe stages.
+
+- Remove superseded containers after successful generation replacement; automatically prune unlocked, stopped session containers after seven days of inactivity on sandbox startup. Retain host files and mount grants for fresh-container resume, and leave images for manual cleanup.
+
+- Load validated devcontainer definitions without per-session approval prompts; retain separate host bind, host initialization, and port forwarding approvals.
+- Add model-only `request_sandbox_tool` for approved, pinned development-tool installation layers in the active definition, with global-impact previews, runtime executable probes, and image rebuild rollback.
+
+- Replace the loaded auto-mode entry point with mandatory Podman devcontainer tools, private worktree-aware definitions, current-model setup proposals, and session-resumable host bind approvals.
+- Add project-linked container names/labels, guarded reference-CLI execution, guest filesystem/process transport, local checkpoint recreation, and loopback forwarding.
+- Retain best-effort sensitive/external-effect and explicit-deny checks; remove live auto commands and host tool fallback. Historical permission/classifier source remains for migration regression tests.
+- Allow `ask_user_question` from the audited `@juicesharp/rpiv-ask-user-question` npm entry point as host UI without requiring a ready container. Preserve explicit denies and reject lookalike tools from other sources.
+- Authorize the four `pi-web-access` tools and Plannotator's viewer/plan tools from their npm entry points without additional sandbox prompts or container readiness. Retain host-side package behavior, explicit tool denies, cancellation, and unknown-tool rejection; document that internal file/process/credential operations are not container-isolated.
+- Expose trusted image-tool proposals for quality setup: extend the active devcontainer build with pinned server layers, preserve topology and runtime settings, roll back build failures, and save rebuilt definition revisions for resume.
+
 ## 1.5.0 — 2026-09-29
 
 - Correlate LiteLLM classifier calls, retries, and delegated PR permission checks in a separate per-Pi auto log session, without changing main-model or cache/routing identities.

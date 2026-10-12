@@ -1,17 +1,10 @@
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, it } from "vitest";
-import {
-	installedPlannotator,
-	interpretDecision,
-	present,
-	viewerDiffType,
-	type Seed,
-} from "./plannotator.js";
-import { capture, commit, fixture, put, testConfig } from "./test-fixtures.js";
-import type { Report } from "./types.js";
+import { installedPlannotator, interpretDecision, viewerDiffType, type Seed } from "./plannotator.js";
+import { put } from "./test-fixtures.js";
 const roots: string[] = [];
 afterEach(async () => {
 	for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
@@ -143,98 +136,3 @@ it("routes edits and reply threads to discussion and rejects duplicate IDs", () 
 	expect(unknown.requestedIds).toEqual([]);
 	expect(unknown.discussion).toHaveLength(1);
 });
-it.skipIf(!process.env.PR_REVIEW_TEST_PI_PACKAGE || !process.env.PR_REVIEW_TEST_PLANNOTATOR_PACKAGE)(
-	"round-trips the production viewer host without browser/model calls",
-	async () => {
-		const plannotatorDir = await installedPlannotator(
-			plannotatorCommands(process.env.PR_REVIEW_TEST_PLANNOTATOR_PACKAGE!),
-		);
-		const repo = await fixture();
-		roots.push(repo.root);
-		await put(repo.root, "a.ts", "export const test = false;\n");
-		await commit(repo.root);
-		await put(repo.root, "a.ts", "export const test = true;\n");
-		const scope = { kind: "base" as const, ref: "main", committedOnly: false };
-		const snapshot = await capture(repo, scope, testConfig);
-		const root = await mkdtemp(join(tmpdir(), "pr-ui-test-"));
-		roots.push(root);
-		const report: Report = {
-			version: 1,
-			id: "00000000-0000-0000-0000-000000000001",
-			repoId: repo.id,
-			project: "Fixture",
-			createdAt: new Date().toISOString(),
-			scope,
-			baseline: snapshot.baseline,
-			head: snapshot.head,
-			fingerprint: snapshot.fingerprint,
-			profileHash: "fixture",
-			promptHashes: {},
-			model: "fake/test",
-			status: "complete",
-			lenses: [],
-			declined: [],
-			clean: [],
-			issues: [],
-			omitted: [],
-			changedFiles: 1,
-			findings: [],
-			groups: [],
-			ledger: [],
-			elapsedMs: 0,
-			usage: { input: 0, output: 0, cost: 0 },
-		};
-		let submission: Promise<void> | undefined;
-		let probeFailure: unknown;
-		const controller = new AbortController();
-		let permissionRevision = "old",
-			authorizationCalls = 0;
-		const result = await present({
-			root,
-			piPackageDir: process.env.PR_REVIEW_TEST_PI_PACKAGE!,
-			plannotatorDir,
-			report,
-			snapshot,
-			signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]),
-			openBrowser: false,
-			authorize: async () => {
-				authorizationCalls++;
-				if (authorizationCalls === 2) {
-					permissionRevision = "new";
-					return "old";
-				}
-				return permissionRevision;
-			},
-			permissionRevision: () => permissionRevision,
-			progress(message) {
-				const url = message.match(/http:\/\/\S+/)?.[0];
-				if (url)
-					submission = (async () => {
-						const diff = await (await fetch(`${url}/api/diff`)).json();
-						expect(diff.rawPatch).toBe(snapshot.changes.map((change) => change.patch).join(""));
-						expect(diff.gitContext).toBeUndefined();
-						const seeded = await (await fetch(`${url}/api/external-annotations`)).json();
-						expect(seeded.annotations[0].text).toContain(JSON.stringify(scope));
-						expect(seeded.annotations[0].text).toContain(snapshot.baseline);
-						const response = await fetch(`${url}/api/feedback`, {
-							method: "POST",
-							headers: { "content-type": "application/json" },
-							body: JSON.stringify({ approved: true, feedback: "Synthetic LGTM", annotations: [] }),
-						});
-						expect(response.ok).toBe(true);
-					})().catch((error) => {
-						probeFailure = error;
-						controller.abort();
-					});
-			},
-		}).catch((error) => {
-			throw probeFailure ?? error;
-		});
-		await submission;
-		expect(authorizationCalls).toBe(3);
-		expect(result.decision).toBe("lgtm");
-		expect(result.requestedIds).toEqual([]);
-		expect(await readdir(join(root, "viewer-sessions"))).toEqual([]);
-	},
-	45000,
-);

@@ -2,6 +2,8 @@
 
 A code-owned review pipeline with versioned Markdown methodology, private generated repository context, isolated reviewers, independent verification, and Plannotator feedback.
 
+The loaded extension requires the mandatory sandbox service before host capture. Repository root, shared Git metadata, and source dependencies must map to approved host binds; starting Pi in a subdirectory does not implicitly grant the rest of the checkout. Capture publishes its scan/copy/diff/validation phase and current filename/count in the dashboard and progress journal. Source authorization batches unique paths within each action into one guest canonical-path probe, with cancellation and a ten-second probe timeout; it does not cache permissions across actions. Deleted historical sources are checked against their canonical parent mapping rather than requiring the deleted file to exist. Capture remains hardened host infrastructure with immutable/read-only worker views. Exact saved-result retrieval does not mount the report directory or grant arbitrary private runtime reads.
+
 ## Commands
 
 - `/pr setup` — first-time setup writes a private profile draft and prints its path. If already configured, returns immediately without model calls.
@@ -21,7 +23,7 @@ For local development in another checkout, start Pi there with `pi -e /absolute/
 
 Setup is complete after `/pr setup approve` activates the saved draft. Edit `profile-draft.json` in your preferred editor; the full path is printed in the transcript. No terminal editor is needed. Choosing a model alone does not activate a profile. Subsequent code, README, manifest, lockfile, or convention changes **do not require setup again**. Old profiles stay compatible; captured current code/docs take precedence over historical profile descriptions.
 
-Host widget/status/overlay updates are coalesced, unchanged summaries are not replaced, and task-detail text is cached. Reviews auto-open a scrollable task dashboard in a filled, accent-bordered panel capped at 120 columns (shrinking to fit narrower terminals). Status icons/colors, a full-row selection highlight, and separate summary/task/details/control sections distinguish it from the underlying transcript. Queued/running/completed/blocked tasks stay visible rather than cycling through one agent's latest activity. Select a task with the navigation keys; Enter switches to full details (scope, model, coverage, usage, recent activity, continuations and retries). **Esc hides the dashboard without cancelling.** Reopen with `/pr status`; use `c` and confirmation or `/pr cancel` to stop. `r` or `/pr retry` resumes blocked work. The compact summary remains available when hidden. Command-launched reviews release Pi's idle command loop immediately, so status/retry/cancel work before Plannotator feedback—not only after it. The agent-invoked `pr_review` tool still waits for its final result. The viewer-ready URL appears in a notification, the live dashboard, and the compact widget when the dashboard is hidden.
+Host widget/status/overlay updates are coalesced, unchanged summaries are not replaced, and task-detail text is cached. Reviews auto-open a scrollable task dashboard in a filled, accent-bordered panel capped at 120 columns (shrinking to fit narrower terminals). Status icons/colors, a full-row selection highlight, and separate summary/task/details/control sections distinguish it from the underlying transcript. Queued/running/completed/blocked tasks stay visible rather than cycling through one agent's latest activity. Select a task with the navigation keys; Enter switches to full details (scope, model, coverage, usage, recent activity, continuations and retries). **Esc hides the dashboard without cancelling.** Reopen with `/pr status`; use `c` and confirmation or `/pr cancel` to stop. `r` or `/pr retry` resumes blocked work. The dashboard stays open across work phases and preparation between them; `/pr status` is suspended only while an actual permission or specialist-selection prompt owns the UI. The compact summary remains available when hidden. Command-launched reviews release Pi's idle command loop immediately, so status/retry/cancel work before Plannotator feedback—not only after it. The agent-invoked `pr_review` tool still waits for its final result. The viewer-ready URL appears in a notification, the live dashboard, and the compact widget when the dashboard is hidden.
 
 Setup and model selection retain their phase spinners and original cancel keys. Approval dialogs are never underneath the review dashboard. `--base` still requires an explicit reference, for example `/pr --base main`.
 
@@ -43,17 +45,16 @@ Source-consuming setup and reviews require the **already-loaded local Permission
 its existing global config. There is no bundled fallback, PR-specific policy file, or general subagent
 runtime. Status/model selection and source-free setup edit/approve remain available without the service.
 
-The normal pipeline applies: configured deny blocks, deterministic guards require a human, configured
-allow proceeds, and ordinary ask uses the classifier with `/auto` on or a human with auto off. Classifier
-failure escalates to a human or blocks without UI. Worker tool capabilities remain snapshot-only/read-only.
-A tool-level allow cannot bypass the paths/read effects underneath it.
+The loaded sandbox service checks approved host/guest mappings, explicit tool/path denies, and recognized
+sensitive or external-effect operations. Those operations require fresh human approval and block without
+interactive authority. Ordinary mapped reads do not invoke the retained historical classifier or `/auto`
+controls. Worker capabilities remain snapshot-only/read-only; a tool-level allow cannot bypass source
+path restrictions.
 
-Policy and auto mode are **live at action boundaries**, including after pending decisions and before
-outgoing context. Editing filepath rules or toggling `/auto` needs no restart. Invalid/unreadable config
-fails closed. Existing main-agent automatic-allow memoization is preserved and used separately within
-each worker turn; changes to relevant policy/context, a new turn, or retry invalidate it. There are no
-run-long file grants, shared worker approvals, or cached human answers. Parent session grants are not
-implicitly inherited by workers.
+Permission policy is **live at action boundaries**, including after pending decisions and before outgoing
+context. Editing explicit rules needs no restart. Invalid/unreadable settings fail closed. Disclosure
+revisions include both permission settings and sandbox authority; topology revisions separately govern
+reviewer-container lifetime. There are no shared worker approvals or cached human answers.
 
 Human prompts run in a shared parent queue and identify the worker/action. The PR dashboard automatically
 minimizes before any permission prompt—including a main-agent prompt during background review—and cannot
@@ -73,9 +74,23 @@ be authorized; a capture approval or another worker's finding is not a grant. Cu
 a conservative host-owned source dependency set, so text quotes cannot bypass a recipient's restrictions.
 Source paths and metadata—not protected file contents—are supplied when requesting permission. Each
 outgoing dependency set must finish authorization under one stable revision; a change restarts the complete
-pass. Bulk checks yield to terminal input/cancellation, and provider dispatch rechecks freshness after
+pass. Each logical worker owns a read-only container from the prepared sandbox image and a persistent
+path-probe transport. Worker checks remain individual without launching a Podman exec per source;
+host output/capture transfers can check up to 32 source entries per action. Models and immutable snapshot
+storage remain host-side, and private PR runtime files are not mounted into worker containers. Bulk checks
+yield to terminal input/cancellation, and provider dispatch rechecks freshness after
 authentication and other awaited preflight work, including compaction. Tool coverage/checkpoint updates
 commit only after the outer permission guard accepts the result.
+
+Worker containers inherit only approved binds, downgraded to read-only, and have no network access.
+They are removed on completion or cancellation and retired before sandbox rebuilds or mount changes.
+A failed transport is removed before explicit retry can recreate that worker's container; healthy siblings
+are unaffected. The prepared image is reused without rebuilding; main-container local state is not copied.
+
+Final parent-output authorization has its own live task and reports completed/total source checks,
+the current source path, and pass number. Worker cleanup, final journal publication, and snapshot-file
+cleanup finish before parent-output authorization and final source validation. The live dashboard
+continues to show handoff progress.
 
 Approved profile exclusions control review scope, **not file access**. Excluded/unneeded dirty files are
 kept as metadata until requested; a later read requires permission and matching captured identity. If
@@ -86,7 +101,7 @@ Denied mandatory guidance is not treated as a stale missing document.
 repository-contained snapshot files without resolving their `ask` rules first. Explicit tool/read/path/skill
 denies and deterministic sensitive-path guards prevent the scan; those files are reported as skipped
 coverage, not searched with zero matches. External destinations are not eligible. Files with no matches
-cause no classifier/human request and add no continuing context dependency. Matching lines pass the normal
+cause no human request and add no continuing context dependency. Matching lines pass the normal
 read/skill permission gate before they are returned, and only delivered matches become dependencies for
 later model requests or transfers. A rejected outer tool result commits no new dependencies. Local checks
 and disclosure checks both honor live policy changes and cancellation. Older permission services without
@@ -127,7 +142,7 @@ The root is ignored by Git and files use private permissions. An existing runtim
 
 When the local Pi Permission System extension is loaded, a finished `/pr` or `pr_review` registers the
 **exact saved report file** for external-directory access in the current session before publishing its
-result. Reading/searching that report no longer needs a separate external-directory classifier prompt.
+result. Exact-result retrieval checks live source permissions without granting arbitrary private-file access.
 This does not allow the reports directory, other runs/repositories, profiles, snapshots, or viewer data.
 The grant is memory-only, ends on session shutdown/replacement or `/reload`, and never changes permission
 configuration. Normal tool/Bash/path rules and safety guards still apply; the allowance is not read-only
@@ -178,7 +193,7 @@ Whether a finding is actually true and whether issues were missed remain model j
 
 Each logical worker has its own routing session ID, stable across its continuations and recovery but never shared with concurrent workers. Provider/SDK/environment cache-retention defaults are unchanged; one-off compaction requests retain the SDK's separate routing and no-cache-write policy where supported. Shared prefixes enable reuse but neither routing hints nor prefix ordering guarantee a provider cache hit. No model results, browser approvals, or fix authorizations are cached across runs.
 
-When the review provider is exactly `litellm`, setup, all review stages/workers, retries, compaction, and repeated PR runs share the LiteLLM log session `pi-<encoded Pi session ID>-pr` via `x-litellm-trace-id`. Resume, reload, and `/tree` retain the group; new sessions, forks, and clones get new groups. This correlation ID is separate from the worker and compaction routing/cache IDs above. Main-model calls stay separate, and delegated permission-classifier calls use the auto flow's group. Other providers and aliases are unchanged; existing logs are not migrated.
+When the review provider is exactly `litellm`, setup, all review stages/workers, retries, compaction, and repeated PR runs share the LiteLLM log session `pi-<encoded Pi session ID>-pr` via `x-litellm-trace-id`. Resume, reload, and `/tree` retain the group; new sessions, forks, and clones get new groups. This correlation ID is separate from the worker and compaction routing/cache IDs above. Main-model calls stay separate. Permission checks do not call a classifier model. Other providers and aliases are unchanged; existing logs are not migrated.
 
 Binary, non-UTF8, symlink, submodule, unsafe, or unavailable in-scope content is an explicit blocker requiring retry/cancel, not a reviewed file. Automatically excluded Git LFS content is outside this text-review scope. Numeric file/diff/line limits no longer omit source. A diff too large for one request is paged and reviewed through continuation, not declared complete from a truncated preview. Pure renames retain their old/new names; edited renames can appear as deletion/addition pairs. No failed or skipped work is called clean.
 
@@ -189,14 +204,12 @@ bun run --cwd pr-review check
 bun run test:integration
 ```
 
-The normal tests use synthetic repositories and fake providers. The separate compatibility probe uses existing installations supplied explicitly, never downloads. It checks the installed review server and captured-annotation workflow rather than a version allowlist; use it after upgrades to detect API incompatibilities:
+Tests use synthetic repositories and fake providers inside the supported Podman devcontainer. The compatibility checks resolve the project's declared Pi dependency directly; they require no private installation paths or model calls:
 
 ```sh
-PR_REVIEW_TEST_PI_PACKAGE=/path/to/installed/pi-coding-agent \
-PR_REVIEW_TEST_PLANNOTATOR_PACKAGE=/path/to/installed/pi-extension \
 bun run --cwd pr-review test:compat
 ```
 
-Supply those same environment variables to `bun run --cwd pr-review test:browser` for an explicit human browser smoke test: it opens a synthetic review with two findings, asks you to remove F2 and submit F1, and reports the returned IDs without applying any fixes.
+`test:compat` covers extension loading, permission-owner registration, structured worker submissions, and real Pi focus handling. Browser handoff and feedback identity have separate fixture-based regression coverage. Tests and manual launchers requiring a privately installed Plannotator package have been removed. This does not certify production viewer compatibility.
 
-Supply those same environment variables to `bun run --cwd pr-review test` to include the production viewer's synthetic HTTP round-trip. It opens no browser, makes no model calls, uses temporary directories, and never submits feedback to a real user review. A real browser smoke test and any model-backed review must be performed separately and deliberately.
+Committed-tree capture tests require Git with `check-attr --source` support. An older Git is a development-tool prerequisite failure, not grounds to delete source-safety or historical-attribute regression tests.

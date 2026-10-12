@@ -1,8 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { DEFAULT_CONFIG, loadConfig, saveConfig, configPath, parseConfig } from "./config.js";
+import { DEFAULT_CONFIG, loadConfig, saveConfig, configPath, parseConfig, qualityConfigRevision } from "./config.js";
 import { exclusionRule, EXCLUDED_FILENAMES, GENERATED_SUFFIXES } from "./exclusions.js";
 import { applyExactEdits, validateVerdict, type ReviewFile } from "./proposal.js";
 import { POLICY, review, type ReviewerRegistry } from "./reviewer.js";
@@ -47,6 +47,29 @@ it("requires explicit model configuration and preserves malformed config", () =>
 	expect(() => saveConfig(dir, { enabled: false })).toThrow();
 	expect(readFileSync(configPath(dir), "utf8")).toBe("broken");
 });
+it("refuses publication while another settings writer owns the lock", () => {
+	const dir = mkdtempSync(join(tmpdir(), "quality-config-lock-"));
+	dirs.push(dir);
+	saveConfig(dir, { enabled: true });
+	const initialRevision = qualityConfigRevision(dir);
+	const publicationLock = `${configPath(dir)}.lock`;
+	writeFileSync(publicationLock, "another writer", { flag: "wx" });
+	expect(() => saveConfig(dir, { enabled: false }, initialRevision)).toThrow();
+	expect(loadConfig(dir).config.enabled).toBe(true);
+	unlinkSync(publicationLock);
+	expect(saveConfig(dir, { enabled: false }, initialRevision).enabled).toBe(false);
+});
+
+it("rejects a stale settings draft after a different writer publishes", () => {
+	const dir = mkdtempSync(join(tmpdir(), "quality-config-revision-"));
+	dirs.push(dir);
+	saveConfig(dir, { enabled: true });
+	const initialRevision = qualityConfigRevision(dir);
+	saveConfig(dir, { maxOutputTokens: 1000 }, initialRevision);
+	expect(() => saveConfig(dir, { enabled: false }, initialRevision)).toThrow("changed outside this menu");
+	expect(loadConfig(dir).config).toMatchObject({ enabled: true, maxOutputTokens: 1000 });
+});
+
 it("validates approved and actionable needs_work verdicts", () => {
 	expect(validateVerdict(approval, [file]).verdict).toBe("approved");
 	expect(validateVerdict(rejection, [file]).proposed["a.ts"]).toBe("const x = 1;\n");

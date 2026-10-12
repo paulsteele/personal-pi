@@ -1,6 +1,6 @@
 {
 	"name": "@paulsteele/pi-code-quality",
-	"version": "1.6.0",
+	"version": "2.0.0",
 	"private": true,
 	"description": "Isolated post-edit quality gate with human arbitration",
 	"type": "module",
@@ -14,6 +14,7 @@
 		"*.ts",
 		"lsp-broker-host.mjs",
 		"lsp-process-guard.mjs",
+		"lsp-sandbox-discovery.py",
 		"policy.md",
 		"examples.md",
 		"README.md",
@@ -32,7 +33,6 @@
 	},
 	"scripts": {
 		"test": "vitest run",
-		"test:lsp-compatibility": "QUALITY_LSP_PROBE=1 vitest run lsp-compatibility.test.ts",
 		"test:lsp-tui": "node lsp-tui-smoke.mjs",
 		"typecheck": "tsc --noEmit",
 		"lint": "biome lint .",
@@ -42,6 +42,8 @@
 		"calibrate": "bun calibrate.ts"
 	},
 	"dependencies": {
+		"@paulsteele/pi-shared-ui": "workspace:*",
+		"@paulsteele/pi-project-locations": "workspace:*",
 		"chokidar": "4.0.3",
 		"jiti": "2.7.0",
 		"vscode-languageserver-protocol": "3.18.4"

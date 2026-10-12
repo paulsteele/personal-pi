@@ -10,6 +10,10 @@ child.stdin.on("error", () => {});
 let stopping = false;
 let leaderExited = false;
 let forceTimer;
+let stderr = "";
+child.stderr.on("data", (chunk) => {
+	stderr = (stderr + String(chunk)).slice(-8000);
+});
 
 function notifyBroker(message) {
 	if (process.connected) process.send?.(message, () => {});
@@ -48,10 +52,12 @@ function handleControlMessage(message) {
 
 child.once("spawn", () => notifyBroker({ kind: "started", pid: child.pid }));
 child.once("error", reportChildFailure);
-child.once("exit", (code, signal) => {
+child.once("exit", () => {
 	leaderExited = true;
-	notifyBroker({ kind: "exited", code, signal });
 	stop();
+});
+child.once("close", (code, signal) => {
+	notifyBroker({ kind: "exited", code, signal, stderr });
 });
 process.on("message", handleControlMessage);
 process.on("disconnect", stop);

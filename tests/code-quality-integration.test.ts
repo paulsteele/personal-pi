@@ -1,19 +1,21 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { readFile, stat } from "node:fs/promises";
+import { LspManager } from "../code-quality/lsp-manager.ts";
 import { join } from "node:path";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAssistantMessageEventStream, type AssistantMessage, type Context } from "@earendil-works/pi-ai";
 import { registerQualityGate } from "../code-quality/index.ts";
-import { saveConfig } from "../code-quality/config.ts";
+import { loadConfig, saveConfig } from "../code-quality/config.ts";
 import { canonicalPath } from "../code-quality/capture.ts";
 import type { QualityUI } from "../code-quality/controller.ts";
 import type { ReviewResult } from "../code-quality/reviewer.ts";
-import { parseQualityActivity, parseQualityHeader, type QualityHeader } from "../pi-atelier/src/quality-activity.ts";
-import { createRunActivityTracker } from "../pi-atelier/src/run-activity.ts";
+import { parseQualityActivity, parseQualityHeader, type QualityHeader } from "../pi-sidebar/src/quality-activity.ts";
+import { createRunActivityTracker } from "../pi-sidebar/src/run-activity.ts";
 import { QUALITY_CHECK_ENTRY, QUALITY_CHECK_UPDATE_ENTRY } from "../code-quality/feedback.ts";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { approveLspDraft, loadLspDraft, resolveLspProject, saveLspDraft } from "../code-quality/lsp-profile.ts";
+import { approveLspDraft, loadLspDraft, loadLspProfile, resolveLspProject, saveLspDraft } from "../code-quality/lsp-profile.ts";
 
 const logTheme = { fg: (_color: string, text: string) => text } as Theme;
 const directories: string[] = [];
@@ -30,18 +32,44 @@ async function configureFixtureLsp(agentDir: string, cwd: string) {
   await approveLspDraft(agentDir, project, (await loadLspDraft(agentDir, project))!.revision);
 }
 
-async function fixture(review: (options: any) => Promise<ReviewResult>, calls: string[], denied = false, uiOverride: Partial<QualityUI> = {}, script?: (turn: number, context: Context) => unknown[], lspOptions: { configureLsp?: boolean } = {}) {
+type FixtureSandboxRequest = { accept(value: unknown): void };
+
+function registerFixtureSandboxService(pi: ExtensionAPI, cwd: string) {
+  pi.events.on("sandbox:service:v1", (raw) => {
+    const request = raw as FixtureSandboxRequest;
+    request.accept({ sessionId: "fixture", revision: () => "fixture", session: {
+      generation: 1, environment: { container: "fixture", user: "fixture", workspace: cwd, configuration: {} },
+      filesystem: {
+        canonical: async (path: string) => canonicalPath(path.startsWith("/") ? path : join(cwd, path)),
+        read: (path: string) => readFile(path),
+        stat: async (path: string) => {
+          try {
+            const metadata = await stat(path);
+            return { file: metadata.isFile(), directory: metadata.isDirectory(), size: metadata.size };
+          } catch {
+            throw new Error("FileNotFoundError");
+          }
+        },
+      },
+    } });
+  });
+}
+
+async function fixture(review: (options: any) => Promise<ReviewResult>, calls: string[], denied = false, uiOverride: Partial<QualityUI> = {}, script?: (turn: number, context: Context) => unknown[], lspOptions: { configureLsp?: boolean; qualityEnabled?: boolean } = {}) {
   const root = canonicalPath(mkdtempSync(join(tmpdir(), "pi-quality-integration-"))); directories.push(root);
   const cwd = join(root, "repo"), agentDir = join(root, "agent"); mkdirSync(cwd); mkdirSync(agentDir);
   const activity = createRunActivityTracker({ cwd });
   const qualityHeaders: QualityHeader[] = [];
-  saveConfig(agentDir, { provider: "synthetic", model: "fixture" });
+  saveConfig(agentDir, { provider: "synthetic", model: "fixture", enabled: lspOptions.qualityEnabled ?? true });
   if (lspOptions.configureLsp) await configureFixtureLsp(agentDir, cwd);
   const settingsManager = SettingsManager.inMemory({ defaultProjectTrust: "always", compaction: { enabled: false }, retry: { enabled: false } });
   const ui: QualityUI = { arbitrate: async () => ({ choice: "original", note: "Fixture decision" }), coverage: async () => undefined, failure: async () => undefined, ...uiOverride };
   const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, extensionFactories: [
     (pi) => { if (denied) pi.on("tool_call", (event) => event.toolName === "write" ? { block: true, reason: "Synthetic permission denial" } : undefined); },
-    (pi) => registerQualityGate(pi, { ui, review }, agentDir),
+    (pi) => {
+      registerFixtureSandboxService(pi, cwd);
+      registerQualityGate(pi, { ui, review, createLspManager: (changed) => new LspManager(agentDir, changed) }, agentDir);
+    },
     (pi) => {
       pi.events.on("code-quality:activity", (raw) => {
         const event = parseQualityActivity(raw);
@@ -61,7 +89,8 @@ async function fixture(review: (options: any) => Promise<ReviewResult>, calls: s
   const model = modelRuntime.getModel("synthetic", "fixture")!;
   const { session } = await createAgentSession({ cwd, agentDir, modelRuntime, model, resourceLoader, sessionManager: SessionManager.inMemory(cwd), settingsManager, thinkingLevel: "off" });
   const errors: string[] = [];
-  const uiContext = { setStatus() {}, notify() {}, setWidget() {}, setWorkingMessage() {}, setWorkingVisible() {}, setWorkingIndicator() {} } as unknown as ExtensionUIContext;
+  const notifications: string[] = [];
+  const uiContext = { setStatus() {}, notify(text: string) { notifications.push(text); }, setWidget() {}, setWorkingMessage() {}, setWorkingVisible() {}, setWorkingIndicator() {} } as unknown as ExtensionUIContext;
   await session.bindExtensions({ mode: "tui", uiContext, onError: (error) => errors.push(error.error) });
   let turn = 0;
   session.agent.streamFunction = (_model, context, options) => {
@@ -77,8 +106,36 @@ async function fixture(review: (options: any) => Promise<ReviewResult>, calls: s
     const message = { role: "assistant", api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), content, stopReason: content.some((part: any) => part.type === "toolCall") ? "toolUse" : "stop", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } } as AssistantMessage;
     const stream = createAssistantMessageEventStream(); stream.push({ type: "done", reason: message.stopReason as "stop" | "toolUse", message }); return stream;
   };
-  return { session, cwd, errors, activity, qualityHeaders };
+  return { session, cwd, agentDir, errors, activity, qualityHeaders, notifications };
 }
+
+test("reload retains the enabled LSP profile while the master quality switch suspends checks", async () => {
+  const h = await fixture(async () => approved(), [], false, {}, undefined, { configureLsp: true, qualityEnabled: false });
+  const status = async () => {
+    const command = h.session.extensionRunner.getCommand("quality")!;
+    await command.handler("lsp status", h.session.extensionRunner.createCommandContext());
+    expect(h.notifications.at(-1)).toContain("LSP profile enabled; automatic checks suspended because quality is off");
+  };
+  try {
+    await status();
+    await h.session.reload();
+    await status();
+    const project = await resolveLspProject(h.cwd, h.agentDir);
+    expect((await loadLspProfile(h.agentDir, project))?.profile.enabled).toBe(true);
+    expect(loadConfig(h.agentDir).config.enabled).toBe(false);
+    const command = h.session.extensionRunner.getCommand("quality")!;
+    await command.handler("on", h.session.extensionRunner.createCommandContext());
+    await h.session.reload();
+    expect(loadConfig(h.agentDir).config.enabled).toBe(true);
+    expect((await loadLspProfile(h.agentDir, project))?.profile.enabled).toBe(true);
+    await h.session.extensionRunner.getCommand("quality")!.handler("lsp status", h.session.extensionRunner.createCommandContext());
+    expect(h.notifications.at(-1)).not.toContain("suspended because quality is off");
+    expect(h.errors).toEqual([]);
+  } finally {
+    await h.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    h.session.dispose();
+  }
+});
 
 test("quality_response stays declared to the model but is unavailable to nested tools", async () => {
   const h = await fixture(async () => approved(), []);

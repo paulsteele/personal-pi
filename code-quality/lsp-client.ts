@@ -46,6 +46,7 @@ export class LspClient {
 	private rustReady = false;
 	private failure?: string;
 	private retiring = false;
+	private connectionClosed = false;
 	private stderr = "";
 	private serverPid?: number;
 	private readonly lifetime = new AbortController();
@@ -56,6 +57,14 @@ export class LspClient {
 		private readonly status: (phase: LspServerPhase, reason?: string) => void,
 		private readonly refresh: () => void,
 		private readonly guardRecord?: string,
+		private readonly execution?: {
+			command: string;
+			args: string[];
+			cwd: string;
+			env: NodeJS.ProcessEnv;
+			readFile(path: string): Promise<string>;
+			clientProcessId: number | null;
+		},
 	) {}
 
 	async start(): Promise<void> {
@@ -67,12 +76,12 @@ export class LspClient {
 			runtime,
 			[
 				fileURLToPath(new URL("./lsp-process-guard.mjs", import.meta.url)),
-				this.route.command,
-				...this.route.args,
+				this.execution?.command ?? this.route.command,
+				...(this.execution?.args ?? this.route.args),
 			],
 			{
-				cwd: this.root,
-				env: { ...process.env, ...this.route.env },
+				cwd: this.execution?.cwd ?? this.root,
+				env: this.execution?.env ?? { ...process.env, ...this.route.env },
 				stdio: ["pipe", "pipe", "pipe", "ipc"],
 				detached: true,
 			},
@@ -83,10 +92,25 @@ export class LspClient {
 		if (guard.pid && this.guardRecord)
 			await writeFile(this.guardRecord, JSON.stringify({ pid: guard.pid }), { mode: 0o600 });
 		guard.on("message", (message) => {
-			const event = message as { kind: string; pid?: number; reason?: string };
-			if (event.kind === "started") this.serverPid = event.pid;
-			if (event.kind === "failed" || (event.kind === "exited" && !this.retiring))
-				this.fail(event.reason ?? "Language server exited");
+			const event = message as {
+				kind: string;
+				pid?: number;
+				reason?: string;
+				code?: number | null;
+				signal?: string | null;
+				stderr?: string;
+			};
+			if (event.kind === "started") {
+				this.serverPid = event.pid;
+			}
+			if (event.kind === "failed") {
+				this.fail(event.reason ?? "Language server launch failed");
+			}
+			if (event.kind === "exited" && !this.retiring) {
+				const exitStatus = event.signal ? `signal ${event.signal}` : `code ${event.code ?? "unknown"}`;
+				const detail = (event.stderr ?? this.stderr).trim();
+				this.fail(`Language server exited (${exitStatus})${detail ? `: ${detail}` : ""}`);
+			}
 		});
 		guard.on("close", () => {
 			if (!this.retiring) this.fail("Language server guard closed");
@@ -95,6 +119,14 @@ export class LspClient {
 			this.stderr = (this.stderr + String(chunk)).slice(-8000);
 		});
 		this.connection = createProtocolConnection(guard.stdout!, guard.stdin!);
+		this.connection.onClose(() => {
+			this.connectionClosed = true;
+			if (this.retiring) {
+				this.lifetime.abort();
+			} else {
+				this.fail("Language server connection closed");
+			}
+		});
 		this.connection.onError(([error]) => this.fail(error.message));
 		this.connection.onRequest("client/registerCapability", ({ registrations }: RegistrationParams) => {
 			if (this.registrations.size + registrations.length > 256)
@@ -169,7 +201,7 @@ export class LspClient {
 		this.initialization = await this.request<InitializeResult>(
 			"initialize",
 			{
-				processId: process.pid,
+				processId: this.execution ? this.execution.clientProcessId : process.pid,
 				rootUri: pathToFileURL(this.root).href,
 				workspaceFolders: [{ uri: pathToFileURL(this.root).href, name: this.route.id }],
 				clientInfo: { name: "pi-quality-broker", version: "1" },
@@ -226,7 +258,9 @@ export class LspClient {
 		return value ?? null;
 	}
 	private fail(reason: string): void {
-		if (this.retiring) return;
+		if (this.retiring || this.failure) {
+			return;
+		}
 		this.failure = reason;
 		this.lifetime.abort();
 		this.status("failed", reason);
@@ -262,7 +296,9 @@ export class LspClient {
 		let abort!: () => void;
 		const interrupted = new Promise<never>((_, reject) => {
 			abort = () => {
-				cancellation.cancel();
+				if (!this.connectionClosed) {
+					cancellation.cancel();
+				}
 				reject(new Error(this.failure ?? `${method} interrupted or timed out`));
 			};
 			operationSignal.addEventListener("abort", abort, { once: true });
@@ -516,7 +552,12 @@ export class LspClient {
 				const language = Object.entries(this.route.extensions).find(([extension]) =>
 					path.endsWith(extension),
 				)?.[1];
-				if (language) await this.synchronize(path, language, await readFile(path, "utf8"));
+				if (language)
+					await this.synchronize(
+						path,
+						language,
+						this.execution ? await this.execution.readFile(path) : await readFile(path, "utf8"),
+					);
 			}
 		}
 		await this.connection.sendNotification("workspace/didChangeWatchedFiles", { changes: [{ uri, type }] });

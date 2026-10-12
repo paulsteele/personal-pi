@@ -131,6 +131,7 @@ export async function review(options: {
 	signal: AbortSignal;
 	progress: (message: string) => void;
 	work?: WorkPhase;
+	approval?: WorkPhase;
 	tasks?: TaskStore;
 	recovery?: RecoveryGate;
 	permissions?: ReviewPermissions;
@@ -373,7 +374,12 @@ export async function review(options: {
 				await recover(result.error);
 			}
 		} finally {
-			access.close();
+			try {
+				await access.close();
+			} catch (error) {
+				report.issues.push(`Worker cleanup failed: ${task.name}: ${String(error)}`);
+				tasks.update(id, {}, `Cleanup failed: ${String(error)}`);
+			}
 		}
 	}
 	try {
@@ -445,11 +451,16 @@ export async function review(options: {
 				}
 			});
 			if (valid.length) {
-				const chosen = await chooseMany(
-					ctx,
-					"Add specialists for this review only?",
-					valid.map((item) => ({ id: item.specialist.id, label: `${item.specialist.name}: ${item.reason}` })),
-					signal,
+				const chosen = await (options.approval ?? directWork)("Approving optional specialists", () =>
+					chooseMany(
+						ctx,
+						"Add specialists for this review only?",
+						valid.map((item) => ({
+							id: item.specialist.id,
+							label: `${item.specialist.name}: ${item.reason}`,
+						})),
+						signal,
+					),
 				);
 				for (const item of valid) {
 					if (chosen.includes(item.specialist.id))

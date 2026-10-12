@@ -177,7 +177,7 @@ describe("version bump preparation", () => {
     const manifest = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
     const plan = planVersionBump(root, "patch");
     expect(plan.currentVersion).toBe(manifest.version);
-    expect(plan.changes.filter((change) => change.path.endsWith("package.json"))).toHaveLength(9);
+    expect(plan.changes.filter((change) => change.path.endsWith("package.json"))).toHaveLength(manifest.workspaces.length + 1);
     expect(plan.changes.find((change) => change.path === "README.md")?.after).toContain(
       `https://github.com/paulsteele/personal-pi@v${plan.nextVersion}`,
     );

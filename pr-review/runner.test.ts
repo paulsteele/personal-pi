@@ -14,6 +14,7 @@ import {
 	type Finding,
 } from "./types.js";
 import { createWorkUI } from "./work-ui.js";
+import { createReviewDashboard } from "./dashboard.js";
 import { awaitWithSignal } from "./abort.js";
 import { TaskStore, RecoveryGate } from "./tasks.js";
 import { uiHarness } from "./ui.test.helpers.js";
@@ -36,16 +37,37 @@ const finding: Finding = {
 	rationale: "Fixture rationale",
 	evidence: [{ file: "a.ts", side: "new", line: 1, quote: "export const enabled = true;" }],
 };
+function permissionsRejectingWorkerCleanup(): ReviewPermissions {
+	return new ReviewPermissions("cleanup-fixture", {
+		task: (spec) => ({
+			check: async () => ({ kind: "allowed" as const, revision: "fixture" }),
+			revision: () => "fixture",
+			nextTurn() {},
+			endTurn() {},
+			close: async () => {
+				if (spec.kind === "worker") {
+					throw new Error("Reviewer cleanup failed");
+				}
+			},
+		}),
+		close() {},
+	});
+}
+
 async function run(
 	verdict: "confirmed" | "missing" | "bad-quote",
 	{
 		withProposalUI = false,
+		withDashboard = false,
 		approveWithMissingReading = false,
 		piSessionId = "pr-session",
+		workerCleanupFailure = false,
 	}: {
 		withProposalUI?: boolean;
+		withDashboard?: boolean;
 		approveWithMissingReading?: boolean;
 		piSessionId?: string;
+		workerCleanupFailure?: boolean;
 	} = {},
 ) {
 	const repo = await fixture();
@@ -116,13 +138,19 @@ async function run(
 	}
 	const controller = new AbortController();
 	const ctx = {
+		mode: "tui",
 		modelRegistry: {},
 		ui: h.ui,
 		sessionManager: { getSessionId: () => piSessionId },
 	} as unknown as ExtensionContext;
 	const workUI = createWorkUI(ctx, controller.signal, () => controller.abort());
+	const dashboard = withDashboard
+		? createReviewDashboard(ctx, new TaskStore(), { cancel: () => controller.abort() })
+		: undefined;
+	const permissions = workerCleanupFailure ? permissionsRejectingWorkerCleanup() : undefined;
 	const result = await review({
 		ctx,
+		...(permissions ? { permissions } : {}),
 		config: testConfig,
 		profile,
 		snapshot,
@@ -131,10 +159,22 @@ async function run(
 		signal: controller.signal,
 		progress: workUI.update,
 		...(withProposalUI ? { work: workUI.run } : {}),
+		...(dashboard ? { work: dashboard.work, approval: dashboard.approval } : {}),
 	});
+	dashboard?.dispose();
+	workUI.dispose();
 	await snapshot.dispose?.();
 	return { result, seen, ui: h.state };
 }
+it("retains and verifies accepted findings when worker cleanup rejects", async () => {
+	const { result, seen } = await run("confirmed", { workerCleanupFailure: true });
+	expect(result.status).toBe("incomplete");
+	expect(result.findings).toEqual([expect.objectContaining({ id: "F1", title: "Changed default" })]);
+	expect(result.ledger).toEqual(expect.arrayContaining([expect.objectContaining({ id: "F1", verdict: "confirmed" })]));
+	expect(result.issues.join("\n")).toContain("Reviewer cleanup failed");
+	expect(seen).toContain("security");
+});
+
 it("shares the Pi owner across stages and repeated runs while separating a fork", async () => {
 	for (const piSessionId of ["saved-owner", "saved-owner", "fork-owner"]) {
 		vi.mocked(runWorker).mockClear();
@@ -470,6 +510,17 @@ it("closes the proposal spinner before asking which specialists to run", async (
 	expect(result.declined).toContain("Extra lens");
 	expect(seen).not.toContain("extra");
 	expect(ui.nativeDialogs.some((title) => title.startsWith("Add specialists"))).toBe(true);
+	expect(ui.active).toBeUndefined();
+	expect(ui.closes).toBe(ui.factories);
+});
+
+it("yields the persistent review dashboard for optional specialist selection", async () => {
+	const { result, seen, ui } = await run("confirmed", { withProposalUI: true, withDashboard: true });
+	expect(result.status).toBe("complete");
+	expect(result.declined).toContain("Extra lens");
+	expect(seen).not.toContain("extra");
+	expect(ui.nativeDialogs.some((title) => title.startsWith("Add specialists"))).toBe(true);
+	expect(ui.notifications).toEqual([]);
 	expect(ui.active).toBeUndefined();
 	expect(ui.closes).toBe(ui.factories);
 });

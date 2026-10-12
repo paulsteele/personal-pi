@@ -135,7 +135,9 @@ it("does not read blocked search files or disclose rejected matches", async () =
 	await put(repo.root, "rejected.ts", "needle rejected\n");
 	await put(repo.root, "unmatched.ts", "ordinary source\n");
 	const copying = vi.spyOn(SnapshotStore.prototype, "copy");
-	const captured = await capture(repo, { kind: "local" }, testConfig, testAccess(), [], undefined, true);
+	const captured = await capture(repo, { kind: "local" }, testConfig, testAccess(), [], undefined, {
+		mode: "discovery",
+	});
 	const disclose = vi.fn(async (_action: PermissionAction) => ({
 		kind: "denied" as const,
 		reason: "disclosure denied",

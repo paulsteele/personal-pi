@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { projectStoragePath } from "@paulsteele/pi-project-locations";
 import { chmod, lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { git } from "./git.js";
@@ -172,6 +173,5 @@ export async function publish(
 	}
 }
 export const profilePath = (root: string, repoId: string): string => {
-	if (!/^[a-f0-9]{64}$/.test(repoId)) throw new Error("Invalid repository identity");
-	return join(root, "repos", repoId, "profile.json");
+	return projectStoragePath(root, { kind: "repos", id: repoId }, "profile.json");
 };

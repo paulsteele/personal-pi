@@ -1,2 +1,2 @@
-import permissionSystem from "./permission-system.ts";
-export default permissionSystem;
+import sandboxExtension from "./sandbox-extension.ts";
+export default sandboxExtension;

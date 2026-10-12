@@ -17,7 +17,10 @@ class Terminal(NamedTuple):
     descriptor: int
     output: bytearray
 
-root, quality, atelier, observer = sys.argv[1:]
+root, permission_system, quality, sidebar, observer = sys.argv[1:]
+for entry_path in [permission_system, quality, sidebar, observer]:
+    if not os.path.isfile(entry_path):
+        raise RuntimeError("Missing smoke extension entry: " + entry_path)
 event_log = os.path.join(root, "events.jsonl")
 environment = dict(os.environ, PI_CODING_AGENT_DIR=os.path.join(root, "agent"),
                    QUALITY_LSP_SMOKE_LOG=event_log, PI_OFFLINE="1", TERM="xterm-256color")
@@ -33,7 +36,7 @@ def events():
 
 
 def drain():
-    for child, descriptor, output in terminals:
+    for _, descriptor, output in terminals:
         while select.select([descriptor], [], [], 0)[0]:
             try:
                 chunk = os.read(descriptor, 65536)
@@ -61,7 +64,7 @@ def launch():
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 160, 0, 0))
     child = subprocess.Popen(["pi", "--offline", "--no-session", "--no-extensions", "--no-skills",
                               "--no-prompt-templates", "--no-themes", "--no-context-files", "--approve",
-                              "--tui-mode", "fullscreen", "-e", quality, "-e", atelier, "-e", observer],
+                              "--tui-mode", "fullscreen", "-e", permission_system, "-e", quality, "-e", sidebar, "-e", observer],
                              cwd=os.path.join(root, "project"), env=environment,
                              stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
     os.close(slave)
@@ -69,28 +72,42 @@ def launch():
     return child, master
 
 
-def shared_ready():
-    return any(server.get("clients") == 2 and server.get("phase") == "ready"
-               for event in events() for server in event.get("status", {}).get("lsp", []))
+def sidebar_started(process_id):
+    return any(event.get("kind") == "started" and event.get("pid") == process_id
+               and event.get("sidebarLoaded") for event in events())
+
+
+def sandbox_unavailable(process_id):
+    return any(event.get("kind") == "sandbox" and event.get("pid") == process_id
+               and event.get("state", {}).get("phase") == "unavailable" for event in events())
 
 
 try:
     first, first_terminal = launch()
-    wait_for("first Pi startup", lambda: any(event.get("kind") == "started" for event in events()))
+    wait_for("first Pi Sidebar startup", lambda: sidebar_started(first.pid))
+    wait_for("first mandatory sandbox failure state", lambda: sandbox_unavailable(first.pid))
+    os.write(first_terminal, b"/sidebar sandbox\r")
+    wait_for("first Sidebar sandbox tab", lambda: b"SANDBOX" in terminals[0].output and b"unavailable" in terminals[0].output)
     second, second_terminal = launch()
-    wait_for("one shared ready language server", shared_ready)
+    wait_for("second Pi Sidebar startup", lambda: sidebar_started(second.pid))
+    wait_for("second mandatory sandbox failure state", lambda: sandbox_unavailable(second.pid))
+    os.write(second_terminal, b"/sidebar sandbox\r")
+    wait_for("second Sidebar sandbox tab", lambda: b"SANDBOX" in terminals[1].output and b"unavailable" in terminals[1].output)
     first.send_signal(signal.SIGTERM)
     wait_for("first Pi shutdown", lambda: first.poll() is not None)
     os.write(second_terminal, b"/quality lsp status\r")
     wait_for("remaining Pi still alive", lambda: second.poll() is None, 2)
     os.write(second_terminal, b"/reload\r")
-    wait_for("reload lifecycle", lambda: any(event.get("kind") == "shutdown" and event.get("reason") == "reload" for event in events()))
+    wait_for("reload lifecycle", lambda: any(event.get("kind") == "shutdown" and event.get("pid") == second.pid
+                                             and event.get("reason") == "reload" for event in events()))
+    wait_for("Sidebar startup after reload", lambda: sum(event.get("kind") == "started" and event.get("pid") == second.pid
+                                                        for event in events()) >= 2)
     second.send_signal(signal.SIGTERM)
     wait_for("last Pi shutdown", lambda: second.poll() is not None)
     rendered = b"\n".join(bytes(terminal.output) for terminal in terminals).decode("utf-8", "replace")
-    if "quality" not in rendered or "fixture" not in rendered:
-        raise RuntimeError("Quality/LSP label was not rendered")
-    print("TUI smoke passed: two Pi processes, shared ready LSP, status, reload, and shutdown")
+    if "quality" not in rendered or "SANDBOX" not in rendered:
+        raise RuntimeError("Quality/Sidebar sandbox labels were not rendered")
+    print("TUI smoke passed: two Pi processes, Sidebar tabs, unavailable mandatory sandbox, status, reload, shutdown; no live LSP certification")
 finally:
     for index, (child, descriptor, output) in enumerate(terminals):
         if child.poll() is None:

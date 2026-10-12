@@ -87,6 +87,22 @@ function save(agentDir: string, patch: Partial<ObserverConfig>): ObserverConfig 
 	return next;
 }
 
+export function validateObserverSettings(config: Record<string, unknown>): ObserverConfig {
+	const result = validate({ ...DEFAULT_CONFIG, ...config });
+	if (!result.config) {
+		throw new Error(result.issues.join("; "));
+	}
+	return result.config;
+}
+
+export function saveConfig(agentDir: string, config: ObserverConfig): ObserverConfig {
+	const result = validate(config);
+	if (!result.config) {
+		throw new Error(result.issues.join("; "));
+	}
+	return save(agentDir, result.config);
+}
+
 export function saveEnabled(agentDir: string, enabledByDefault: boolean): ObserverConfig {
 	return save(agentDir, { enabledByDefault });
 }

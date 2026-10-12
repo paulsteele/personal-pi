@@ -33,6 +33,13 @@ for (const cancelStage of [undefined, "setup:discovery", "setup:profile"]) {
 				for (const callback of listeners.get(name) ?? []) callback(value);
 			},
 		};
+		events.on("sandbox:service:v1", (request) => {
+			request.accept({ authorizeHostSource: async (path: string) => {
+				if (path !== repo.commonDir && path !== repo.root && !path.startsWith(`${repo.root}/`)) {
+					throw new Error("Fixture source is outside approved mounts");
+				}
+			} });
+		});
 		const api = {
 			events,
 			on(name: string, handler: (event: any, ctx: any) => unknown) {
@@ -175,7 +182,7 @@ for (const cancelStage of [undefined, "setup:discovery", "setup:profile"]) {
 			);
 			if (cancelStage) {
 				expect(messages.at(-1)?.content).toContain("cancelled");
-				await expect(readFile(draftPath)).rejects.toBeDefined();
+				expect(readFile(draftPath)).rejects.toBeDefined();
 			} else {
 				expect(
 					JSON.parse(await readFile(draftPath, "utf8")).requiredReading,
