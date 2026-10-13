@@ -93,17 +93,20 @@ it("registers the unified command, review tool, and scoped result reader without
 	expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("interactive"), "warning");
 });
 it("selects the reviewer model without a sandbox service or repository source capture", async () => {
-  const h = await interactive();
-  const originalEmit = h.pi.events.emit;
-  h.pi.events.emit = (eventName, data) => {
-    const isSandboxServiceEvent = eventName === "sandbox:service:v1";
-    if (!isSandboxServiceEvent) {
-      originalEmit(eventName, data);
-    }
-  };
-  await h.commands.get("pr")!.handler("model", h.ctx);
-  expect(h.pi.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining("Independent review model") }), expect.anything());
-  expect(runWorker).not.toHaveBeenCalled();
+	const h = await interactive();
+	const originalEmit = h.pi.events.emit;
+	h.pi.events.emit = (eventName, data) => {
+		const isSandboxServiceEvent = eventName === "sandbox:service:v1";
+		if (!isSandboxServiceEvent) {
+			originalEmit(eventName, data);
+		}
+	};
+	await h.commands.get("pr")!.handler("model", h.ctx);
+	expect(h.pi.sendMessage).toHaveBeenCalledWith(
+		expect.objectContaining({ content: expect.stringContaining("Independent review model") }),
+		expect.anything(),
+	);
+	expect(runWorker).not.toHaveBeenCalled();
 });
 
 it("refuses checkout-local private storage when loading PR Settings", async () => {
@@ -111,7 +114,9 @@ it("refuses checkout-local private storage when loading PR Settings", async () =
 	process.env.PI_CODING_AGENT_DIR = join(h.repo.root, ".private-agent");
 	const prSettingsSection = discoverSettingsSections(h.pi).find((section) => section.id === "pr")!;
 	await expect(prSettingsSection.load(h.ctx)).rejects.toThrow("outside the reviewed checkout");
-	await expect(readFile(join(h.repo.root, ".private-agent/extensions/pr-review/config.json"), "utf8")).rejects.toThrow();
+	await expect(
+		readFile(join(h.repo.root, ".private-agent/extensions/pr-review/config.json"), "utf8"),
+	).rejects.toThrow();
 });
 
 it("persists PR default values when required settings fields are unset", async () => {
@@ -120,7 +125,12 @@ it("persists PR default values when required settings fields are unset", async (
 	const draft = await prSettingsSection.load(h.ctx);
 	await draft.apply({ schemaVersion: 2, modelSelection: "fake/independent" });
 	const config = JSON.parse(await readFile(join(h.agentDir, "extensions/pr-review/config.json"), "utf8"));
-	expect(config).toMatchObject({ thinking: "off", concurrency: 4, requestTimeoutMs: 300000, historyLimit: 20 });
+	expect(config).toMatchObject({
+		thinking: "off",
+		concurrency: 4,
+		requestTimeoutMs: 300000,
+		historyLimit: 20,
+	});
 });
 
 it("preserves PR configuration when the settings interaction is cancelled during publication", async () => {
@@ -132,7 +142,9 @@ it("preserves PR configuration when the settings interaction is cancelled during
 	const before = await readFile(path, "utf8");
 	const draft = await prSettingsSection.load(h.ctx);
 	let continuePublication!: () => void;
-	const publicationWait = new Promise<void>((resolve) => { continuePublication = resolve; });
+	const publicationWait = new Promise<void>((resolve) => {
+		continuePublication = resolve;
+	});
 	const originalPublish = runtimeStorage.publish;
 	const publicationStarted = vi.fn();
 	vi.spyOn(runtimeStorage, "publish").mockImplementationOnce(async (...args) => {

@@ -456,10 +456,17 @@ it("lists discovered C# solutions before projects and stores the path relative t
 it("persists automatic-language deselection when the wizard retains only TypeScript", async () => {
 	const fixture = await setupFixture(["app.ts", "app.py"], [true]);
 	await saveLspDraft(fixture.agentDir, fixture.project, {
-		version: 1, projectId: fixture.project.id, enabled: true, mode: "auto", disabledLanguages: [],
+		version: 1,
+		projectId: fixture.project.id,
+		enabled: true,
+		mode: "auto",
+		disabledLanguages: [],
 		routes: [presetRoute(presetById("typescript"), "/container/server")],
 	});
-	fixture.ports.selectLanguages = vi.fn(async () => ({ action: "continue" as const, selected: ["typescript"] }));
+	fixture.ports.selectLanguages = vi.fn(async () => ({
+		action: "continue" as const,
+		selected: ["typescript"],
+	}));
 	const approved = await setupSandboxLsp(fixture.options);
 	expect(approved?.profile.mode).toBe("auto");
 	expect(approved?.profile.disabledLanguages).toContain("pyright");
@@ -508,8 +515,11 @@ it("discovers setup files from the mapped project root when startup is in a subd
 	fixture.sandbox.session.environment.workspace = join(fixture.guestRoot, "subdirectory");
 	await setupSandboxLsp(fixture.options);
 	expect(fixture.sandbox.guestPath).toHaveBeenCalledWith(fixture.hostRoot);
-	expect(fixture.execute).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ cwd: fixture.guestRoot }));
-	expect(fixture.ports.selectLanguages).toHaveBeenCalledWith(fixture.ctx,
+	expect(fixture.execute).toHaveBeenCalledExactlyOnceWith(
+		expect.objectContaining({ cwd: fixture.guestRoot }),
+	);
+	expect(fixture.ports.selectLanguages).toHaveBeenCalledWith(
+		fixture.ctx,
 		[{ id: "pyright", label: "Python — Pyright", description: "Detected in this project", selected: true }],
 		fixture.signal,
 	);

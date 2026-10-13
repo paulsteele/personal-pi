@@ -2,7 +2,11 @@ import { readdir, open, realpath, lstat } from "node:fs/promises";
 import { constants, type BigIntStats } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { globalDefinitionPath, projectDefinitionPath, resolveSandboxProject } from "./definition.ts";
+import {
+  globalDefinitionPath,
+  projectDefinitionPath,
+  resolveSandboxProject,
+} from "./definition.ts";
 import { loadSandboxSettings, saveSandboxSettings, sandboxDisclosureRevision } from "./settings.ts";
 import { proposeDevcontainer, publishApprovedProposal, validateProposal } from "./setup.ts";
 import type { SandboxService } from "./service.ts";
@@ -90,16 +94,21 @@ export async function handleSandboxSetup(
   let draft: unknown = manualDraft;
   if (mode === "Propose with current model") {
     if (!sourceService) {
-      throw new Error("Model setup source access requires a ready sandbox; use manual setup during bootstrap");
+      throw new Error(
+        "Model setup source access requires a ready sandbox; use manual setup during bootstrap",
+      );
     }
     const disclosureRevision = () => sandboxDisclosureRevision(agentDir, sourceService.revision());
     const evidenceRevision = disclosureRevision();
     const [guestDirectory] = await sourceService.authorizeHostSources([ctx.cwd], ctx.signal);
     const authorizeEvidencePath = async (guestPath: string) => {
       await reviewSandboxAction({
-        session: sourceService.session, canonicalGuestPath: guestPath, agentDir,
-        toolName: "read", input: { path: guestPath }, toolCallId: "sandbox-setup", ctx,
-        confirm: (_context, category, reason) => sourceService.session.options.confirm(`${category}: ${reason}`, ctx.signal),
+        session: sourceService.session,
+        canonicalGuestPath: guestPath,
+        agentDir,
+        toolName: "read",
+        input: { path: guestPath },
+        ctx,
       });
     };
     await authorizeEvidencePath(guestDirectory!);
@@ -109,7 +118,10 @@ export async function handleSandboxSetup(
     const manifestNames = ["package.json", "Cargo.toml", "go.mod", "pyproject.toml", "global.json"];
     const manifests: Record<string, string> = {};
     const presentManifestNames = manifestNames.filter((name) => entries.includes(name));
-    const manifestSources = presentManifestNames.map((name) => ({ name, path: join(ctx.cwd, name) }));
+    const manifestSources = presentManifestNames.map((name) => ({
+      name,
+      path: join(ctx.cwd, name),
+    }));
     const manifestPaths = manifestSources.map((source) => source.path);
     for (const { name, path } of manifestSources) {
       const canonical = await realpath(path);
@@ -120,10 +132,17 @@ export async function handleSandboxSetup(
         throw new Error("Setup manifest changed during authorization");
       }
       ctx.signal?.throwIfAborted();
-      const handle = await open(canonical, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      const handle = await open(
+        canonical,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
       try {
         const openedManifestIdentity = await handle.stat({ bigint: true });
-        if (!openedManifestIdentity.isFile() || openedManifestIdentity.dev !== manifestFileStat.dev || openedManifestIdentity.ino !== manifestFileStat.ino) {
+        if (
+          !openedManifestIdentity.isFile() ||
+          openedManifestIdentity.dev !== manifestFileStat.dev ||
+          openedManifestIdentity.ino !== manifestFileStat.ino
+        ) {
           throw new Error("Setup manifest is not a regular file");
         }
         const buffer = Buffer.alloc(8000);
@@ -156,9 +175,14 @@ export async function handleSandboxSetup(
         for (const { name, path } of manifestSources) {
           const currentIdentity = await lstat(path, { bigint: true });
           const capturedIdentity = manifestIdentities.get(name)!;
-          if (!currentIdentity.isFile() || currentIdentity.dev !== capturedIdentity.dev ||
-              currentIdentity.ino !== capturedIdentity.ino || currentIdentity.size !== capturedIdentity.size ||
-              currentIdentity.mtimeNs !== capturedIdentity.mtimeNs || currentIdentity.ctimeNs !== capturedIdentity.ctimeNs) {
+          if (
+            !currentIdentity.isFile() ||
+            currentIdentity.dev !== capturedIdentity.dev ||
+            currentIdentity.ino !== capturedIdentity.ino ||
+            currentIdentity.size !== capturedIdentity.size ||
+            currentIdentity.mtimeNs !== capturedIdentity.mtimeNs ||
+            currentIdentity.ctimeNs !== capturedIdentity.ctimeNs
+          ) {
             throw new Error("Setup manifest changed before model disclosure");
           }
         }

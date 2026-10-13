@@ -112,7 +112,7 @@ it("ends active attention requests when the publisher is disposed", () => {
 	expect(attention[1]).toEqual({ ...attention[0], active: false });
 	finishFailure();
 	expect(attention).toHaveLength(2);
-	h.publisher.requestDecision("scope")();
+	h.publisher.requestDecision("coverage")();
 	expect(attention).toHaveLength(2);
 });
 

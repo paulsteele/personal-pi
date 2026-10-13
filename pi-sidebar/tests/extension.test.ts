@@ -287,11 +287,14 @@ it("does not change replacement Sidebar presentation after a deferred old-sessio
 	const applying = vi.fn();
 	vi.spyOn(settingsStorage, "fileSettingsDraft").mockImplementationOnce(async (...args) => {
 		const loaded = await original(...args);
-		return { ...loaded, apply: async (value, signal) => {
-			applying();
-			await publicationWait.promise;
-			await loaded.apply(value, signal);
-		} };
+		return {
+			...loaded,
+			apply: async (value, signal) => {
+				applying();
+				await publicationWait.promise;
+				await loaded.apply(value, signal);
+			},
+		};
 	});
 	const section = discoverSettingsSections(h.pi).find((section) => section.id === "sidebar")!;
 	const draft = await section.load(h.ctx as never);
@@ -316,11 +319,14 @@ it("forwards cancellation through a deferred Sidebar preferences publication", a
 	const applying = vi.fn();
 	vi.spyOn(settingsStorage, "fileSettingsDraft").mockImplementationOnce(async (...args) => {
 		const loaded = await original(...args);
-		return { ...loaded, apply: async (value, signal) => {
-			applying();
-			await publicationWait.promise;
-			await loaded.apply(value, signal);
-		} };
+		return {
+			...loaded,
+			apply: async (value, signal) => {
+				applying();
+				await publicationWait.promise;
+				await loaded.apply(value, signal);
+			},
+		};
 	});
 	const section = discoverSettingsSections(h.pi).find((section) => section.id === "sidebar")!;
 	const draft = await section.load(h.ctx as never);

@@ -45,10 +45,12 @@ Source-consuming setup and reviews require the **already-loaded local Permission
 its existing global config. There is no bundled fallback, PR-specific policy file, or general subagent
 runtime. Status/model selection and source-free setup edit/approve remain available without the service.
 
-The loaded sandbox service checks approved host/guest mappings, explicit tool/path denies, and recognized
-sensitive or external-effect operations. Those operations require fresh human approval and block without
-interactive authority. Ordinary mapped reads do not invoke the retained historical classifier or `/auto`
-controls. Worker capabilities remain snapshot-only/read-only; a tool-level allow cannot bypass source
+Delegated source disclosure checks approved host/guest mappings, explicit tool/path denies, and recognized
+sensitive source paths. Sensitive capture, worker disclosure, and outgoing source dependencies require fresh
+parent-owned human approval and block without interactive authority. Sensitive local scans are refused
+without prompting. Guest execution and authorized native commands have a separate capability/deny-only
+contract; destructive or external-effect commands do not receive additional safety prompts. Ordinary mapped
+reads do not invoke the retained historical classifier or `/auto` controls. Worker capabilities remain snapshot-only/read-only; a tool-level allow cannot bypass source
 path restrictions.
 
 Permission policy is **live at action boundaries**, including after pending decisions and before outgoing
@@ -102,7 +104,7 @@ repository-contained snapshot files without resolving their `ask` rules first. E
 denies and deterministic sensitive-path guards prevent the scan; those files are reported as skipped
 coverage, not searched with zero matches. External destinations are not eligible. Files with no matches
 cause no human request and add no continuing context dependency. Matching lines pass the normal
-read/skill permission gate before they are returned, and only delivered matches become dependencies for
+delegated disclosure gate before they are returned, and only delivered matches become dependencies for
 later model requests or transfers. A rejected outer tool result commits no new dependencies. Local checks
 and disclosure checks both honor live policy changes and cancellation. Older permission services without
 local-search support fail closed. This changes only snapshot search, not ordinary reads or skill invocation;
@@ -212,4 +214,6 @@ bun run --cwd pr-review test:compat
 
 `test:compat` covers extension loading, permission-owner registration, structured worker submissions, and real Pi focus handling. Browser handoff and feedback identity have separate fixture-based regression coverage. Tests and manual launchers requiring a privately installed Plannotator package have been removed. This does not certify production viewer compatibility.
 
-Committed-tree capture tests require Git with `check-attr --source` support. An older Git is a development-tool prerequisite failure, not grounds to delete source-safety or historical-attribute regression tests.
+The default suites no longer include 67 committed-tree-dependent test cases (including three historical LFS-attribute scenarios) or two PR permission integration scenarios, removed at the operator's request. Git-independent checks and unborn-repository capture tests remain, but the passing default suite no longer verifies committed-tree capture, historical LFS classification, or the removed runner/permission scenarios.
+
+Production historical attribute inspection still uses `check-attr --source` and requires Git 2.43 or newer. Test removal does not make that production path compatible with older Git.

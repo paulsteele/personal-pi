@@ -1,5 +1,10 @@
 import { isAbsolute, resolve } from "node:path";
-import { type MountGrant, mountArgument } from "./mounts.ts";
+import { type MountGrant, mountArgument, validateMountTopology } from "./mounts.ts";
+import {
+  toolImageMountsSchema,
+  toolImageMountArgument,
+  type ToolImageMount,
+} from "./tool-image-mounts.ts";
 
 export interface EngineAuthority {
   label: string;
@@ -12,6 +17,7 @@ export interface EngineAuthority {
   containerfiles: string[];
   mounts: MountGrant[];
   volumes: string[];
+  toolImageMounts?: ToolImageMount[];
   ports: number[];
   environment: Record<string, string>;
   users: string[];
@@ -45,6 +51,8 @@ function requireOwnedObject(value: string, allowed: readonly string[], kind: str
 
 function validateRunArguments(args: string[], authority: EngineAuthority): string[] {
   let index = 1;
+  validateMountTopology(authority.mounts);
+  const toolMounts = toolImageMountsSchema.parse(authority.toolImageMounts ?? []);
   const approvedMounts = new Set(authority.mounts.map(mountArgument));
   const seenDestinations = new Set<string>();
   for (; index < args.length && args[index].startsWith("-"); ) {
@@ -120,6 +128,7 @@ function validateRunArguments(args: string[], authority: EngineAuthority): strin
     "--label",
     authority.label,
     ...options,
+    ...toolMounts.flatMap((mount) => ["--mount", toolImageMountArgument(mount)]),
     ...args.slice(index),
   ];
 }

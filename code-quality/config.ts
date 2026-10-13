@@ -1,4 +1,13 @@
-import { readFileSync, mkdirSync, writeFileSync, renameSync, lstatSync, openSync, closeSync, unlinkSync } from "node:fs";
+import {
+	readFileSync,
+	mkdirSync,
+	writeFileSync,
+	renameSync,
+	lstatSync,
+	openSync,
+	closeSync,
+	unlinkSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import { canonicalPath } from "./capture.js";
@@ -19,8 +28,8 @@ export const DEFAULT_CONFIG: QualityConfig = Object.freeze({
 	timeoutMs: 30_000,
 	maxFileBytes: 262_144,
 	maxBatchBytes: 1_048_576,
-	maxInputChars: 64_000,
-	maxOutputTokens: 8_000,
+	maxInputChars: 128_000,
+	maxOutputTokens: 16_000,
 });
 export const configPath = (agentDir: string): string =>
 	join(agentDir, "extensions", "code-quality", "config.json");
@@ -73,7 +82,9 @@ export function loadConfig(agentDir: string): { config: QualityConfig; error?: s
 
 export function qualityConfigRevision(agentDir: string): string {
 	try {
-		return createHash("sha256").update(readFileSync(configPath(agentDir))).digest("hex");
+		return createHash("sha256")
+			.update(readFileSync(configPath(agentDir)))
+			.digest("hex");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
 			return "missing";
@@ -82,7 +93,11 @@ export function qualityConfigRevision(agentDir: string): string {
 	}
 }
 
-export function saveConfig(agentDir: string, patch: Partial<QualityConfig>, expectedRevision?: string): QualityConfig {
+export function saveConfig(
+	agentDir: string,
+	patch: Partial<QualityConfig>,
+	expectedRevision?: string,
+): QualityConfig {
 	const canonicalAgentDir = canonicalPath(agentDir);
 	const path = configPath(canonicalAgentDir);
 	for (let candidate = path; ; candidate = dirname(candidate)) {

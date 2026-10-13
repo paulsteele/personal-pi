@@ -351,7 +351,11 @@ export class BashPathResolver {
       case "redirected_statement":
         return this.walkCurrentShellSequence(node, base, out);
       case "command":
-        tagTokens(collectCommandTokens(node, (name) => this.guestHomeBinding(name)), base, out);
+        tagTokens(
+          collectCommandTokens(node, (name) => this.guestHomeBinding(name)),
+          base,
+          out,
+        );
         return this.foldCd(node, base);
       case "pipeline":
         // tree-sitter-bash mis-groups a redirect-bearing `&&`/`;` list as the
@@ -376,7 +380,11 @@ export class BashPathResolver {
         // substitution interiors: collect every candidate in the subtree tagged
         // with the enclosing base and do not fold their internal `cd`s. (Folding
         // inside substitutions is deferred — conservative, never under-flags.)
-        tagTokens(collectPathCandidateTokens(node, (name) => this.guestHomeBinding(name)), base, out);
+        tagTokens(
+          collectPathCandidateTokens(node, (name) => this.guestHomeBinding(name)),
+          base,
+          out,
+        );
         return base;
     }
   }
@@ -471,7 +479,11 @@ export class BashPathResolver {
       return current;
     }
     // Bare `command` or any other shape: a true subshell first stage.
-    tagTokens(collectPathCandidateTokens(node, (name) => this.guestHomeBinding(name)), base, out);
+    tagTokens(
+      collectPathCandidateTokens(node, (name) => this.guestHomeBinding(name)),
+      base,
+      out,
+    );
     return base;
   }
 
@@ -694,7 +706,9 @@ export class BashPathResolver {
   }
 
   private expandHomeToken(token: string): string {
-    return this.normalizer.guestHome ? token.replace(/^~(?=\/|$)/, this.normalizer.guestHome) : token;
+    return this.normalizer.guestHome
+      ? token.replace(/^~(?=\/|$)/, this.normalizer.guestHome)
+      : token;
   }
 
   private probeBareToken(token: string, base: EffectiveBase): BashPathRuleCandidate | null {

@@ -38,6 +38,7 @@ const LspPosition = Type.Object({
 	character: Type.Integer({ minimum: 0 }),
 });
 const LspAssessmentSchema = Type.Object({
+	paths: Type.Optional(Type.Array(Text)),
 	findings: Type.Array(
 		Type.Object({
 			file: Text,
@@ -72,11 +73,13 @@ const CaseSchema = Type.Object({
 	authorized: Type.Array(Text),
 	providerKey: Text,
 	pendingPaths: Type.Array(Text),
-	scope: Type.Array(Text),
 	objection: OptionalText,
 	lsp: Type.Optional(LspAssessmentSchema),
 	lspWaived: Type.Optional(Type.Boolean()),
 	lspRequired: Type.Optional(Type.Boolean()),
+	lspCapturePaths: Type.Optional(Type.Array(Text)),
+	lspUnavailable: OptionalText,
+	sizeWaivers: Type.Optional(Type.Array(Type.Object({ path: Text, reason: Text }))),
 	reason: OptionalText,
 	verdict: Type.Optional(
 		Type.Object({
@@ -152,12 +155,14 @@ export class CaseStore {
 			if (state.id !== ref.id || state.cwd !== this.cwd)
 				throw new Error("Quality state belongs to another workspace/case");
 			const paths = state.files.map((file) => file.path);
-			if (
-				new Set(paths).size !== paths.length ||
-				[...paths, ...state.scope, ...state.authorized, ...state.pendingPaths].some(
-					(path) => !isAbsolute(path),
-				)
-			)
+			const allCasePaths = [
+				...paths,
+				...state.authorized,
+				...state.pendingPaths,
+				...(state.lspCapturePaths ?? []),
+				...(state.lsp?.paths ?? []),
+			];
+			if (new Set(paths).size !== paths.length || allCasePaths.some((path) => !isAbsolute(path)))
 				throw new Error("Invalid quality case paths");
 			if (
 				state.pendingPaths.some((path) => !paths.includes(path)) ||

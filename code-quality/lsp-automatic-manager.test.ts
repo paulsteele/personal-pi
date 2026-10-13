@@ -5,7 +5,13 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SandboxLspManager } from "./lsp-sandbox-manager.js";
 import type { QualitySandbox } from "./sandbox.js";
-import { approveLspDraft, loadLspDraft, resolveLspProject, saveLspDraft, type LspRoute } from "./lsp-profile.js";
+import {
+	approveLspDraft,
+	loadLspDraft,
+	resolveLspProject,
+	saveLspDraft,
+	type LspRoute,
+} from "./lsp-profile.js";
 import { presetById, presetRoute } from "./lsp-presets.js";
 
 const observed = vi.hoisted(() => ({ routes: [] as LspRoute[], checks: vi.fn(async () => []) }));
@@ -31,11 +37,13 @@ afterEach(async () => {
 	);
 });
 
-async function automaticFixture(options: {
-	provisionedTools?: boolean;
-	discoveryFiles?: string[];
-	tools?: { id: string; version: string; executable: string }[];
-} = {}) {
+async function automaticFixture(
+	options: {
+		provisionedTools?: boolean;
+		discoveryFiles?: string[];
+		tools?: { id: string; version: string; executable: string }[];
+	} = {},
+) {
 	const directory = await mkdtemp(join(tmpdir(), "automatic-lsp-"));
 	directories.push(directory);
 	const root = join(directory, "project");
@@ -67,7 +75,13 @@ async function automaticFixture(options: {
 				list: async () => [],
 			},
 			execute: vi.fn(async () => ({
-				output: Buffer.from(JSON.stringify({ files: options.discoveryFiles ?? ["app.py", "pyproject.toml"], manifestRevision: "manifests", truncated: false })),
+				output: Buffer.from(
+					JSON.stringify({
+						files: options.discoveryFiles ?? ["app.py", "pyproject.toml"],
+						manifestRevision: "manifests",
+						truncated: false,
+					}),
+				),
 				stderr: "",
 				code: 0,
 			})),
@@ -129,10 +143,15 @@ it("checks an explicit custom route in automatic mode without provisioning or di
 	const project = await resolveLspProject(fixture.root, fixture.agentDir);
 	const route: LspRoute = {
 		...presetRoute(presetById("pyright"), "/usr/local/bin/custom-server"),
-		id: "custom-python", preset: "custom",
+		id: "custom-python",
+		preset: "custom",
 	};
 	await saveLspDraft(fixture.agentDir, project, {
-		version: 1, projectId: project.id, enabled: true, mode: "auto", routes: [route],
+		version: 1,
+		projectId: project.id,
+		enabled: true,
+		mode: "auto",
+		routes: [route],
 	});
 	const savedDraft = await loadLspDraft(fixture.agentDir, project);
 	expect(savedDraft).toBeDefined();
@@ -140,7 +159,8 @@ it("checks an explicit custom route in automatic mode without provisioning or di
 	try {
 		await fixture.manager.start(fixture.root, true);
 		const result = await fixture.manager.check(
-			[{ path: "/workspace/app.py", after: fixture.text }], new AbortController().signal,
+			[{ path: "/workspace/app.py", after: fixture.text }],
+			new AbortController().signal,
 		);
 		expect(result).toMatchObject({ kind: "checked", findings: [] });
 		expect(observed.routes).toMatchObject([{ id: "custom-python", command: "/usr/local/bin/custom-server" }]);
@@ -157,13 +177,20 @@ it("checks both workspaces when their punctuation would collide in display-orien
 	});
 	await fixture.manager.start(fixture.root, true);
 	try {
-		const result = await fixture.manager.check([
-			{ path: "/workspace/a/b/app.ts", after: fixture.text },
-			{ path: "/workspace/a-b/app.ts", after: fixture.text },
-		], new AbortController().signal);
-		expect(result).toMatchObject({ kind: "checked", hashes: {
-			"/workspace/a/b/app.ts": expect.any(String), "/workspace/a-b/app.ts": expect.any(String),
-		} });
+		const result = await fixture.manager.check(
+			[
+				{ path: "/workspace/a/b/app.ts", after: fixture.text },
+				{ path: "/workspace/a-b/app.ts", after: fixture.text },
+			],
+			new AbortController().signal,
+		);
+		expect(result).toMatchObject({
+			kind: "checked",
+			hashes: {
+				"/workspace/a/b/app.ts": expect.any(String),
+				"/workspace/a-b/app.ts": expect.any(String),
+			},
+		});
 		expect(observed.routes.map((route) => route.root)).toEqual(["/workspace/a/b", "/workspace/a-b"]);
 		expect(observed.checks).toHaveBeenCalledTimes(2);
 	} finally {
@@ -171,36 +198,52 @@ it("checks both workspaces when their punctuation would collide in display-orien
 	}
 });
 
-it.each(["explicit", "auto"] as const)("selects only the deepest approved routes in %s mode", async (mode) => {
-	const fixture = await automaticFixture();
-	const project = await resolveLspProject(fixture.root, fixture.agentDir);
-	const parent = { ...presetRoute(presetById("pyright"), "/tools/parent"), id: "parent" };
-	const nested = { ...presetRoute(presetById("pyright"), "/tools/nested", "pyright", "app"), id: "nested" };
-	const nestedAdditional = { ...nested, id: "nested-additional", command: "/tools/additional" };
-	await saveLspDraft(fixture.agentDir, project, {
-		version: 1, projectId: project.id, enabled: true, mode, routes: [parent, nested, nestedAdditional],
-	});
-	const draft = (await loadLspDraft(fixture.agentDir, project))!;
-	await approveLspDraft(fixture.agentDir, project, draft.revision);
-	await fixture.manager.start(fixture.root, true);
-	try {
-		const result = await fixture.manager.check([{ path: "/workspace/app/main.py", after: fixture.text }], new AbortController().signal);
-		expect(result).toMatchObject({ kind: "checked" });
-		expect(observed.checks).toHaveBeenCalledTimes(2);
-		expect(fixture.sandbox.session.execute).not.toHaveBeenCalled();
-	} finally {
-		await fixture.manager.stop();
-	}
-});
+it.each(["explicit", "auto"] as const)(
+	"selects only the deepest approved routes in %s mode",
+	async (mode) => {
+		const fixture = await automaticFixture();
+		const project = await resolveLspProject(fixture.root, fixture.agentDir);
+		const parent = { ...presetRoute(presetById("pyright"), "/tools/parent"), id: "parent" };
+		const nested = { ...presetRoute(presetById("pyright"), "/tools/nested", "pyright", "app"), id: "nested" };
+		const nestedAdditional = { ...nested, id: "nested-additional", command: "/tools/additional" };
+		await saveLspDraft(fixture.agentDir, project, {
+			version: 1,
+			projectId: project.id,
+			enabled: true,
+			mode,
+			routes: [parent, nested, nestedAdditional],
+		});
+		const draft = (await loadLspDraft(fixture.agentDir, project))!;
+		await approveLspDraft(fixture.agentDir, project, draft.revision);
+		await fixture.manager.start(fixture.root, true);
+		try {
+			const result = await fixture.manager.check(
+				[{ path: "/workspace/app/main.py", after: fixture.text }],
+				new AbortController().signal,
+			);
+			expect(result).toMatchObject({ kind: "checked" });
+			expect(observed.checks).toHaveBeenCalledTimes(2);
+			expect(fixture.sandbox.session.execute).not.toHaveBeenCalled();
+		} finally {
+			await fixture.manager.stop();
+		}
+	},
+);
 
 it("keeps a warm automatic client when an ordinary source file is added under its root", async () => {
 	const discoveryFiles = ["app.py", "pyproject.toml"];
 	const fixture = await automaticFixture({ discoveryFiles });
 	await fixture.manager.start(fixture.root, true);
 	try {
-		await fixture.manager.check([{ path: "/workspace/app.py", after: fixture.text }], new AbortController().signal);
+		await fixture.manager.check(
+			[{ path: "/workspace/app.py", after: fixture.text }],
+			new AbortController().signal,
+		);
 		discoveryFiles.push("another.py");
-		await fixture.manager.check([{ path: "/workspace/another.py", after: fixture.text }], new AbortController().signal);
+		await fixture.manager.check(
+			[{ path: "/workspace/another.py", after: fixture.text }],
+			new AbortController().signal,
+		);
 		expect(observed.routes).toHaveLength(1);
 		expect(observed.checks).toHaveBeenCalledTimes(2);
 	} finally {
@@ -212,13 +255,23 @@ it("does not infer a diagnostic route for a language deselected in the automatic
 	const fixture = await automaticFixture();
 	const project = await resolveLspProject(fixture.root, fixture.agentDir);
 	await saveLspDraft(fixture.agentDir, project, {
-		version: 1, projectId: project.id, enabled: true, mode: "auto", routes: [], disabledLanguages: ["pyright"],
+		version: 1,
+		projectId: project.id,
+		enabled: true,
+		mode: "auto",
+		routes: [],
+		disabledLanguages: ["pyright"],
 	});
 	const draft = (await loadLspDraft(fixture.agentDir, project))!;
 	await approveLspDraft(fixture.agentDir, project, draft.revision);
 	await fixture.manager.start(fixture.root, true);
 	try {
-		expect(await fixture.manager.check([{ path: "/workspace/app.py", after: fixture.text }], new AbortController().signal)).toBeUndefined();
+		expect(
+			await fixture.manager.check(
+				[{ path: "/workspace/app.py", after: fixture.text }],
+				new AbortController().signal,
+			),
+		).toBeUndefined();
 		expect(observed.checks).not.toHaveBeenCalled();
 		expect(observed.routes).toEqual([]);
 	} finally {

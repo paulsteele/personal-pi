@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { evaluateSafety, type GuardPathFact, type SafetyContext } from "./auto/safety-policy.ts";
+import { guestToHost } from "./sandbox/mounts.ts";
 import {
   getAgentDir,
   type ExtensionAPI,
@@ -144,7 +147,10 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     retireService?.();
     retireService = undefined;
     if (cleanupErrors.length) {
-      context?.ui.notify(`Sandbox retirement failed: ${cleanupErrors.map(String).join("; ")}`, "error");
+      context?.ui.notify(
+        `Sandbox retirement failed: ${cleanupErrors.map(String).join("; ")}`,
+        "error",
+      );
     }
   }
 
@@ -157,229 +163,297 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     const startupController = new AbortController();
     startupAbort = startupController;
     try {
-      pendingStartup = startup.run("Starting devcontainer", async (progress) => {
-        startupController.signal.throwIfAborted();
-        progress.stage("Loading sandbox settings…");
-        const settings = await loadSandboxSettings(getAgentDir());
-        if (settings.needsMigration) {
-          throw new Error("Run /sandbox setup to migrate legacy auto-mode settings");
-        }
-        const selected = await selectDefinition({
-          agentDir: getAgentDir(),
-          cwd: ctx.cwd,
-          choose: async (paths) =>
-            startup.withoutScreen(async () => {
-              if (!ctx.hasUI) {
-                return undefined;
-              }
-              const selection = ctx.ui.select(
-                "Select devcontainer definition",
-                [...paths],
-                { signal: startupController.signal },
-              );
-              return awaitSandboxWork(selection, startupController.signal);
-            }),
-        });
-        startupController.signal.throwIfAborted();
-        const toolsPath = globalToolProfilePath(getAgentDir());
-        if (!(await readPrivateText(toolsPath))) {
-          const profile = defaultToolProfile();
-          const preview = [
-            "Provision the shared development toolset?",
-            toolsPath,
-            "All five language servers and isolated supporting runtimes will be available in every supported sandbox. Image builds are cached; project definitions and host access are unchanged.",
-            JSON.stringify(profile, null, 2),
-          ].join("\n\n");
-          if (!(await confirm(preview, "", startupController.signal))) {
-            throw new Error("Global tooling provisioning was not approved");
-          }
-          await publishPrivateText(toolsPath, `${JSON.stringify(profile, null, 2)}\n`, undefined, startupController.signal);
-        }
-        progress.stage(`Resolving devcontainer definition: ${selected.path}`);
-        const resolved = await resolveDefinition({
-          selected,
-          agentDir: getAgentDir(),
-          hostEnvironment: settings.settings.sandbox.hostEnvironment,
-          signal: startupController.signal,
-          confirmBuildInput: (preview) => confirm(preview, "", startupController.signal),
-        });
-        publisher.update({
-          sessionId: ctx.sessionManager.getSessionId(),
-          phase: "starting",
-          definitionPath: resolved.path,
-          mounts: [],
-          ports: [],
-        });
-        const candidate = new SandboxSession({
-          agentDir: getAgentDir(),
-          sessionId: ctx.sessionManager.getSessionId(),
-          resolved,
-          hostEnvironment: settings.settings.sandbox.hostEnvironment,
-          confirm: (preview, operationSignal, toolCallId) =>
-            confirm(preview, toolCallId, operationSignal),
-          startupTimeoutMs: settings.settings.sandbox.startupTimeoutMs,
-          buildTimeoutMs: settings.settings.sandbox.buildTimeoutMs,
-          startup,
-          signal: startupController.signal,
-          changed: () => {
-            if (session !== candidate) {
-              return;
-            }
-            try {
-              publisher.update({
-                sessionId: ctx.sessionManager.getSessionId(),
-                phase: "ready",
-                definitionPath: candidate.options.resolved.path,
-                toolingSources: candidate.options.resolved.layers?.sources.map(
-                  (source) => source.path,
-                ),
-                toolingRevision: candidate.environment.toolInventory?.revision,
-                containerId: candidate.environment.container,
-                containerName: candidate.containerName,
-                image: candidate.environment.image,
-                cwd: candidate.environment.workspace,
-                mounts: [...candidate.mounts],
-                ports:
-                  candidate.options.resolved.definition.forwardPorts?.filter(
-                    (port): port is number => typeof port === "number",
-                  ) ?? [],
-              });
-            } catch {
-              publisher.update({
-                sessionId: ctx.sessionManager.getSessionId(),
-                phase: "changing",
-                definitionPath: resolved.path,
-                mounts: [...candidate.mounts],
-                ports: [],
-              });
-            }
-          },
-        });
-        pendingCandidate = candidate;
-        try {
-          await candidate.start();
-        } catch (error) {
-          await candidate.close();
-          throw error;
-        }
-        if (owner !== generation) {
-          await candidate.close();
-          return;
-        }
-        session = candidate;
-        pendingCandidate = undefined;
-        const service = createSandboxService(candidate);
-        retireService = pi.events.on(SANDBOX_SERVICE_CHANNEL, (raw) => {
-          const request = raw as { version?: unknown; accept?: unknown };
-          if (request?.version === 1 && typeof request.accept === "function") {
-            request.accept(service);
-          }
-        });
-        const disclosureRevision = () => sandboxDisclosureRevision(getAgentDir(), getSession().revision);
-        const reviewSourcePaths = async (request: ToolReviewRequest, guestPaths: string[]) => {
+      pendingStartup = startup.run(
+        "Starting devcontainer",
+        async (progress) => {
+          startupController.signal.throwIfAborted();
+          progress.stage("Loading sandbox settings…");
           const settings = await loadSandboxSettings(getAgentDir());
           if (settings.needsMigration) {
-            throw new Error("Migrate sandbox settings before delegated source access");
+            throw new Error("Run /sandbox setup to migrate legacy auto-mode settings");
           }
-          const policyToolNames = [request.toolName];
-          if (request.localSearch) {
-            policyToolNames.push("search_source");
-          }
-          for (const policyToolName of policyToolNames) {
-            if (checkPolicy(settings.settings.permission, policyToolName, policyToolName).state === "deny") {
-              throw new Error(`Delegated tool denied by explicit policy: ${policyToolName}`);
+          const selected = await selectDefinition({
+            agentDir: getAgentDir(),
+            cwd: ctx.cwd,
+            choose: async (paths) =>
+              startup.withoutScreen(async () => {
+                if (!ctx.hasUI) {
+                  return undefined;
+                }
+                const selection = ctx.ui.select("Select devcontainer definition", [...paths], {
+                  signal: startupController.signal,
+                });
+                return awaitSandboxWork(selection, startupController.signal);
+              }),
+          });
+          startupController.signal.throwIfAborted();
+          const toolsPath = globalToolProfilePath(getAgentDir());
+          if (!(await readPrivateText(toolsPath))) {
+            const profile = defaultToolProfile();
+            const preview = [
+              "Provision the shared development toolset?",
+              toolsPath,
+              "All five language servers and isolated supporting runtimes will be available in every supported sandbox. Image builds are cached; project definitions and host access are unchanged.",
+              JSON.stringify(profile, null, 2),
+            ].join("\n\n");
+            if (!(await confirm(preview, "", startupController.signal))) {
+              throw new Error("Global tooling provisioning was not approved");
             }
+            await publishPrivateText(
+              toolsPath,
+              `${JSON.stringify(profile, null, 2)}\n`,
+              undefined,
+              startupController.signal,
+            );
           }
-          for (const guestPath of guestPaths) {
-            await reviewSandboxAction({
-              session: candidate,
-              canonicalGuestPath: guestPath,
-              agentDir: getAgentDir(),
-              toolName: "read",
-              input: { path: guestPath },
-              toolCallId: request.toolCallId,
-              ctx: { ...ctx, signal: request.signal },
-              confirm: (_safety, category, reason) =>
-                request.localSearch
-                  ? Promise.resolve(false)
-                  : confirm(`${category}: ${reason}`, request.toolCallId, request.signal),
-            });
-          }
-        };
-        const reportReviewerCleanupError = (error: unknown) => {
-          ctx.ui.notify(`Reviewer sandbox cleanup failed: ${String(error)}`, "error");
-        };
-        const sessionReviewerSandboxes = new ReviewerSandboxes(
-          candidate,
-          reviewSourcePaths,
-          reportReviewerCleanupError,
-          undefined,
-          disclosureRevision,
-        );
-        reviewerSandboxes = sessionReviewerSandboxes;
-        delegated = createDelegatedReviewService({
-          sessionId: () => context!.sessionManager.getSessionId(),
-          revision: disclosureRevision,
-          authority: () => [],
-          maxSourcesPerBatch: 32,
-          openTask: (spec, operation) => {
-            const isWorkerTask = spec.kind === "worker";
-            if (!isWorkerTask) {
-              return undefined;
-            }
-            return sessionReviewerSandboxes.openTask(spec, operation);
-          },
-          cleanupError: reportReviewerCleanupError,
-          authorize: async (request) => {
-            try {
-              const revisionAtAuthorizationStart = disclosureRevision();
-              const requestedHostPath =
-                request.input && typeof request.input === "object"
-                  ? (request.input as Record<string, unknown>).path
-                  : undefined;
-              const sourcePaths = [
-                ...new Set((request.effects ?? []).map((effect) => effect.path)),
-              ];
-              const canonicalGuestPaths = sourcePaths.length
-                ? await service.authorizeHostSources(sourcePaths, request.signal)
-                : [];
-              await reviewSourcePaths(request, canonicalGuestPaths);
-              if (typeof requestedHostPath === "string" && !request.effects?.length) {
-                await service.authorizeHostSource(requestedHostPath, request.signal);
+          progress.stage(`Resolving devcontainer definition: ${selected.path}`);
+          const resolved = await resolveDefinition({
+            selected,
+            agentDir: getAgentDir(),
+            hostEnvironment: settings.settings.sandbox.hostEnvironment,
+            signal: startupController.signal,
+            confirmBuildInput: (preview) => confirm(preview, "", startupController.signal),
+          });
+          publisher.update({
+            sessionId: ctx.sessionManager.getSessionId(),
+            phase: "starting",
+            definitionPath: resolved.path,
+            mounts: [],
+            ports: [],
+          });
+          const candidate = new SandboxSession({
+            agentDir: getAgentDir(),
+            sessionId: ctx.sessionManager.getSessionId(),
+            resolved,
+            hostEnvironment: settings.settings.sandbox.hostEnvironment,
+            confirm: (preview, operationSignal, toolCallId) =>
+              confirm(preview, toolCallId, operationSignal),
+            startupTimeoutMs: settings.settings.sandbox.startupTimeoutMs,
+            buildTimeoutMs: settings.settings.sandbox.buildTimeoutMs,
+            startup,
+            signal: startupController.signal,
+            changed: () => {
+              if (session !== candidate) {
+                return;
               }
-              return { kind: "allowed", revision: revisionAtAuthorizationStart };
-            } catch (error) {
-              return { kind: "denied", reason: String(error) };
-            }
-          },
-        });
-        const delegatedService = delegated;
-        const unsubscribe = pi.events.on(REVIEW_SERVICE_CHANNEL, (raw) => {
-          const request = raw as { version?: unknown; accept?: unknown };
-          if (request?.version === 1 && typeof request.accept === "function") {
-            request.accept(delegatedService.service);
+              try {
+                publisher.update({
+                  sessionId: ctx.sessionManager.getSessionId(),
+                  phase: "ready",
+                  definitionPath: candidate.options.resolved.path,
+                  toolingSources: candidate.options.resolved.layers?.sources.map(
+                    (source) => source.path,
+                  ),
+                  toolingRevision: candidate.environment.toolInventory?.revision,
+                  containerId: candidate.environment.container,
+                  containerName: candidate.containerName,
+                  image: candidate.environment.image,
+                  cwd: candidate.environment.workspace,
+                  mounts: [...candidate.mounts],
+                  ports:
+                    candidate.options.resolved.definition.forwardPorts?.filter(
+                      (port): port is number => typeof port === "number",
+                    ) ?? [],
+                });
+              } catch {
+                publisher.update({
+                  sessionId: ctx.sessionManager.getSessionId(),
+                  phase: "changing",
+                  definitionPath: resolved.path,
+                  mounts: [...candidate.mounts],
+                  ports: [],
+                });
+              }
+            },
+          });
+          pendingCandidate = candidate;
+          try {
+            await candidate.start();
+          } catch (error) {
+            await candidate.close();
+            throw error;
           }
-        });
-        const priorRetirement = retireService;
-        retireService = () => {
-          priorRetirement?.();
-          unsubscribe();
-        };
-        publisher.update({
-          sessionId: ctx.sessionManager.getSessionId(),
-          phase: "ready",
-          definitionPath: resolved.path,
-          toolingSources: resolved.layers?.sources.map((source) => source.path),
-          toolingRevision: candidate.environment.toolInventory?.revision,
-          containerId: candidate.environment.container,
-          containerName: candidate.containerName,
-          image: candidate.environment.image,
-          cwd: candidate.environment.workspace,
-          mounts: [...candidate.mounts],
-          ports: devcontainerPorts(resolved.definition.forwardPorts ?? []),
-        });
-        ctx.ui.setStatus("sandbox", "🔒 devcontainer");
-      }, startupController.signal);
+          if (owner !== generation) {
+            await candidate.close();
+            return;
+          }
+          session = candidate;
+          pendingCandidate = undefined;
+          const service = createSandboxService(candidate);
+          retireService = pi.events.on(SANDBOX_SERVICE_CHANNEL, (raw) => {
+            const request = raw as { version?: unknown; accept?: unknown };
+            if (request?.version === 1 && typeof request.accept === "function") {
+              request.accept(service);
+            }
+          });
+          const disclosureRevision = () =>
+            sandboxDisclosureRevision(getAgentDir(), getSession().revision);
+          const reviewSourcePaths = async (request: ToolReviewRequest, guestPaths: string[]) => {
+            const settings = await loadSandboxSettings(getAgentDir());
+            if (settings.needsMigration) {
+              throw new Error("Migrate sandbox settings before delegated source access");
+            }
+            const policyToolNames = [request.toolName];
+            if (request.localSearch) {
+              policyToolNames.push("search_source");
+            }
+            for (const policyToolName of policyToolNames) {
+              if (
+                checkPolicy(settings.settings.permission, policyToolName, policyToolName).state ===
+                "deny"
+              ) {
+                throw new Error(`Delegated tool denied by explicit policy: ${policyToolName}`);
+              }
+            }
+            const authorizedRevision = disclosureRevision();
+            for (const guestPath of guestPaths) {
+              await reviewSandboxAction({
+                session: candidate,
+                canonicalGuestPath: guestPath,
+                agentDir: getAgentDir(),
+                toolName: "read",
+                input: { path: guestPath },
+                ctx: { ...ctx, signal: request.signal },
+              });
+            }
+            const requestedPath =
+              request.input && typeof request.input === "object"
+                ? (request.input as Record<string, unknown>).path
+                : undefined;
+            const sourceAliases = [
+              ...guestPaths,
+              ...guestPaths.map((path) => guestToHost(path, candidate.mounts)),
+              ...(request.effects ?? []).map((effect) => effect.path),
+              ...(typeof requestedPath === "string" ? [requestedPath] : []),
+            ].filter((path): path is string => typeof path === "string");
+            const paths: GuardPathFact[] = sourceAliases.map((path) => ({
+              value: path,
+              matchValues: [],
+              boundaryValue: path,
+              mountAliases: [],
+              mountResolutionIncomplete: false,
+            }));
+            const safetyContext: SafetyContext = {
+              requestId: "delegated-disclosure",
+              toolCallId: request.toolCallId ?? "",
+              toolName: "read",
+              agentName: null,
+              input: request.input,
+              cwd: ctx.cwd,
+              platform: process.platform,
+              shell: null,
+              paths,
+              riskMarkers: [],
+            };
+            const hostSafety = evaluateSafety(safetyContext, false, {
+              home: homedir(),
+              xdgDataHome: process.env.XDG_DATA_HOME,
+              credentialsDirectory: process.env.CREDENTIALS_DIRECTORY,
+            });
+            const guestSafety = evaluateSafety({ ...safetyContext, platform: "linux" }, false, {
+              home: candidate.environment.remoteEnvironment?.HOME ?? "/root",
+            });
+            const sensitiveSafety = hostSafety.kind === "require_human" ? hostSafety : guestSafety;
+            if (sensitiveSafety.kind === "require_human") {
+              if (
+                request.localSearch ||
+                !(await confirm(
+                  `Sensitive source disclosure: ${sensitiveSafety.reason}`,
+                  request.toolCallId,
+                  request.signal,
+                ))
+              ) {
+                throw new Error(
+                  "Sensitive source disclosure was not approved; sensitive local scans are refused",
+                );
+              }
+            }
+            request.signal?.throwIfAborted();
+            if (authorizedRevision !== disclosureRevision()) {
+              throw new Error(
+                "Disclosure authority changed during sensitive-source authorization; retry",
+              );
+            }
+          };
+          const reportReviewerCleanupError = (error: unknown) => {
+            ctx.ui.notify(`Reviewer sandbox cleanup failed: ${String(error)}`, "error");
+          };
+          const sessionReviewerSandboxes = new ReviewerSandboxes(
+            candidate,
+            reviewSourcePaths,
+            reportReviewerCleanupError,
+            undefined,
+            disclosureRevision,
+          );
+          reviewerSandboxes = sessionReviewerSandboxes;
+          delegated = createDelegatedReviewService({
+            sessionId: () => context!.sessionManager.getSessionId(),
+            revision: disclosureRevision,
+            authority: () => [],
+            maxSourcesPerBatch: 32,
+            openTask: (spec, operation) => {
+              const isWorkerTask = spec.kind === "worker";
+              if (!isWorkerTask) {
+                return undefined;
+              }
+              return sessionReviewerSandboxes.openTask(spec, operation);
+            },
+            cleanupError: reportReviewerCleanupError,
+            authorize: async (request) => {
+              try {
+                const revisionAtAuthorizationStart = disclosureRevision();
+                const requestedHostPath =
+                  request.input && typeof request.input === "object"
+                    ? (request.input as Record<string, unknown>).path
+                    : undefined;
+                const hasNoEffects = !request.effects?.length;
+                const fallbackHostPaths =
+                  typeof requestedHostPath === "string" && hasNoEffects ? [requestedHostPath] : [];
+                const sourcePaths = [
+                  ...new Set([
+                    ...(request.effects ?? []).map((effect) => effect.path),
+                    ...fallbackHostPaths,
+                  ]),
+                ];
+                const canonicalGuestPaths = sourcePaths.length
+                  ? await service.authorizeHostSources(sourcePaths, request.signal)
+                  : [];
+                await reviewSourcePaths(request, canonicalGuestPaths);
+                return { kind: "allowed", revision: revisionAtAuthorizationStart };
+              } catch (error) {
+                return { kind: "denied", reason: String(error) };
+              }
+            },
+          });
+          const delegatedService = delegated;
+          const unsubscribe = pi.events.on(REVIEW_SERVICE_CHANNEL, (raw) => {
+            const request = raw as { version?: unknown; accept?: unknown };
+            if (request?.version === 1 && typeof request.accept === "function") {
+              request.accept(delegatedService.service);
+            }
+          });
+          const priorRetirement = retireService;
+          retireService = () => {
+            priorRetirement?.();
+            unsubscribe();
+          };
+          publisher.update({
+            sessionId: ctx.sessionManager.getSessionId(),
+            phase: "ready",
+            definitionPath: resolved.path,
+            toolingSources: resolved.layers?.sources.map((source) => source.path),
+            toolingRevision: candidate.environment.toolInventory?.revision,
+            containerId: candidate.environment.container,
+            containerName: candidate.containerName,
+            image: candidate.environment.image,
+            cwd: candidate.environment.workspace,
+            mounts: [...candidate.mounts],
+            ports: devcontainerPorts(resolved.definition.forwardPorts ?? []),
+          });
+          ctx.ui.setStatus("sandbox", "🔒 devcontainer");
+        },
+        startupController.signal,
+      );
       await pendingStartup;
     } catch (error) {
       if (owner !== generation || startupController.signal.aborted) {
@@ -426,7 +500,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
       current.options.resolved.project,
     );
     event.systemPromptOptions.cwd = current.environment.workspace;
-    const hostCommandGuidance = `Project host-command rules at ${hostCommands.path}: ${JSON.stringify(hostCommands.rules)}. Matching literal executable invocations run natively on the host with any arguments and the host environment; guest Bash retains sequencing, pipes, redirects, and argument expansion. Host cwd must map inside this project. Only explicit command-prefix environment assignments are forwarded, excluding shell/runtime lookup variables. Host scripts and their children are trusted native execution, not container-isolated. Dynamic executable names, functions, and opaque shell wrappers are unsupported when host rules are configured; use direct commands and project-relative arguments.`;
+    const hostCommandGuidance = `Project host-command rules at ${hostCommands.path}: ${JSON.stringify(hostCommands.rules)}. Matching literal executable invocations run natively on the host with any arguments and the host environment; guest Bash retains sequencing, pipes, redirects, and argument expansion. Host cwd must map inside this project. Only explicit command-prefix environment assignments are forwarded, excluding shell/runtime lookup variables. Host scripts and their children are trusted native execution, not container-isolated. Only statically matched command names route to the host; dynamic executable names, function definitions and their calls, and commands inside opaque shell strings run in the container. Use direct commands and project-relative arguments when native routing is needed.`;
     const trustedToolGuidance = `Trusted host tools do not receive additional sandbox prompts: pi-web-access provides web_search, source_check, fetch_content, and get_search_content; @plannotator/pi-extension provides plannotator, plannotator_submit_plan, and plannotator_mark_done; @juicesharp/rpiv-ask-user-question provides ask_user_question. Their internal file, subprocess, credential, and network operations are not container-isolated.`;
     const mountGuidance = `Writable binds expose real host data; secret protection is best-effort and Internet access permits uploads. Guest cwd: ${current.environment.workspace}. Approved mounts: ${JSON.stringify(current.mounts.map(({ source, destination, access }) => ({ source, destination, access })))}. Use request_host_mount to request more host access; only the operator can approve it.`;
     const toolInstallationGuidance = `When a required development tool is missing, use request_sandbox_tool to propose a pinned installation into the active definition rather than silently substituting another runtime or using host tools. Installation requires operator approval and rebuilds the container. Layered installs are saved privately for this project; shared tools are configured separately, and repository base definitions are not rewritten.`;
@@ -448,10 +522,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         getSession,
         agentDir: getAgentDir(),
         input: event.input,
-        toolCallId: event.toolCallId,
         ctx,
-        confirm: (_safety, category, reason) =>
-          confirm(`${category}: ${reason}\n${JSON.stringify(event.input)}`, event.toolCallId),
       });
       return {};
     } catch (error) {
@@ -509,9 +580,20 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         await getSession().rebuild(ctx.signal);
         return;
       }
+      const mountedToolDetails = session?.environment.toolImageMounts;
+      const toolingStorageStatus =
+        mountedToolDetails === undefined
+          ? "Tool storage: legacy image installations"
+          : [
+              "Tool storage: read-only artifact image mounts",
+              ...mountedToolDetails.map(
+                (mount) =>
+                  `${mount.toolId}@${mount.version}: ${mount.imageId} -> ${mount.destination}`,
+              ),
+            ].join("\n");
       ctx.ui.notify(
         session
-          ? `${session.environment.container}\nBase: ${session.options.resolved.path}\nTooling sources: ${session.options.resolved.layers?.sources.map((source) => source.path).join(", ") ?? "legacy definition"}\nTool inventory: ${session.environment.toolInventory?.revision ?? "unavailable"}\n${session.environment.workspace}\n${JSON.stringify(session.mounts)}`
+          ? `${session.environment.container}\n${toolingStorageStatus}\nBase: ${session.options.resolved.path}\nTooling sources: ${session.options.resolved.layers?.sources.map((source) => source.path).join(", ") ?? "legacy definition"}\nTool inventory: ${session.environment.toolInventory?.revision ?? "unavailable"}\n${session.environment.workspace}\n${JSON.stringify(session.mounts)}`
           : unavailable,
         "info",
       );

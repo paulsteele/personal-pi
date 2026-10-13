@@ -12,6 +12,13 @@ import {
 } from "../src/sandbox/gate.ts";
 import { parseSandboxSettings, saveSandboxSettings } from "../src/sandbox/settings.ts";
 
+const plannotatorSubmitPlanScenario = {
+  name: "plannotator_submit_plan",
+  source: "npm:@plannotator/pi-extension",
+  path: "/agent/npm/node_modules/@plannotator/pi-extension/index.ts",
+  input: { filePath: "plans/app.md" },
+};
+
 const hostToolScenarios = [
   {
     name: "web_search",
@@ -43,19 +50,19 @@ const hostToolScenarios = [
     path: "/agent/npm/node_modules/@plannotator/pi-extension/index.ts",
     input: { action: "annotate", target: "/host/plans/app.md" },
   },
-  {
-    name: "plannotator_submit_plan",
-    source: "npm:@plannotator/pi-extension",
-    path: "/agent/npm/node_modules/@plannotator/pi-extension/index.ts",
-    input: { filePath: "plans/app.md" },
-  },
+  plannotatorSubmitPlanScenario,
   {
     name: "plannotator_mark_done",
     source: "npm:@plannotator/pi-extension",
     path: "/agent/npm/node_modules/@plannotator/pi-extension/index.ts",
     input: { step: 2 },
   },
-];
+].flatMap((scenario) => {
+  if (scenario.source !== "npm:@plannotator/pi-extension") {
+    return [scenario];
+  }
+  return [scenario, { ...scenario, path: dirname(scenario.path) }];
+});
 type HostToolScenario = (typeof hostToolScenarios)[number];
 
 function hostTool(scenario: HostToolScenario, version?: string): ToolInfo {
@@ -84,18 +91,15 @@ async function hostGateFixture(scenario: HostToolScenario) {
   const getSession = vi.fn(() => {
     throw new Error("Mandatory sandbox is unavailable");
   });
-  const confirm = vi.fn(async () => false);
   const review = (signal?: AbortSignal) =>
     reviewSandboxToolCall({
       tool,
       getSession,
       agentDir,
       input,
-      toolCallId: "host-tool-1",
       ctx: { signal } as never,
-      confirm,
     });
-  return { agentDir, tool, input, getSession, confirm, review };
+  return { agentDir, tool, input, getSession, review };
 }
 
 it.each(hostToolScenarios)("recognizes authorized package ownership for $name", (scenario) => {
@@ -130,13 +134,25 @@ it.each(hostToolScenarios)(
   },
 );
 
+it.each([
+  "/agent/npm/node_modules/@plannotator/pi-extension-lookalike",
+  "/agent/npm/node_modules/@plannotator/pi-extension-lookalike/index.ts",
+  "/agent/npm/node_modules/@plannotator/pi-extension/server.ts",
+  "/agent/npm/node_modules/@plannotator/pi-extension/generated/index.ts",
+  "/agent/npm/node_modules/@plannotator/pi-extension/dist/index.js",
+])("rejects unapproved Plannotator entry %s", (path) => {
+  const tool = hostTool(plannotatorSubmitPlanScenario);
+  tool.sourceInfo.path = path;
+  expect(isAuthorizedHostTool(tool)).toBe(false);
+  expect(isAuditedSandboxTool(tool)).toBe(false);
+});
+
 it.each(hostToolScenarios)(
   "allows $name without a container, prompts, or input rewriting",
   async (scenario) => {
     const fixture = await hostGateFixture(scenario);
     await fixture.review();
     expect(fixture.getSession).not.toHaveBeenCalled();
-    expect(fixture.confirm).not.toHaveBeenCalled();
     expect(fixture.input).toEqual(scenario.input);
   },
 );
@@ -150,7 +166,6 @@ it.each(hostToolScenarios)("preserves an explicit deny for $name", async (scenar
   );
   await expect(fixture.review()).rejects.toThrow("Tool denied by explicit policy");
   expect(fixture.getSession).not.toHaveBeenCalled();
-  expect(fixture.confirm).not.toHaveBeenCalled();
 });
 
 it.each(hostToolScenarios)("blocks cancelled $name calls", async (scenario) => {

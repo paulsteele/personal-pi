@@ -37,8 +37,10 @@ interface PendingClientLaunch {
 }
 
 function routeMatchesFile(route: LspRoute, root: string, path: string): boolean {
-	return (path === root || path.startsWith(`${root}/`)) &&
-		Object.keys(route.extensions).some((extension) => path.endsWith(extension));
+	return (
+		(path === root || path.startsWith(`${root}/`)) &&
+		Object.keys(route.extensions).some((extension) => path.endsWith(extension))
+	);
 }
 
 export class SandboxLspManager {
@@ -132,7 +134,8 @@ export class SandboxLspManager {
 		);
 		const privateToolsRoot = resolve(this.agentDir, "extensions", "code-quality", "tools", route.preset);
 		const managedCommand =
-			route.command.startsWith("/opt/pi-quality-tools/") || route.command.startsWith("/opt/pi-tools/") ||
+			route.command.startsWith("/opt/pi-quality-tools/") ||
+			route.command.startsWith("/opt/pi-tools/") ||
 			route.command.startsWith(`${privateToolsRoot}/`);
 		if (!tool || !managedCommand || route.preset === "custom") {
 			return route;
@@ -168,17 +171,24 @@ export class SandboxLspManager {
 		const launch: PendingClientLaunch = {
 			controller,
 			waiters: 0,
-			promise: Promise.resolve().then(() => this.launchClient(route, sandbox, key, launchSignal, generation, assertOwner)),
+			promise: Promise.resolve().then(() =>
+				this.launchClient(route, sandbox, key, launchSignal, generation, assertOwner),
+			),
 		};
 		this.pendingClients.set(key, launch);
-		void launch.promise.finally(() => {
-			if (this.pendingClients.get(key) === launch) {
-				this.pendingClients.delete(key);
-			}
-		}).catch(() => {});
+		void launch.promise
+			.finally(() => {
+				if (this.pendingClients.get(key) === launch) {
+					this.pendingClients.delete(key);
+				}
+			})
+			.catch(() => {});
 		return this.waitForClientLaunch(launch, signal);
 	}
-	private async waitForClientLaunch(launch: PendingClientLaunch, signal?: AbortSignal): Promise<SandboxLspClient> {
+	private async waitForClientLaunch(
+		launch: PendingClientLaunch,
+		signal?: AbortSignal,
+	): Promise<SandboxLspClient> {
 		launch.waiters++;
 		let abort: (() => void) | undefined;
 		try {
@@ -313,19 +323,25 @@ export class SandboxLspManager {
 		}
 		let routes = (this.profile?.profile.routes ?? []).map((route) => this.resolveManagedRoute(route));
 		const automatic = !this.profile || this.profile.profile.mode === "auto";
-		const explicitRoutesWithRoots = await Promise.all(routes.map(async (route) => ({
-			route, root: await this.routeRoot(route, signal),
-		})));
-		const filesNeedingAutomaticRoutes = automatic ? files.filter((file) => {
-			const hasExplicitRoute = explicitRoutesWithRoots.some(({ route, root }) =>
-				routeMatchesFile(route, root, file.path),
-			);
-			const hasEnabledPreset = LSP_PRESETS.some((preset) =>
-				!this.profile?.profile.disabledLanguages?.includes(preset.id) &&
-				Object.keys(preset.extensions).some((extension) => file.path.endsWith(extension)),
-			);
-			return file.after !== null && !hasExplicitRoute && hasEnabledPreset;
-		}) : [];
+		const explicitRoutesWithRoots = await Promise.all(
+			routes.map(async (route) => ({
+				route,
+				root: await this.routeRoot(route, signal),
+			})),
+		);
+		const filesNeedingAutomaticRoutes = automatic
+			? files.filter((file) => {
+					const hasExplicitRoute = explicitRoutesWithRoots.some(({ route, root }) =>
+						routeMatchesFile(route, root, file.path),
+					);
+					const hasEnabledPreset = LSP_PRESETS.some(
+						(preset) =>
+							!this.profile?.profile.disabledLanguages?.includes(preset.id) &&
+							Object.keys(preset.extensions).some((extension) => file.path.endsWith(extension)),
+					);
+					return file.after !== null && !hasExplicitRoute && hasEnabledPreset;
+				})
+			: [];
 		if (filesNeedingAutomaticRoutes.length > 0) {
 			const inventory = sandbox.session.environment.toolInventory;
 			if (!inventory) {
@@ -336,7 +352,12 @@ export class SandboxLspManager {
 			}
 			const discovery = await discoverSandboxLspFiles(sandbox, signal);
 			const discoveryRevision = digest(
-				JSON.stringify([discovery.manifestRevision, inventory.revision, this.profile?.revision, sandbox.session.generation]),
+				JSON.stringify([
+					discovery.manifestRevision,
+					inventory.revision,
+					this.profile?.revision,
+					sandbox.session.generation,
+				]),
 			);
 			if (this.discoveryRevision !== discoveryRevision) {
 				await this.stop();
@@ -404,10 +425,16 @@ export class SandboxLspManager {
 				if (file.after === null) {
 					continue;
 				}
-				const routesWithRoots = await Promise.all(routes.map(async (route) => ({ route, root: await this.routeRoot(route, signal) })));
-				const matchingRoutes = routesWithRoots.filter(({ route, root }) => routeMatchesFile(route, root, file.path));
+				const routesWithRoots = await Promise.all(
+					routes.map(async (route) => ({ route, root: await this.routeRoot(route, signal) })),
+				);
+				const matchingRoutes = routesWithRoots.filter(({ route, root }) =>
+					routeMatchesFile(route, root, file.path),
+				);
 				const deepestRootDepth = Math.max(-1, ...matchingRoutes.map(({ root }) => root.split("/").length));
-				for (const { route, root: routeRoot } of matchingRoutes.filter(({ root }) => root.split("/").length === deepestRootDepth)) {
+				for (const { route, root: routeRoot } of matchingRoutes.filter(
+					({ root }) => root.split("/").length === deepestRootDepth,
+				)) {
 					const language = Object.entries(route.extensions).find(([extension]) =>
 						file.path.endsWith(extension),
 					)?.[1];
@@ -463,7 +490,9 @@ export class SandboxLspManager {
 			let matchedSource: string | undefined;
 			let matchedLanguage: string | undefined;
 			for (const source of discovery.files) {
-				const routeEntry = Object.entries(effectiveRoute.extensions).find(([extension]) => source.endsWith(extension));
+				const routeEntry = Object.entries(effectiveRoute.extensions).find(([extension]) =>
+					source.endsWith(extension),
+				);
 				if (routeEntry) {
 					matchedSource = source;
 					matchedLanguage = routeEntry[1];

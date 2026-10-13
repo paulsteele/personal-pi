@@ -30,14 +30,19 @@ describe("BashProgram compound safety projection", () => {
       new PathNormalizer("/workspace", "guest", "/home/developer"),
       { probeGuestEntries: async (paths) => paths.map(() => false) },
     );
-    expect(program.pathRuleCandidates().map(({ path }) => path.value())).toContain("/home/developer/.ssh/id_rsa");
+    expect(program.pathRuleCandidates().map(({ path }) => path.value())).toContain(
+      "/home/developer/.ssh/id_rsa",
+    );
   });
 
   it("refuses incomplete guest existence results rather than inferring a missing path", async () => {
-    await expect(BashProgram.parse(
-      "cat secret", new PathNormalizer("/workspace", "guest", "/home/developer"),
-      { probeGuestEntries: async () => [] },
-    )).rejects.toThrow("incomplete results");
+    await expect(
+      BashProgram.parse(
+        "cat secret",
+        new PathNormalizer("/workspace", "guest", "/home/developer"),
+        { probeGuestEntries: async () => [] },
+      ),
+    ).rejects.toThrow("incomplete results");
   });
 
   it("keeps direct HOME path projection", async () => {

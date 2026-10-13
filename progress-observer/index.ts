@@ -97,8 +97,7 @@ export default function progressObserver(pi: ExtensionAPI): void {
 				value: settingsValue,
 				async apply(value, signal) {
 					const { modelSelection, ...observerSettings } = value;
-					const hasChangedModelSelection =
-						modelSelection !== undefined && modelSelection !== modelId(config);
+					const hasChangedModelSelection = modelSelection !== undefined && modelSelection !== modelId(config);
 					let provider = modelSelection === undefined ? DEFAULT_CONFIG.provider : config.provider;
 					let model = modelSelection === undefined ? DEFAULT_CONFIG.model : config.model;
 					if (hasChangedModelSelection) {

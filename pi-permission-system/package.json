@@ -28,6 +28,7 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:mounted-tools": "bun scripts/verify-mounted-tools.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "biome lint .",
     "format": "biome format --write .",

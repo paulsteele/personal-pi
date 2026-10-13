@@ -1,4 +1,6 @@
 import { expect, it } from "vitest";
+import { toolImageMount, toolImageMountArgument } from "../src/sandbox/tool-image-mounts.ts";
+import { catalogTool } from "../src/sandbox/tool-catalog.ts";
 import { authorizeEngineArguments, type EngineAuthority } from "../src/sandbox/engine-policy.ts";
 import {
   guestToHost,
@@ -85,6 +87,31 @@ it("allows only session-scoped inspection and execution", () => {
     "inspect",
     "container-id",
   ]);
+});
+
+it("injects only internally authorized artifact mounts before the application image", () => {
+  const mount = toolImageMount(catalogTool("node-runtime", "24.21.0"), "a".repeat(64));
+  const mountedAuthority = { ...authority, toolImageMounts: [mount] };
+  const args = authorizeEngineArguments(
+    ["run", "debian:bookworm", "sh"],
+    "/repo",
+    mountedAuthority,
+  );
+  expect(args.indexOf(toolImageMountArgument(mount))).toBeLessThan(args.indexOf("debian:bookworm"));
+  const callerSuppliedMountArgs = [
+    "run",
+    "--mount",
+    toolImageMountArgument(mount),
+    "debian:bookworm",
+  ];
+  expect(() =>
+    authorizeEngineArguments(callerSuppliedMountArgs, "/repo", mountedAuthority),
+  ).toThrow("Unapproved engine mount");
+  const mutableImageMount = { ...mount, imageId: "mutable:tag" };
+  const mutableImageAuthority = { ...mountedAuthority, toolImageMounts: [mutableImageMount] };
+  expect(() =>
+    authorizeEngineArguments(["run", "debian:bookworm"], "/repo", mutableImageAuthority),
+  ).toThrow();
 });
 
 it("maps guest and host paths without granting unmounted paths", () => {

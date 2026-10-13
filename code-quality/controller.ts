@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { BoundaryResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_CONFIG, loadConfig, saveConfig, type QualityConfig } from "./config.js";
-import { buildReviewChunks, canonicalPath, CoverageError, readSnapshot } from "./capture.js";
+import { planReviewBatch, canonicalPath, CoverageError, readSnapshot } from "./capture.js";
 import {
 	newCase,
 	proposalApplied,
@@ -14,13 +14,7 @@ import {
 	type QualityCase,
 } from "./case.js";
 import { exclusionRule } from "./exclusions.js";
-import {
-	applyExactEdits,
-	digest,
-	type ValidatedVerdict,
-	type ProposedEdit,
-	type Finding,
-} from "./proposal.js";
+import { applyExactEdits, digest, type ValidatedVerdict } from "./proposal.js";
 import { POLICY, review, type ReviewResult } from "./reviewer.js";
 import type { LspManager } from "./lsp-manager.js";
 import { diagnosticLabel } from "./lsp-diagnostics.js";
@@ -65,13 +59,19 @@ export interface RuntimePorts {
 	ui: QualityUI;
 	review?: typeof review;
 	activity?: QualityActivityPublisher;
-	lsp?: Pick<LspManager, "check" | "revision" | "configRevision"> & Partial<Pick<LspManager, "restart">> & {
-		refreshWorkspace?(signal: AbortSignal): Promise<void>;
-	};
+	lsp?: Pick<LspManager, "check" | "revision" | "configRevision"> &
+		Partial<Pick<LspManager, "restart">> & {
+			refreshWorkspace?(signal: AbortSignal): Promise<void>;
+		};
 	createLspManager?: (changed: () => void) => LspManager;
 	filesystem?: {
 		canonical(path: string, signal?: AbortSignal): Promise<string>;
-		snapshot(path: string, config: QualityConfig, authorized: boolean, signal?: AbortSignal): Promise<string | null>;
+		snapshot(
+			path: string,
+			config: QualityConfig,
+			authorized: boolean,
+			signal?: AbortSignal,
+		): Promise<string | null>;
 	};
 }
 interface MutationPreparation {
@@ -81,7 +81,7 @@ interface MutationPreparation {
 }
 
 const PROTOCOL =
-	"Quality review is enforced after edit/write batches in TUI mode. Resolve needs_work before unrelated implementation. Apply corrections using ordinary file tools. To disagree call quality_response(disagree) with the current case/revision and your rationale; the reviewer will reconsider it. Corrections and disagreements share five response-and-review rounds after the initial rejection. Resolve the disagreement with the reviewer before reaching out to the operator; automatic arbitration occurs only after those rounds remain unresolved. Do not ask the operator to settle readability feedback early. Only the user can waive. Request extra helper/test paths with quality_response(request_scope). Do not evade the gate through bash, subagents, configuration changes, or custom file tools. User-approved proposals must be applied exactly before continuing. Readability approval covers style, not correctness. Configured LSP diagnostics of every severity enter this same correction flow before readability review. LSP disagreements rerun diagnostics; only the operator can waive them.";
+	"Quality review is enforced after edit/write batches in TUI mode. Resolve needs_work before unrelated implementation. Apply corrections using ordinary file tools. To disagree call quality_response(disagree) with the current case/revision and your rationale; the reviewer will reconsider it. Corrections and disagreements share five response-and-review rounds after the initial rejection. Resolve the disagreement with the reviewer before reaching out to the operator; automatic arbitration occurs only after those rounds remain unresolved. Do not ask the operator to settle readability feedback early. The gate automatically waives oversized files; these waivers are not model approvals. The user must authorize all other waivers. Corrections may edit additional files directly; ordinary permissions and quality checks still apply. Do not evade the gate through bash, subagents, configuration changes, or custom file tools. User-approved proposals must be applied exactly before continuing. Readability approval covers style, not correctness. Configured LSP diagnostics of every severity enter this same correction flow before readability review. LSP disagreements rerun diagnostics; only the operator can waive them.";
 
 export class QualityController {
 	config: QualityConfig = { ...DEFAULT_CONFIG };
@@ -103,6 +103,7 @@ export class QualityController {
 	private rejectionCount = 0;
 	private activeCheck?: QualityCheckData;
 	private readonly checks = new Map<string, QualityCheckData>();
+	private readonly reviewToolPaths = new Map<string, string>();
 	private readonly activityCalls = new Map<
 		string,
 		{ path?: string; phase?: QualityActivityPhase; blocked: boolean }
@@ -197,7 +198,11 @@ export class QualityController {
 		if (this.state && this.state.phase !== "closed") {
 			this.state.lspWaived = true;
 			this.state.lsp = undefined;
-			this.state.phase = "captured";
+			this.state.lspCapturePaths = undefined;
+			this.state.lspUnavailable = undefined;
+			if (this.state.phase !== "applying") {
+				this.state.phase = "captured";
+			}
 			this.persist();
 		}
 	}
@@ -228,6 +233,9 @@ export class QualityController {
 		if (state?.phase === "applying") return "applying";
 		if (state?.phase === "paused") return "paused";
 		if (state?.phase === "closed") {
+			if (state.sizeWaivers?.length) {
+				return "waived";
+			}
 			return state.resolution === "model_approved" ? "approved" : (state.resolution ?? "not_reviewed");
 		}
 		if (!this.config.provider || !this.config.model) return "unconfigured";
@@ -250,7 +258,9 @@ export class QualityController {
 			checkCount: this.checkCount,
 			rejectionCount: this.rejectionCount,
 		});
-		this.ports.activity.update(status);
+		const batchPhase =
+			state?.phase === "closed" && state.resolution === "model_approved" ? "approved" : phase;
+		this.ports.activity.update({ ...status, phase: batchPhase });
 	}
 	private status(ctx: ExtensionContext, text?: string): void {
 		this.publishActivity();
@@ -303,6 +313,7 @@ export class QualityController {
 		).length;
 		this.rejectionCount = countRejectedReviews(branch);
 		this.activityCalls.clear();
+		this.reviewToolPaths.clear();
 		this.ports.activity?.reset(this.sessionId);
 		this.cwd = canonicalPath(ctx.cwd);
 		this.state = undefined;
@@ -350,6 +361,7 @@ export class QualityController {
 		this.operation = false;
 		this.activityContext = undefined;
 		this.activityCalls.clear();
+		this.reviewToolPaths.clear();
 		this.ports.activity?.reset("");
 	}
 	summary(): string {
@@ -369,7 +381,9 @@ export class QualityController {
 		const generation = this.generation;
 		const state = this.state;
 		const store = this.store;
-		const signal = callerSignal ? AbortSignal.any([this.lifetime.signal, callerSignal]) : this.lifetime.signal;
+		const signal = callerSignal
+			? AbortSignal.any([this.lifetime.signal, callerSignal])
+			: this.lifetime.signal;
 		signal.throwIfAborted();
 		const value = this.ports.filesystem
 			? await this.ports.filesystem.snapshot(path, this.config, this.authorized(path), signal)
@@ -379,13 +393,126 @@ export class QualityController {
 		}
 		return value;
 	}
+	private autoWaiveSize(path: string, reason: string, persist = true): void {
+		const state = this.state!;
+		state.sizeWaivers ??= [];
+		if (!state.sizeWaivers.some((waiver) => waiver.path === path)) {
+			state.sizeWaivers.push({ path, reason });
+			this.pi.appendEntry("code-quality:waiver", {
+				caseId: state.id,
+				path,
+				reason,
+				automatic: true,
+				reviewed: false,
+			});
+			this.pi.sendMessage(
+				{
+					customType: "code-quality:feedback",
+					content: `Quality automatically waived for oversized file: ${path} (${reason}). Not model-approved.`,
+					display: true,
+					details: { outcome: "waived" } satisfies QualityFeedbackDetails,
+				},
+				{ triggerTurn: false, deliverAs: "nextTurn" },
+			);
+		}
+		const trackedFile = state.files.some((file) => file.path === path);
+		const unresolvedLsp =
+			Boolean(state.lsp?.findings.some((finding) => finding.file === path)) ||
+			Boolean(state.lspRequired && (!state.lsp || state.lspUnavailable));
+		if (trackedFile && unresolvedLsp && !state.lspWaived) {
+			state.lspCapturePaths = [...new Set([...(state.lspCapturePaths ?? []), path])];
+		}
+		state.files = state.files.filter((file) => file.path !== path);
+		state.pendingPaths = state.pendingPaths.filter((pendingPath) => pendingPath !== path);
+		if (state.lsp && !state.lsp.findings.length && !state.lspUnavailable && !state.lspCapturePaths?.length) {
+			const coveredPaths = state.lsp.paths ?? [path];
+			if (!state.files.some((file) => coveredPaths.includes(file.path))) {
+				state.lsp = undefined;
+				state.lspRequired = false;
+			}
+		}
+		if (state.phase === "applying") {
+			delete state.approvedTargets?.[path];
+		} else {
+			state.verdict = undefined;
+			state.approvedTargets = undefined;
+			state.phase = "captured";
+		}
+		this.ignoredPaths.add(path);
+		for (const [id, call] of this.activityCalls) {
+			if (call.path === path) {
+				call.phase = "waived";
+				this.ports.activity?.finishTool(id, "waived");
+			}
+		}
+		for (const [id, reviewedPath] of this.reviewToolPaths) {
+			if (reviewedPath === path) {
+				this.ports.activity?.finishTool(id, "waived");
+				this.reviewToolPaths.delete(id);
+			}
+		}
+		if (persist) {
+			this.persist();
+		}
+	}
+	private closeSizeWaivedCase(ctx: ExtensionContext): BoundaryResult {
+		this.state!.phase = "closed";
+		this.state!.resolution = "waived";
+		this.persist();
+		this.status(ctx);
+		return this.result(
+			"Quality automatically waived for oversized files; no model approval. No changed files remain eligible for readability review.",
+			false,
+			{ outcome: "waived" },
+		);
+	}
 	private async checkFresh(ctx: ExtensionContext): Promise<boolean> {
 		if (!this.state || this.state.phase === "closed") return true;
 		const state = this.state;
 		const generation = this.generation;
+		for (const path of state.lspCapturePaths ?? []) {
+			let restored: string | null;
+			try {
+				restored = await this.snapshot(path, this.signal(ctx));
+			} catch (error) {
+				if (error instanceof CoverageError && error.kind === "size") {
+					continue;
+				}
+				throw error;
+			}
+			state.files.push({ path, before: null, after: restored });
+			state.lspCapturePaths = state.lspCapturePaths?.filter((capturePath) => capturePath !== path);
+			state.sizeWaivers = state.sizeWaivers?.filter((waiver) => waiver.path !== path);
+			this.ignoredPaths.delete(path);
+			if (state.approvedTargets) {
+				state.phase = "applying";
+			} else {
+				state.phase = "captured";
+			}
+			state.correctionPending = false;
+			state.reconsiderationPending = false;
+			state.objection = undefined;
+			this.persist();
+			return false;
+		}
 		for (const file of state.files) {
 			if (state.pendingPaths.includes(file.path)) continue;
-			const actual = await this.snapshot(file.path, this.signal(ctx));
+			let actual: string | null;
+			try {
+				actual = await this.snapshot(file.path, this.signal(ctx));
+			} catch (error) {
+				if (!this.valid(ctx, generation) || this.state !== state || this.signal(ctx).aborted) {
+					throw error;
+				}
+				if (error instanceof CoverageError && error.kind === "size") {
+					state.correctionPending = false;
+					state.reconsiderationPending = false;
+					state.objection = undefined;
+					this.autoWaiveSize(file.path, error.message);
+					return false;
+				}
+				throw error;
+			}
 			if (!this.valid(ctx, generation) || this.state !== state || this.signal(ctx).aborted) {
 				throw new Error("Quality freshness check belongs to a retired case");
 			}
@@ -412,7 +539,12 @@ export class QualityController {
 		toolCallId?: string,
 	): Promise<{ block: true; reason: string } | undefined> {
 		if (ctx.mode !== "tui" || !["edit", "write"].includes(toolName)) return;
-		if (toolCallId) this.ports.activity?.begin(toolCallId);
+		if (toolCallId) {
+			if (!this.activityCalls.size) {
+				this.reviewToolPaths.clear();
+			}
+			this.ports.activity?.begin(toolCallId);
+		}
 		const generation = this.generation;
 		let preparation: MutationPreparation;
 		try {
@@ -473,7 +605,6 @@ export class QualityController {
 			if (this.blockedReason) return blocked(this.blockedReason);
 			if (this.configError) return blocked(`${this.configError}; fix configuration and /reload`);
 			const state = this.ensureCase();
-			this.ignoredPaths.delete(path);
 			if (
 				state.phase === "captured" &&
 				!state.pendingPaths.length &&
@@ -482,13 +613,15 @@ export class QualityController {
 				return blocked("A fresh quality verdict is pending; inspect the case before editing again.");
 			if (["human", "paused"].includes(state.phase))
 				return blocked(`${this.summary()} Resolve with /quality resolve before editing.`);
-			if (["correcting", "applying"].includes(state.phase) && !state.scope.includes(path))
-				return blocked(
-					`Resolve case ${state.id} first, or request this helper/test path using quality_response(request_scope).`,
-				);
+			if (state.phase === "applying" && !Object.hasOwn(state.approvedTargets ?? {}, path)) {
+				return blocked("Apply only the files in the user-approved proposal before continuing.");
+			}
 			if (!(await this.checkFresh(ctx)))
 				return blocked("Review snapshot became stale; wait for a fresh verdict before editing.");
-			if (state.phase === "applying" && state.approvedTargets?.[path] === digest(await this.snapshot(path, this.signal(ctx))))
+			if (
+				state.phase === "applying" &&
+				state.approvedTargets?.[path] === digest(await this.snapshot(path, this.signal(ctx)))
+			)
 				return blocked(
 					"This file already matches the user-approved proposal. Apply only its remaining files.",
 				);
@@ -498,6 +631,10 @@ export class QualityController {
 			} catch (error) {
 				if (!this.valid(ctx, generation) || this.state !== state || this.signal(ctx).aborted) {
 					throw error;
+				}
+				if (error instanceof CoverageError && error.kind === "size") {
+					this.autoWaiveSize(path, error.message);
+					return { result: undefined, path, phase: "waived" };
 				}
 				if (error instanceof CoverageError && error.kind === "binary") {
 					this.ignoredPaths.add(path);
@@ -526,13 +663,19 @@ export class QualityController {
 				return blocked("Quality capture belongs to a retired case");
 			}
 			if (!state.files.some((file) => file.path === path)) state.files.push({ path, before, after: before });
-			if (!state.scope.includes(path)) state.scope.push(path);
 			if (!state.pendingPaths.includes(path)) state.pendingPaths.push(path);
+			this.ignoredPaths.delete(path);
+			state.sizeWaivers = state.sizeWaivers?.filter((waiver) => waiver.path !== path);
+			state.lspCapturePaths = state.lspCapturePaths?.filter((capturePath) => capturePath !== path);
 			this.persist();
 			return { result: undefined, path };
 		} catch (error) {
 			if (this.signal(ctx).aborted || !this.valid(ctx, generation)) {
 				return blocked("Quality capture belongs to a retired session");
+			}
+			if (path && error instanceof CoverageError && error.kind === "size") {
+				this.autoWaiveSize(path, error.message);
+				return { result: undefined, path, phase: "waived" };
 			}
 			this.pause(ctx, `Quality capture failed: ${String(error)}`);
 			return blocked("Quality capture failed; resolve before retrying");
@@ -556,6 +699,11 @@ export class QualityController {
 				after = await this.snapshot(path, this.signal(ctx));
 			} catch (error) {
 				assertOwner();
+				if (error instanceof CoverageError && error.kind === "size") {
+					changed = true;
+					this.autoWaiveSize(path, error.message);
+					continue;
+				}
 				const decision =
 					error instanceof CoverageError && error.kind === "binary"
 						? "waive"
@@ -616,7 +764,9 @@ export class QualityController {
 	}
 	private feedbackDetails(): QualityFeedbackDetails {
 		const state = this.state;
-		if (state?.resolution === "waived") return { outcome: "waived" };
+		if (state?.resolution === "waived" || (state?.phase === "closed" && state.sizeWaivers?.length)) {
+			return { outcome: "waived" };
+		}
 		if (state?.phase === "closed") {
 			const outcome = state.resolution === "unchanged" ? "not_reviewed" : "approved";
 			return { outcome };
@@ -641,6 +791,9 @@ export class QualityController {
 			const file = this.state?.files.find((file) => file.path === call.path);
 			if (!file) this.ports.activity?.finishTool(id, "not_reviewed");
 			else if (file.before === file.after) this.ports.activity?.finishTool(id, "unchanged");
+			else if (call.path) {
+				this.reviewToolPaths.set(id, call.path);
+			}
 		}
 		this.activityCalls.clear();
 		this.ports.activity?.finishCollection();
@@ -719,6 +872,9 @@ export class QualityController {
 				!state.lspRequired &&
 				!state.lsp?.findings.length
 			) {
+				if (state.sizeWaivers?.length) {
+					return this.closeSizeWaivedCase(ctx);
+				}
 				state.phase = "closed";
 				state.resolution = "unchanged";
 				this.persist();
@@ -728,21 +884,35 @@ export class QualityController {
 			const lspOutcome = await this.checkLsp(ctx, responseRound);
 			if (lspOutcome) return lspOutcome;
 			const lspRevision = this.ports.lsp?.revision;
-			const chunks = buildReviewChunks(state.files, this.config, this.cwd);
+			const previousFindings = state.verdict?.findings ?? [];
+			const { chunks, waivers } = planReviewBatch(state.files, this.config, this.cwd);
+			for (const waiver of waivers) {
+				this.autoWaiveSize(waiver.path, waiver.message, false);
+			}
+			if (waivers.length) {
+				this.persist();
+			}
+			if (!chunks.length && state.sizeWaivers?.length) {
+				return this.closeSizeWaivedCase(ctx);
+			}
 			state.phase = "reviewing";
 			this.persist();
 			this.ensureCheckStageStarted(ctx, "readability");
-			const findings: Finding[] = [];
-			const edits: ProposedEdit[] = [];
-			const reasons: string[] = [];
+			const chunkVerdicts: Array<{ path: string; value: ValidatedVerdict }> = [];
 			for (const chunk of chunks) {
+				const chunkFilePath = chunk.files[0]!.path;
+				const isChunkFileInCurrentCase = state.files.some((file) => file.path === chunkFilePath);
+				if (!isChunkFileInCurrentCase) {
+					continue;
+				}
+				state.phase = "reviewing";
 				const response = await (this.ports.review ?? review)({
 					piSessionId,
 					registry: ctx.modelRegistry,
 					config: this.config,
 					request: {
 						...chunk,
-						input: `${chunk.input}\nPrevious case findings (untrusted review data; check whether resolved):\n${JSON.stringify(state.verdict?.findings ?? [])}`,
+						input: `${chunk.input}\nPrevious case findings (untrusted review data; check whether resolved):\n${JSON.stringify(previousFindings)}`,
 						notes: state.notes,
 						...(state.objection ? { objection: state.objection } : {}),
 					},
@@ -782,14 +952,25 @@ export class QualityController {
 						);
 					}
 				}
+				if (response.kind === "oversized") {
+					this.autoWaiveSize(chunkFilePath, response.reason);
+					continue;
+				}
 				if (response.kind !== "verdict") {
 					this.finishCurrentCheckStage(ctx, response.kind === "cancelled" ? "interrupted" : "failed");
 					return await this.reviewFailure(ctx, response);
 				}
-				findings.push(...response.value.findings);
-				edits.push(...response.value.edits);
-				reasons.push(response.value.rationale);
+				chunkVerdicts.push({ path: chunkFilePath, value: response.value });
 			}
+			if (!state.files.length && state.sizeWaivers?.length) {
+				this.finishCurrentCheckStage(ctx, "failed");
+				return this.closeSizeWaivedCase(ctx);
+			}
+			const eligiblePaths = new Set(state.files.map((file) => file.path));
+			const eligibleVerdicts = chunkVerdicts.filter((chunk) => eligiblePaths.has(chunk.path));
+			const findings = eligibleVerdicts.flatMap((chunk) => chunk.value.findings);
+			const edits = eligibleVerdicts.flatMap((chunk) => chunk.value.edits);
+			const reasons = eligibleVerdicts.map((chunk) => chunk.value.rationale);
 			if (findings.length > 24 || edits.length > 48)
 				throw new Error(
 					"Combined review exceeds the bounded feedback budget; split the change or resolve explicitly",
@@ -807,12 +988,17 @@ export class QualityController {
 				edits: uniqueEdits,
 				proposed,
 			};
+			state.phase = "reviewing";
+			this.persist();
 			recordVerdict(state, verdict, responseRound);
 			this.finishCurrentCheckStage(ctx, verdict.verdict === "approved" ? "passed" : "failed");
 			if (verdict.verdict === "needs_work") this.rejectionCount += 1;
 			this.persist();
 			this.status(ctx);
 			if (verdict.verdict === "needs_work" && state.attempts >= state.limit) return await this.arbitrate(ctx);
+			const waiverDescription = state.sizeWaivers?.length
+				? ` ${state.sizeWaivers.length} oversized file(s) automatically waived, not model-approved.`
+				: "";
 			let approvalDescription = "Style only; correctness not certified.";
 			if (state.lsp)
 				approvalDescription =
@@ -822,7 +1008,7 @@ export class QualityController {
 					"Readability approved; LSP explicitly waived by the operator. Not a clean LSP verdict.";
 			return this.result(
 				verdict.verdict === "approved"
-					? `Quality approved: ${state.files.length} file(s), snapshot ${revision(state)}. ${approvalDescription}`
+					? `Quality approved: ${state.files.length} file(s), snapshot ${revision(state)}. ${approvalDescription}${waiverDescription}`
 					: this.feedback(),
 				verdict.verdict !== "approved",
 			);
@@ -834,6 +1020,14 @@ export class QualityController {
 				this.finishCurrentCheckStage(ctx, this.signal(ctx).aborted ? "interrupted" : "failed");
 			}
 			if (error instanceof CoverageError && this.state && !this.signal(ctx).aborted) {
+				if (error.kind === "size") {
+					this.autoWaiveSize(error.path, error.message);
+					return this.result(
+						"Oversized file automatically waived; continuing review of eligible files.",
+						true,
+						{ outcome: "waived" },
+					);
+				}
 				try {
 					return await this.resolveCoveragePause(ctx, error);
 				} catch (failure) {
@@ -850,6 +1044,9 @@ export class QualityController {
 				this.ports.activity?.finishCollection();
 				this.publishActivity();
 				this.operation = false;
+				if (!this.pending) {
+					this.reviewToolPaths.clear();
+				}
 			}
 		}
 	}
@@ -868,13 +1065,18 @@ export class QualityController {
 		}
 		const generation = this.generation;
 		const expected = revision(state);
-		let checked = await lsp
-			.check(state.files, this.signal(ctx), () => {
-				if (this.valid(ctx, generation) && !this.signal(ctx).aborted) {
-					this.ensureCheckStageStarted(ctx, "lsp");
+		let checked = state.lspCapturePaths?.length
+			? {
+					kind: "unavailable" as const,
+					reason: `Outstanding LSP checks require recapturing oversized files: ${state.lspCapturePaths.join(", ")}. Restore capture eligibility or explicitly waive LSP.`,
 				}
-			})
-			.catch((error) => ({ kind: "unavailable" as const, reason: String(error) }));
+			: await lsp
+					.check(state.files, this.signal(ctx), () => {
+						if (this.valid(ctx, generation) && !this.signal(ctx).aborted) {
+							this.ensureCheckStageStarted(ctx, "lsp");
+						}
+					})
+					.catch((error) => ({ kind: "unavailable" as const, reason: String(error) }));
 		if (!this.valid(ctx, generation) || this.signal(ctx).aborted)
 			return this.result("LSP check interrupted; review remains pending.", false, { outcome: "retrying" });
 		if (!checked && (state.lspRequired || state.lsp))
@@ -896,6 +1098,8 @@ export class QualityController {
 			});
 		}
 		if (checked.kind !== "checked") {
+			state.lspUnavailable = checked.reason;
+			this.persist();
 			this.finishCurrentCheckStage(ctx, checked.kind === "cancelled" ? "interrupted" : "failed");
 			const choice = await this.awaitDecision(ctx, "lsp_failure", () =>
 				ctx.ui.select(
@@ -916,6 +1120,8 @@ export class QualityController {
 			if (choice === "Waive LSP for this case") {
 				state.lspWaived = true;
 				state.lsp = undefined;
+				state.lspCapturePaths = undefined;
+				state.lspUnavailable = undefined;
 				this.persist();
 				return;
 			}
@@ -933,6 +1139,9 @@ export class QualityController {
 			});
 		}
 		const assessment = {
+			paths: [
+				...new Set([...Object.keys(checked.hashes), ...checked.findings.map((finding) => finding.file)]),
+			],
 			findings: checked.findings,
 			revision: expected,
 			configuration: lsp.configRevision,
@@ -940,6 +1149,7 @@ export class QualityController {
 			generation: checked.generation,
 		};
 		state.lsp = assessment;
+		state.lspUnavailable = undefined;
 		this.finishCurrentCheckStage(ctx, checked.findings.length ? "failed" : "passed");
 		if (!checked.findings.length) {
 			this.persist();
@@ -1075,21 +1285,16 @@ export class QualityController {
 			);
 		}
 		if (choice === "waive") {
-			if (error.kind === "size" && !this.state!.files.some((file) => file.path === error.path)) {
-				this.state!.phase = "closed";
-				this.state!.resolution = "waived";
-			} else {
-				this.state!.files = this.state!.files.filter((file) => file.path !== error.path);
-				this.state!.pendingPaths = this.state!.pendingPaths.filter((path) => path !== error.path);
-				this.state!.verdict = undefined;
-				this.state!.approvedTargets = undefined;
-				this.state!.phase = "captured";
-			}
+			this.state!.files = this.state!.files.filter((file) => file.path !== error.path);
+			this.state!.pendingPaths = this.state!.pendingPaths.filter((path) => path !== error.path);
+			this.state!.verdict = undefined;
+			this.state!.approvedTargets = undefined;
+			this.state!.phase = "captured";
 			this.pi.appendEntry("code-quality:waiver", { path: error.path, reason: error.message });
 			this.persist();
 			return this.result(
 				`Quality coverage explicitly waived for ${error.path}; any remaining files still require approval.`,
-				this.state!.phase !== "closed",
+				true,
 				{ outcome: "waived" },
 			);
 		}
@@ -1098,56 +1303,31 @@ export class QualityController {
 	}
 	async respond(
 		args: {
-			action: "disagree" | "request_scope";
+			action: "disagree";
 			caseId: string;
 			revision: string;
 			rationale: string;
-			paths?: string[];
 		},
 		ctx: ExtensionContext,
 	): Promise<string> {
 		const state = this.state;
-		if (!state || state.phase === "closed" || args.caseId !== state.id || args.revision !== revision(state))
+		if (!state || state.phase === "closed" || args.caseId !== state.id || args.revision !== revision(state)) {
 			throw new Error("No matching current quality case");
-		if (!(await this.checkFresh(ctx)))
+		}
+		if (!(await this.checkFresh(ctx))) {
 			throw new Error("Quality snapshot changed; obtain a fresh review before responding");
-		if (args.action === "disagree") {
-			if (state.phase !== "correcting" || state.pendingPaths.length) {
-				throw new Error("Wait for the current review before submitting a disagreement");
-			}
-			if (!args.rationale.trim() || args.rationale.length > 2000) {
-				throw new Error("Disagreement must contain 1–2000 characters");
-			}
-			requestReconsideration(state, args.rationale);
-			this.persist();
-			return state.lsp?.findings.length
-				? `Disagreement queued for fresh LSP diagnostics under the shared round budget:\n\n${args.rationale}`
-				: `Disagreement queued for reviewer reconsideration:\n\n${args.rationale}`;
 		}
-		const generation = this.generation;
-		const signal = this.signal(ctx);
-		const paths = await Promise.all(
-			(args.paths ?? []).map((path) => {
-				if (this.ports.filesystem) {
-					return this.ports.filesystem.canonical(path, signal);
-				}
-				return Promise.resolve(canonicalPath(resolve(ctx.cwd, path)));
-			}),
-		);
-		if (!this.valid(ctx, generation) || this.state !== state || signal.aborted) {
-			return "Scope expansion cancelled";
+		if (state.phase !== "correcting" || state.pendingPaths.length) {
+			throw new Error("Wait for the current review before submitting a disagreement");
 		}
-		if (!paths.length) throw new Error("Provide helper/test paths for scope expansion");
-		const confirmed = await this.awaitDecision(ctx, "scope", () =>
-			ctx.ui.confirm("Expand quality correction scope?", `${args.rationale}\n${paths.join("\n")}`, {
-				signal: this.signal(ctx),
-			}),
-		);
-		if (!this.valid(ctx, generation) || this.signal(ctx).aborted || !confirmed)
-			return "Scope expansion not approved";
-		for (const path of paths) if (!state.scope.includes(path)) state.scope.push(path);
+		if (!args.rationale.trim() || args.rationale.length > 2000) {
+			throw new Error("Disagreement must contain 1–2000 characters");
+		}
+		requestReconsideration(state, args.rationale);
 		this.persist();
-		return "User approved these paths for this correction case; ordinary permissions still apply.";
+		return state.lsp?.findings.length
+			? `Disagreement queued for fresh LSP diagnostics under the shared round budget:\n\n${args.rationale}`
+			: `Disagreement queued for reviewer reconsideration:\n\n${args.rationale}`;
 	}
 	async selectModel(ctx: ExtensionContext, requested = ""): Promise<boolean> {
 		const generation = this.generation;
@@ -1175,7 +1355,12 @@ export class QualityController {
 		this.status(ctx);
 		return true;
 	}
-	async applySettings(ctx: ExtensionContext, value: unknown, interactionSignal?: AbortSignal, expectedConfigRevision?: string): Promise<void> {
+	async applySettings(
+		ctx: ExtensionContext,
+		value: unknown,
+		interactionSignal?: AbortSignal,
+		expectedConfigRevision?: string,
+	): Promise<void> {
 		const generation = this.generation;
 		const state = this.state;
 		const signal = AbortSignal.any([this.signal(ctx), ...(interactionSignal ? [interactionSignal] : [])]);
@@ -1190,7 +1375,9 @@ export class QualityController {
 		const next = parseConfig(value);
 		if (!next.enabled && this.pending) {
 			const confirmed = await this.awaitDecision(ctx, "waiver", () =>
-				ctx.ui.confirm("Disable pending quality gate?", "This explicitly waives the unresolved case.", { signal }),
+				ctx.ui.confirm("Disable pending quality gate?", "This explicitly waives the unresolved case.", {
+					signal,
+				}),
 			);
 			assertOwner();
 			if (!confirmed) {
@@ -1270,10 +1457,13 @@ export class QualityController {
 			ctx.ui.notify("No pending quality case", "info");
 			return;
 		}
-		this.state.phase =
-			action === "resolve" && (this.state.verdict?.edits.length || this.state.lsp?.findings.length)
-				? "human"
-				: "captured";
+		if (this.state.approvedTargets) {
+			this.state.phase = "applying";
+		} else {
+			const hasReviewFindings = Boolean(this.state.verdict?.edits.length || this.state.lsp?.findings.length);
+			const isAwaitingHumanReview = action === "resolve" && hasReviewFindings;
+			this.state.phase = isAwaitingHumanReview ? "human" : "captured";
+		}
 		this.persist();
 		this.pi.sendMessage(
 			{

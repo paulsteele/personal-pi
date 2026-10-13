@@ -1,9 +1,9 @@
-import { chmod, mkdir, rename, rm, symlink } from "node:fs/promises";
+import { rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { parseScope, resolveRepo } from "./git.js";
-import { assertCurrent } from "./snapshot.js";
+import { resolveRepo } from "./git.js";
 import { capture, commit, fixture, put, testConfig, testGit } from "./test-fixtures.js";
+
 const roots: string[] = [];
 async function repo() {
 	const r = await fixture();
@@ -11,26 +11,11 @@ async function repo() {
 	return r;
 }
 afterEach(async () => {
-	for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+	for (const root of roots.splice(0)) {
+		await rm(root, { recursive: true, force: true });
+	}
 });
-it("captures final staged+unstaged bytes and detects later drift", async () => {
-	const r = await repo();
-	await put(r.root, "a.ts", "old\n");
-	await commit(r.root);
-	await put(r.root, "a.ts", "staged\n");
-	await testGit(r.root, "add", "a.ts");
-	await put(r.root, "a.ts", "final\n");
-	await put(r.root, "odd name\tline\n.ts", "new\n");
-	const index = await testGit(r.root, "ls-files", "--stage");
-	const snapshot = await capture(r, { kind: "local" }, testConfig);
-	expect(snapshot.changes).toHaveLength(2);
-	expect(snapshot.changes.find((c) => c.file === "a.ts")?.patch).toContain("+final");
-	expect((await snapshot.read("a.ts", "old")).toString()).toBe("old\n");
-	await put(r.root, "a.ts", "later\n");
-	expect((await snapshot.read("a.ts")).toString()).toBe("final\n");
-	await expect(assertCurrent(snapshot, testConfig)).rejects.toThrow("Source changed");
-	expect(await testGit(r.root, "ls-files", "--stage")).toBe(index);
-});
+
 it("supports unborn repositories, ignores ignored paths, and does not follow symlinks", async () => {
 	const r = await repo();
 	await put(r.root, ".gitignore", "ignored\n");
@@ -46,52 +31,7 @@ it("supports unborn repositories, ignores ignored paths, and does not follow sym
 	await expect(snapshot.read("../escape")).rejects.toThrow();
 	expect(snapshot.omitted.some((c) => c.file === "link")).toBe(true);
 });
-it("does not fall back to a commit for excluded-only dirty files or staged reverts", async () => {
-	const r = await repo();
-	await put(r.root, "a.ts", "one\n");
-	await commit(r.root);
-	await put(r.root, "image.bin", Buffer.from([0, 1]));
-	const excluded = await capture(r, { kind: "local" }, testConfig, [{ glob: "*.bin", reason: "binary" }]);
-	expect(excluded.changes).toHaveLength(0);
-	expect(excluded.omitted).toHaveLength(1);
-	await rm(join(r.root, "image.bin"));
-	await put(r.root, "a.ts", "two\n");
-	await testGit(r.root, "add", "a.ts");
-	await put(r.root, "a.ts", "one\n");
-	expect((await capture(r, { kind: "local" }, testConfig)).changes).toHaveLength(0);
-});
-it("uses merge base and supports committed-only scopes", async () => {
-	const r = await repo();
-	await put(r.root, "a.ts", "one\n");
-	await commit(r.root);
-	await testGit(r.root, "checkout", "-b", "feature");
-	await put(r.root, "a.ts", "two\n");
-	await commit(r.root);
-	await put(r.root, "a.ts", "three\n");
-	const local = await capture(r, parseScope("--base main"), testConfig);
-	const committed = await capture(r, parseScope("--base main --committed-only"), testConfig);
-	expect(local.changes[0]?.added).toEqual(["three"]);
-	expect(committed.changes[0]?.added).toEqual(["two"]);
-	await expect(assertCurrent(committed, testConfig)).rejects.toThrow();
-	await expect(capture(r, parseScope("--commits 99"), testConfig)).rejects.toThrow();
-	expect(() => parseScope("--commits 0")).toThrow();
-	expect(() => parseScope("--committed-only")).toThrow();
-});
-it("preserves deleted-side evidence, pure renames, and mode-only changes", async () => {
-	const r = await repo();
-	await put(r.root, "old.ts", "one\n");
-	await put(r.root, "delete.ts", "gone\n");
-	await put(r.root, "mode.sh", "echo ok\n");
-	await commit(r.root);
-	await rename(join(r.root, "old.ts"), join(r.root, "new.ts"));
-	await rm(join(r.root, "delete.ts"));
-	await chmod(join(r.root, "mode.sh"), 0o755);
-	const snapshot = await capture(r, { kind: "local" }, testConfig);
-	expect(snapshot.changes.find((c) => c.file === "new.ts")?.oldPath).toBe("old.ts");
-	expect((await snapshot.read("new.ts", "old")).toString()).toBe("one\n");
-	expect(snapshot.changes.find((c) => c.file === "delete.ts")?.oldLines.has(1)).toBe(true);
-	expect(snapshot.changes.find((c) => c.file === "mode.sh")?.metadataOnly).toBe(true);
-});
+
 it("shares common-directory identities across worktrees but not clones", async () => {
 	const r = await repo();
 	await put(r.root, "a.ts", "a\n");

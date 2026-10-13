@@ -9,6 +9,7 @@ import { ensurePrivateDirectory, publishPrivateText, readPrivateText } from "./s
 import { fingerprintBuildContext } from "./build-context.ts";
 import type { GeneratedImageRecipe } from "./tool-assembly.ts";
 import type { ToolBuildPorts, ToolInventory } from "./tool-provisioning.ts";
+import type { ToolImageMount } from "./tool-image-mounts.ts";
 
 export type ToolEngineOutput = (args: string[], signal?: AbortSignal) => Promise<string>;
 
@@ -171,26 +172,57 @@ export async function verifyRuntimeInventory(options: {
   container: string;
   user: string;
   inventory: ToolInventory;
+  toolImageMounts?: readonly ToolImageMount[];
   remoteEnvironment?: Record<string, string>;
   workspace?: string;
   signal?: AbortSignal;
 }): Promise<void> {
   const execContextArguments = [
-    "exec", "--user", options.user,
-    ...Object.entries(options.remoteEnvironment ?? {}).flatMap(([name, value]) => ["--env", `${name}=${value}`]),
+    "exec",
+    "--user",
+    options.user,
+    ...Object.entries(options.remoteEnvironment ?? {}).flatMap(([name, value]) => [
+      "--env",
+      `${name}=${value}`,
+    ]),
     ...(options.workspace ? ["--workdir", options.workspace] : []),
     options.container,
   ];
-  for (const tool of options.inventory.tools) {
+  if (options.toolImageMounts?.length) {
+    const readOnlyMountsScript = `
+set -eu
+for destination do
+  awk -v destination="$destination" '
+    $5 == destination {
+      for (separator=7; separator<=NF && $separator!="-"; separator++) {}
+      filesystem=$(separator+1)
+      superOptions=$(separator+3)
+
+      explicitReadOnly=$6 ~ /(^|,)ro(,|$)/
+      readOnlyOverlay=filesystem=="overlay" &&
+        superOptions ~ /(^|,)lowerdir=/ &&
+        superOptions !~ /(^|,)(upperdir|workdir)=/
+      if (explicitReadOnly || readOnlyOverlay) { foundReadOnlyMount=1 }
+    }
+    END { exit !foundReadOnlyMount }
+  ' /proc/self/mountinfo
+done
+`;
     await options.run(
       [
         ...execContextArguments,
         "sh",
         "-c",
-        'command -v "$1" >/dev/null',
+        readOnlyMountsScript,
         "sh",
-        tool.executable,
+        ...options.toolImageMounts.map((mount) => mount.destination),
       ],
+      options.signal,
+    );
+  }
+  for (const tool of options.inventory.tools) {
+    await options.run(
+      [...execContextArguments, "sh", "-c", 'command -v "$1" >/dev/null', "sh", tool.executable],
       options.signal,
     );
     const isRuntimeTool = tool.id.endsWith("-runtime");

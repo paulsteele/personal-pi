@@ -6,8 +6,7 @@ import {
   orderedLifecycleRunner,
   parseProjectEnvironment,
 } from "../src/sandbox/project-environment.ts";
-import { equippedBaseRecipe, projectImageRecipe } from "../src/sandbox/tool-assembly.ts";
-import { STANDARD_TOOL_CATALOG } from "../src/sandbox/tool-catalog.ts";
+import { infrastructureImageRecipe, projectImageRecipe } from "../src/sandbox/tool-assembly.ts";
 
 it("extends runtime settings without changing the selected base", () => {
   const base = {
@@ -87,46 +86,23 @@ it("does not allow project supplements to grant mounts or host initialization", 
   ).toThrow();
 });
 
-it("assembles separate linked component copies without project inputs", () => {
-  const tools = STANDARD_TOOL_CATALOG.filter((tool) =>
-    ["node-runtime", "pyright"].includes(tool.id),
-  );
-  const artifacts = tools.map((tool, index) => ({
-    tool,
-    imageId: `sha256:${String(index + 1).repeat(64)}`,
-  }));
-  const recipe = equippedBaseRecipe({
+it("installs native libraries without copying server files or inventory into the application image", () => {
+  const recipe = infrastructureImageRecipe({
     baseImageId: `sha256:${"a".repeat(64)}`,
     imageUser: "1000:1000",
-    artifacts,
     nativeDependenciesScript: "set -eu\ninstall-libraries\n",
-    copyMode: "linked",
   });
-  expect(recipe.containerfile).toContain(
-    "COPY --link --from=tool_node_runtime /opt/pi-tools/node-runtime/24.21.0/",
-  );
-  expect(recipe.containerfile).toContain(
-    "COPY --link --from=tool_pyright /opt/pi-tools/pyright/1.1.414/",
-  );
+  expect(recipe.files).toEqual({ "native-dependencies.sh": "set -eu\ninstall-libraries\n" });
+  expect(recipe.containerfile).toContain("/tmp/pi-native-dependencies.sh");
+  expect(recipe.containerfile).not.toContain("COPY --from");
+  expect(recipe.containerfile).not.toContain("--mount");
+  expect(recipe.containerfile).not.toContain("inventory.json");
   expect(recipe.containerfile).toMatch(/USER 1000:1000\n$/);
-  expect(recipe.containerfile).not.toContain("project-install");
 });
 
-it("uses ordinary copies when the backend has no linked-copy capability", () => {
-  const recipe = equippedBaseRecipe({
-    baseImageId: `sha256:${"a".repeat(64)}`,
-    imageUser: "root",
-    artifacts: [{ tool: STANDARD_TOOL_CATALOG[0], imageId: `sha256:${"b".repeat(64)}` }],
-    nativeDependenciesScript: "true\n",
-    copyMode: "ordinary",
-  });
-  expect(recipe.containerfile).toContain("COPY --from=tool_node_runtime");
-  expect(recipe.containerfile).not.toContain("--link");
-});
-
-it("places private install recipes after the immutable equipped base", () => {
+it("places private installation recipes after the infrastructure image without server build mounts", () => {
   const recipe = projectImageRecipe({
-    equippedImageId: `sha256:${"c".repeat(64)}`,
+    infrastructureImageId: `sha256:${"c".repeat(64)}`,
     imageUser: "node",
     companionFiles: { "install.sh": "install-sdk\n" },
     installations: [

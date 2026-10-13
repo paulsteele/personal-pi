@@ -138,12 +138,14 @@ it("cancels active shells and rejects new work while retirement listeners are st
   const { promise: retirementWait, resolve: releaseRetirement } = Promise.withResolvers<void>();
   const retirementListener = vi.fn(() => retirementWait);
   session.beforeContainerRetirement(retirementListener);
-  ports.shell.mockImplementation(async (_owner: SandboxSession, options: { signal: AbortSignal }) => {
-    await new Promise<void>((resolve) => {
-      options.signal.addEventListener("abort", () => resolve(), { once: true });
-    });
-    return { code: 137, output: Buffer.alloc(0), stderr: "" };
-  });
+  ports.shell.mockImplementation(
+    async (_owner: SandboxSession, options: { signal: AbortSignal }) => {
+      await new Promise<void>((resolve) => {
+        options.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return { code: 137, output: Buffer.alloc(0), stderr: "" };
+    },
+  );
   const active = session.executeShell({ command: "dotnet test" });
   const replacement = session.rebuildFromDefinition({ ...resolved, revision: "new-tools" });
   try {

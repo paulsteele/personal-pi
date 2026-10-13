@@ -114,7 +114,9 @@ it("checks actual private agent storage even when resolving a base without envir
   await definitionFile(path, '{"build":{"dockerfile":"Containerfile","context":".."}}');
   await writeFile(join(cwd, ".devcontainer", "Containerfile"), "FROM debian:bookworm\n");
   const selected = await selectDefinition({ cwd, agentDir });
-  await expect(resolveDefinition({ selected })).rejects.toThrow("exposes private sandbox authority");
+  await expect(resolveDefinition({ selected })).rejects.toThrow(
+    "exposes private sandbox authority",
+  );
 });
 
 it.each([

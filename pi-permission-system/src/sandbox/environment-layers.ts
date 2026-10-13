@@ -28,6 +28,8 @@ async function provisioningCodeRevision(): Promise<string> {
     "tool-platform.ts",
     "tool-assembly.ts",
     "tool-provisioning.ts",
+    "tool-image-mounts.ts",
+    "tool-mount-capability.ts",
     "image-tool-recipe.ts",
   ];
   const sources = await Promise.all(

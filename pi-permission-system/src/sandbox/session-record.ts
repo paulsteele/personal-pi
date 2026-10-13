@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { mountGrantSchema } from "./mounts.ts";
 import { toolInventorySchema } from "./tool-inventory.ts";
+import { toolImageMountsSchema } from "./tool-image-mounts.ts";
 
 export const sessionRecordSchema = z
   .object({
@@ -23,6 +24,7 @@ export const sessionRecordSchema = z
         configuration: z.record(z.string(), z.unknown()),
         remoteEnvironment: z.record(z.string(), z.string()).optional(),
         toolInventory: toolInventorySchema.optional(),
+        toolImageMounts: toolImageMountsSchema.optional(),
       })
       .strict(),
   })

@@ -25,6 +25,7 @@ const protectedGuestRoots = [
   "/lib",
   "/lib64",
   "/run/pi-sandbox",
+  "/opt/pi-tools",
 ];
 
 export function validateMountDestination(destination: string): void {

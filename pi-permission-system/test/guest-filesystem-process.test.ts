@@ -68,6 +68,29 @@ it("writes and reads workspace files through the real guest filesystem protocol"
   expect(await fixture.filesystem.list("nested")).toEqual(["result.ts"]);
 });
 
+it("allows access to a readable file through the real guest filesystem protocol", async () => {
+  const fixture = await filesystemFixture();
+  await fixture.filesystem.write("readable.txt", "guest contents");
+  await expect(fixture.filesystem.access("readable.txt")).resolves.toBeUndefined();
+});
+
+it("reports guest and host absence for a missing path through the real guest filesystem protocol", async () => {
+  const fixture = await filesystemFixture();
+  const missingPath = join(fixture.directory, "missing");
+  const failure = fixture.filesystem.access("missing");
+  await expect(failure).rejects.toMatchObject({ name: "PermissionError" });
+  await expect(failure).rejects.toThrow(
+    `Guest status: ${JSON.stringify({
+      path: missingPath,
+      exists: false,
+      readable: false,
+    })}`,
+  );
+  await expect(failure).rejects.toThrow(`Host path checked: ${missingPath}`);
+  await expect(failure).rejects.toThrow('Host status: {"exists":false}');
+  await expect(failure).rejects.toThrow("call request_host_mount");
+});
+
 it("resolves guest HOME and batch entry probes in the Python process namespace", async () => {
   const fixture = await filesystemFixture();
   await fixture.filesystem.write("~/present", "guest home");

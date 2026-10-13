@@ -86,6 +86,18 @@ it("uses supervisor-owned lifetime rather than a host PID for container language
 	);
 });
 
+it("launches a mounted catalog server inside the project container at its inventory path", () => {
+	const { sandbox, route } = sandboxFixture();
+	const mountedServerPath = "/opt/pi-tools/pyright/1.1.414/bin/pyright-langserver";
+	const mountedRoute = { ...route, command: mountedServerPath };
+	new SandboxLspClient(sandbox, mountedRoute, "/workspace");
+	const launch = constructClient.mock.calls[0]![5] as { command: string; args: string[] };
+	expect(launch.command).toBe("podman");
+	expect(launch.args).toContain("container");
+	expect(launch.args).toContain(mountedServerPath);
+	expect(launch.args).not.toContain("--mount");
+});
+
 it("refreshes previously opened guest documents without another quality batch", async () => {
 	vi.useFakeTimers();
 	const { contents, sandbox, route } = sandboxFixture();
@@ -128,13 +140,18 @@ it("refreshes changed dependencies at an explicit acceptance boundary without wa
 it("still stops the protocol client when its guest termination request times out", async () => {
 	vi.useFakeTimers();
 	const { sandbox, route } = sandboxFixture();
-	const execute = vi.fn(async (options: { timeoutMs?: number; signal?: AbortSignal }) => new Promise<never>((_resolve, reject) => {
-		setTimeout(() => reject(new Error("Guest process timed out")), options.timeoutMs);
-	}));
+	const execute = vi.fn(
+		async (options: { timeoutMs?: number; signal?: AbortSignal }) =>
+			new Promise<never>((_resolve, reject) => {
+				setTimeout(() => reject(new Error("Guest process timed out")), options.timeoutMs);
+			}),
+	);
 	sandbox.session.execute = execute;
 	const client = new SandboxLspClient(sandbox, route, "/workspace");
 	const stopping = client.stop();
-	expect(execute).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 5000, signal: expect.any(AbortSignal) }));
+	expect(execute).toHaveBeenCalledWith(
+		expect.objectContaining({ timeoutMs: 5000, signal: expect.any(AbortSignal) }),
+	);
 	expect(lsp.stop).not.toHaveBeenCalled();
 	await vi.advanceTimersByTimeAsync(5000);
 	await stopping;
@@ -151,9 +168,12 @@ it("rejects diagnostics if a dependency changes while the polling refresh runs",
 	try {
 		await client.start();
 		await client.check("/workspace/dependency.py", "python", "before", new AbortController().signal);
-		lsp.diagnose.mockImplementationOnce(() => new Promise((resolve) => {
-			releaseDiagnostics = () => resolve([]);
-		}));
+		lsp.diagnose.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					releaseDiagnostics = () => resolve([]);
+				}),
+		);
 		const pending = client.check("/workspace/main.py", "python", "main", new AbortController().signal);
 		const rejectedDiagnostics = expect(pending).rejects.toThrow("Guest dependency changed");
 		await vi.advanceTimersByTimeAsync(0);

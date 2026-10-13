@@ -38,19 +38,18 @@ function literalCommand(node: TSNode): string | undefined {
   return undefined;
 }
 
-const opaqueCommands = new Set([
-  "eval",
-  "source",
-  ".",
-  "bash",
-  "sh",
-  "zsh",
-  "env",
-  "sudo",
-  "command",
-  "exec",
-  "alias",
-]);
+function declaredShellFunctionNames(node: TSNode): string[] {
+  const functionNames: string[] = [];
+  if (node.type === "function_definition") {
+    const declarationName = children(node).find((child) => child.isNamed)!;
+    functionNames.push(declarationName.text);
+  }
+  for (const child of children(node)) {
+    functionNames.push(...declaredShellFunctionNames(child));
+  }
+  return functionNames;
+}
+
 const protectedEnvironmentNames =
   /^(PATH|HOME|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|NODE_OPTIONS|NODE_PATH|PYTHONPATH|PYTHONHOME|PYTHONUSERBASE|LD_.*|DYLD_.*)$/;
 
@@ -65,26 +64,24 @@ export async function planHostCommands(
   const tree = parser.parse(source);
   if (!tree || tree.rootNode.hasError) {
     tree?.delete();
-    throw new Error("Host routing requires complete Bash syntax");
+    return { source, invocations: [] };
   }
   const invocations: HostInvocation[] = [];
   try {
+    const functionNames = new Set(declaredShellFunctionNames(tree.rootNode));
     const visit = (node: TSNode): void => {
       if (node.type === "function_definition") {
-        throw new Error("Shell functions are unsupported with host routing; use separate calls");
+        return;
       }
       if (node.type === "command") {
         const parts = children(node);
         const name = parts.find((child) => child.type === "command_name");
         if (name) {
           const command = literalCommand(name);
-          if (!command) {
-            throw new Error("Dynamic executable names are unsupported with host routing");
-          }
-          if (opaqueCommands.has(command)) {
-            throw new Error(`Opaque shell execution is unsupported with host routing: ${command}`);
-          }
-          const ruleIndex = rules.findIndex((rule) => matchesHostCommand(rule, command));
+          const ruleIndex =
+            command && !functionNames.has(command)
+              ? rules.findIndex((rule) => matchesHostCommand(rule, command))
+              : -1;
           if (ruleIndex !== -1) {
             const environmentNames = parts
               .filter((child) => child.type === "variable_assignment")
@@ -101,7 +98,7 @@ export async function planHostCommands(
             }
             invocations.push({
               ruleIndex,
-              command,
+              command: command!,
               environmentNames,
               startIndex: name.startIndex,
               endIndex: name.startIndex + name.text.length,

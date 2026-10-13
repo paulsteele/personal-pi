@@ -65,7 +65,11 @@ it("requires explicit migration while preserving legacy policy and dropping clas
 it("changes disclosure revisions for live permission edits without changing container authority", async () => {
   const { directory } = await fixture();
   const first = sandboxDisclosureRevision(directory, "container-authority");
-  await saveSandboxSettings(directory, parseSandboxSettings({ permission: { read: "deny" } }), undefined);
+  await saveSandboxSettings(
+    directory,
+    parseSandboxSettings({ permission: { read: "deny" } }),
+    undefined,
+  );
   const second = sandboxDisclosureRevision(directory, "container-authority");
   expect(second).not.toBe(first);
   expect(sandboxDisclosureRevision(directory, "replacement-container")).not.toBe(second);
@@ -171,33 +175,49 @@ it("withholds project evidence when final disclosure authorization rejects it", 
   const rejectDisclosure = async () => {
     throw new Error("Source permissions changed");
   };
-  await expect(proposeDevcontainer({
-    ctx: ctx as never, evidence: "private project", authorizeEvidence: rejectDisclosure,
-  })).rejects.toThrow("Source permissions changed");
+  await expect(
+    proposeDevcontainer({
+      ctx: ctx as never,
+      evidence: "private project",
+      authorizeEvidence: rejectDisclosure,
+    }),
+  ).rejects.toThrow("Source permissions changed");
   expect(streamSimple).not.toHaveBeenCalled();
 });
 
 it("rechecks evidence after authentication before the provider receives the request", async () => {
-  const { promise: authenticationWait, resolve: finishAuthentication } = Promise.withResolvers<void>();
+  const { promise: authenticationWait, resolve: finishAuthentication } =
+    Promise.withResolvers<void>();
   const providerDispatch = vi.fn();
   const authorizeEvidence = vi.fn(async () => {});
   const ctx = {
     model: { provider: "test", id: "current" },
     modelRegistry: {
       hasConfiguredAuth: () => true,
-      streamSimple: (_model: unknown, _context: unknown, options: {
-        transformHeaders(headers: Record<string, string>): Promise<Record<string, string>>;
-      }) => ({
+      streamSimple: (
+        _model: unknown,
+        _context: unknown,
+        options: {
+          transformHeaders(headers: Record<string, string>): Promise<Record<string, string>>;
+        },
+      ) => ({
         result: async () => {
           await authenticationWait;
           await options.transformHeaders({ authorization: "fixture" });
           providerDispatch();
-          return { stopReason: "stop", content: [{ type: "text", text: JSON.stringify(imageProposal) }] };
+          return {
+            stopReason: "stop",
+            content: [{ type: "text", text: JSON.stringify(imageProposal) }],
+          };
         },
       }),
     },
   };
-  const pending = proposeDevcontainer({ ctx: ctx as never, evidence: "private project", authorizeEvidence });
+  const pending = proposeDevcontainer({
+    ctx: ctx as never,
+    evidence: "private project",
+    authorizeEvidence,
+  });
   const rejection = expect(pending).rejects.toThrow("Source revoked during authentication");
   await vi.waitFor(() => expect(authorizeEvidence).toHaveBeenCalledOnce());
   authorizeEvidence.mockRejectedValueOnce(new Error("Source revoked during authentication"));

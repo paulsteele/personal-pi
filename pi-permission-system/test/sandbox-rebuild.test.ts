@@ -6,7 +6,12 @@ import { SandboxSession } from "../src/sandbox/session.ts";
 import type { ResolvedDefinition } from "../src/sandbox/definition.ts";
 import { readPrivateText } from "../src/sandbox/storage.ts";
 
-const ports = vi.hoisted(() => ({ create: vi.fn(), podman: vi.fn(), forward: vi.fn(), execute: vi.fn() }));
+const ports = vi.hoisted(() => ({
+  create: vi.fn(),
+  podman: vi.fn(),
+  forward: vi.fn(),
+  execute: vi.fn(),
+}));
 vi.mock("../src/sandbox/process.ts", async (original) => ({
   ...(await original<typeof import("../src/sandbox/process.ts")>()),
   runGuestProcess: ports.execute,
@@ -78,7 +83,12 @@ it("releases the session owner lock even when a retirement listener fails", asyn
   f.session.beforeContainerRetirement(failRetirementListener);
   await expect(f.session.close()).rejects.toThrow("Sandbox session cleanup failed");
   expect(await readPrivateText(join(f.session.directory, "owner.lock"))).toBeUndefined();
-  expect(ports.podman).toHaveBeenCalledWith(["stop", "--time=0", "original-container"]);
+  expect(ports.podman).toHaveBeenCalledWith(
+    ["stop", "--time=0", "original-container"],
+    undefined,
+    undefined,
+    15_000,
+  );
 });
 
 it("cancels an ordinary guest command before rebuilding the container generation", async () => {
@@ -106,7 +116,14 @@ it("restores readiness after cancelling replacement while a guest command termin
   const terminating = vi.fn();
   ports.execute.mockImplementation(async (options: { signal: AbortSignal }) => {
     await new Promise<void>((resolve) => {
-      options.signal.addEventListener("abort", () => { terminating(); resolve(); }, { once: true });
+      options.signal.addEventListener(
+        "abort",
+        () => {
+          terminating();
+          resolve();
+        },
+        { once: true },
+      );
     });
     await terminationWait;
     options.signal.throwIfAborted();
@@ -159,7 +176,12 @@ it("bounds a stalled retirement listener and still releases the owner lock", asy
     await vi.advanceTimersByTimeAsync(20_000);
     await rejected;
     expect(await readPrivateText(join(f.session.directory, "owner.lock"))).toBeUndefined();
-    expect(ports.podman).toHaveBeenCalledWith(["stop", "--time=0", "original-container"]);
+    expect(ports.podman).toHaveBeenCalledWith(
+      ["stop", "--time=0", "original-container"],
+      undefined,
+      undefined,
+      15_000,
+    );
   } finally {
     finishListener();
     vi.useRealTimers();
@@ -241,7 +263,12 @@ it("keeps the previous rebuild container when starting replacement forwarders fa
     await expect(f.session.rebuildFromDefinition(f.replacement)).rejects.toThrow(
       "Forwarding failed",
     );
-    expect(ports.podman).toHaveBeenCalledWith(["stop", "rebuilt-container"]);
+    expect(ports.podman).toHaveBeenCalledWith(
+      ["stop", "--time=0", "rebuilt-container"],
+      undefined,
+      undefined,
+      15_000,
+    );
     expect(ports.podman).toHaveBeenCalledWith(["start", "original-container"]);
     expect(ports.podman.mock.calls.filter(([args]) => args[0] === "rm")).toEqual([]);
     expect(f.session.generation).toBe(1);
@@ -266,6 +293,51 @@ it("does not roll back a successful rebuild when superseded-container removal fa
     expect(f.session.environment.container).toBe("rebuilt-container");
   } finally {
     await f.session.close();
+  }
+});
+
+it("stops the previous container immediately with a fifteen-second command budget before rebuilding", async () => {
+  const { session, replacement } = await fixture();
+  const cancellation = new AbortController();
+  ports.create.mockClear();
+  ports.podman.mockImplementationOnce(async (args: string[], signal?: AbortSignal) => {
+    expect(args).toEqual(["stop", "--time=0", "original-container"]);
+    expect(signal?.aborted).toBe(false);
+    expect(ports.create).not.toHaveBeenCalled();
+    return "";
+  });
+  try {
+    await session.rebuildFromDefinition(replacement, cancellation.signal);
+    expect(ports.podman).toHaveBeenCalledWith(
+      ["stop", "--time=0", "original-container"],
+      expect.any(AbortSignal),
+      undefined,
+      15_000,
+    );
+    expect(session.environment.container).toBe("rebuilt-container");
+  } finally {
+    await session.close();
+  }
+});
+
+it("reports the container and Podman diagnostics when stopping for a rebuild times out", async () => {
+  const { session, replacement } = await fixture();
+  const stopFailure = Object.assign(new Error("Command failed"), {
+    stderr: "engine did not respond",
+    killed: true,
+    signal: "SIGTERM",
+  });
+  ports.podman.mockRejectedValueOnce(stopFailure);
+  try {
+    await expect(session.rebuildFromDefinition(replacement)).rejects.toThrow(
+      /original-container.*engine did not respond.*15000ms/,
+    );
+    expect(ports.create).toHaveBeenCalledOnce();
+    expect(ports.podman).toHaveBeenCalledWith(["start", "original-container"]);
+    expect(session.environment.container).toBe("original-container");
+    expect(session.generation).toBe(1);
+  } finally {
+    await session.close();
   }
 });
 

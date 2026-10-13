@@ -3,7 +3,6 @@ import { posix } from "node:path";
 import { checkPolicy } from "../policy.ts";
 import { BashProgram } from "../access-intent/bash/program.ts";
 import { PathNormalizer } from "../path-normalizer.ts";
-import { evaluateSafety, type SafetyContext } from "../auto/safety-policy.ts";
 import type { SandboxSession } from "./session.ts";
 import { loadSandboxSettings } from "./settings.ts";
 import { guestToHost } from "./mounts.ts";
@@ -35,28 +34,13 @@ const authorizedHostPackages = [
   },
   {
     sourcePattern: /^npm:@plannotator\/pi-extension(?:@[^/]+)?$/,
-    entrySuffixes: ["/node_modules/@plannotator/pi-extension/index.ts"],
+    entrySuffixes: [
+      "/node_modules/@plannotator/pi-extension/index.ts",
+      "/node_modules/@plannotator/pi-extension",
+    ],
     toolNames: new Set(["plannotator", "plannotator_submit_plan", "plannotator_mark_done"]),
   },
 ];
-export const externalEffectCategories = new Set([
-  "vcs_remote_mutation",
-  "package_publication",
-  "artifact_publication",
-  "deployment_mutation",
-  "cloud_or_deployment_mutation",
-  "cluster_mutation",
-  "cluster_release_mutation",
-  "infrastructure_mutation",
-  "container_or_registry_mutation",
-  "credential_helper_access",
-  "credential_store_access",
-  "secret_key_export",
-  "kernel_keyring_access",
-  "sensitive_path",
-  "macos_keychain_access",
-]);
-
 export function isAuditedHostUiTool(tool: ToolInfo): boolean {
   return (
     tool.name === "ask_user_question" &&
@@ -105,9 +89,7 @@ export async function reviewSandboxToolCall(options: {
   getSession: () => SandboxSession;
   agentDir: string;
   input: Record<string, unknown>;
-  toolCallId: string;
   ctx: ExtensionContext;
-  confirm: (context: SafetyContext, category: string, reason: string) => Promise<boolean>;
 }): Promise<void> {
   const { tool } = options;
   if (!tool || !isAuditedSandboxTool(tool)) {
@@ -126,9 +108,7 @@ export async function reviewSandboxToolCall(options: {
     agentDir: options.agentDir,
     toolName: tool.name,
     input: options.input,
-    toolCallId: options.toolCallId,
     ctx: options.ctx,
-    confirm: options.confirm,
   });
 }
 
@@ -138,9 +118,7 @@ export async function reviewSandboxAction(options: {
   agentDir: string;
   toolName: string;
   input: Record<string, unknown>;
-  toolCallId: string;
   ctx: ExtensionContext;
-  confirm: (context: SafetyContext, category: string, reason: string) => Promise<boolean>;
 }): Promise<void> {
   const { session, input, toolName } = options;
   const settings = await loadSandboxSettings(options.agentDir);
@@ -174,9 +152,13 @@ export async function reviewSandboxAction(options: {
     const lexicalHostPathAlias = guestToHost(lexicalGuestPath, session.mounts);
     const canonicalHostPathAlias = guestToHost(canonicalGuestPath, session.mounts);
     const hostPathAliases = [lexicalHostPathAlias, canonicalHostPathAlias];
-    return [...new Set([inputPath, ...guestPathAliases, ...hostPathAliases].filter(
-      (value): value is string => typeof value === "string",
-    ))];
+    return [
+      ...new Set(
+        [inputPath, ...guestPathAliases, ...hostPathAliases].filter(
+          (value): value is string => typeof value === "string",
+        ),
+      ),
+    ];
   };
   let path: string | undefined;
   if (typeof input.path === "string") {
@@ -206,85 +188,17 @@ export async function reviewSandboxAction(options: {
       throw new Error("Shell command denied by explicit policy");
     }
   }
-  const shellPaths: string[] = [];
   for (const candidate of program?.pathRuleCandidates() ?? []) {
     const canonical = await session.filesystem.canonical(
       candidate.path.value(),
       options.ctx.signal,
     );
-    const aliases = [...candidate.path.matchValues(), ...pathPolicyAliases(candidate.path.value(), canonical)];
-    shellPaths.push(...aliases);
+    const aliases = [
+      ...candidate.path.matchValues(),
+      ...pathPolicyAliases(candidate.path.value(), canonical),
+    ];
     if (aliases.some((alias) => checkPolicy(permission, "path", alias).state === "deny")) {
       throw new Error("Shell path denied by explicit policy");
-    }
-  }
-  const paths = [...pathAliases, ...shellPaths];
-  const hasUnresolvedFilesystemAccess = program?.hasUnresolvedPathExpression() === true;
-  if (hasUnresolvedFilesystemAccess) {
-    const confirmationContext: SafetyContext = {
-      requestId: `sandbox-${options.toolCallId}`,
-      toolCallId: options.toolCallId,
-      toolName,
-      agentName: null,
-      input,
-      cwd: workspace,
-      platform: "linux",
-      shell: null,
-      paths: [],
-      riskMarkers: ["unresolved-path-expression"],
-    };
-    const confirmationCategory = "unresolved_path";
-    const confirmationReason = "Filesystem access contains an unresolved shell expansion";
-    const approved = await options.confirm(
-      confirmationContext,
-      confirmationCategory,
-      confirmationReason,
-    );
-    if (!approved) {
-      throw new Error("Human denied unresolved filesystem access");
-    }
-  }
-  const shellCommands = (program?.guardCommands() ?? []).map((unit) => ({
-    text: unit.text,
-    argv: unit.argv ?? null,
-    context: unit.context ?? null,
-    wrapperKind: unit.wrapperKind ?? null,
-    executedUnit: unit.executedUnit ?? null,
-  }));
-  const shellContext = command
-    ? {
-        command,
-        workdir: null,
-        parseComplete: program?.isParseComplete() ?? false,
-        unresolvedPathExpression: program?.hasUnresolvedPathExpression() ?? false,
-        commands: shellCommands,
-      }
-    : null;
-  const safetyPaths = paths.map((value) => ({
-    value,
-    matchValues: [value],
-    boundaryValue: value,
-    mountAliases: [],
-    mountResolutionIncomplete: false,
-  }));
-  const context: SafetyContext = {
-    requestId: `sandbox-${options.toolCallId}`,
-    toolCallId: options.toolCallId,
-    toolName,
-    agentName: null,
-    input,
-    cwd: session.environment.workspace,
-    platform: "linux",
-    shell: shellContext,
-    paths: safetyPaths,
-    riskMarkers: [],
-  };
-  const safety = evaluateSafety(context, false, { home: guestHome }, (category) =>
-    externalEffectCategories.has(category),
-  );
-  if (safety.kind === "require_human" && externalEffectCategories.has(safety.category)) {
-    if (!(await options.confirm(context, safety.category, safety.reason))) {
-      throw new Error("Human denied sensitive or external-effect operation");
     }
   }
   if (

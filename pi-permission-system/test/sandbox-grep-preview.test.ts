@@ -12,12 +12,21 @@ interface GrepPreview {
   truncated: boolean;
 }
 
-async function previewSyntheticSearch(producerScript: string, matchLimit: number): Promise<GrepPreview> {
+async function previewSyntheticSearch(
+  producerScript: string,
+  matchLimit: number,
+): Promise<GrepPreview> {
   const script = await readFile(new URL("../src/sandbox/grep-preview.py", import.meta.url), "utf8");
-  const execution = execute("python3", ["-u", "-c", script], { timeout: 5000, maxBuffer: 2 * 1024 * 1024 });
-  execution.child.stdin!.end(JSON.stringify({
-    arguments: ["python3", "-u", "-c", producerScript], limit: matchLimit,
-  }));
+  const execution = execute("python3", ["-u", "-c", script], {
+    timeout: 5000,
+    maxBuffer: 2 * 1024 * 1024,
+  });
+  execution.child.stdin!.end(
+    JSON.stringify({
+      arguments: ["python3", "-u", "-c", producerScript],
+      limit: matchLimit,
+    }),
+  );
   return JSON.parse((await execution).stdout) as GrepPreview;
 }
 
@@ -28,14 +37,17 @@ for index in range(100000):
 `;
   const preview = await previewSyntheticSearch(producer, 3);
   expect(preview.output.split("\n")).toEqual([
-    "file-0.ts:1:needle", "file-1.ts:1:needle", "file-2.ts:1:needle",
+    "file-0.ts:1:needle",
+    "file-1.ts:1:needle",
+    "file-2.ts:1:needle",
   ]);
   expect(preview.truncated).toBe(true);
   expect(preview.code).toBe(0);
 });
 
 it("bounds one oversized JSON record before buffering its full line", async () => {
-  const producer = 'import sys\nsys.stdout.write("{" + "x" * (4 * 1024 * 1024))\nsys.stdout.flush()';
+  const producer =
+    'import sys\nsys.stdout.write("{" + "x" * (4 * 1024 * 1024))\nsys.stdout.flush()';
   const preview = await previewSyntheticSearch(producer, 100);
   expect(preview.output).toBe("");
   expect(preview.truncated).toBe(true);

@@ -5,9 +5,10 @@ Actionable, bounded notifications for Pi running in Alacritty:
 - **macOS:** Hammerspoon native notifications and exact-window routing.
 - **Linux:** Hyprland window routing with dunst notifications.
 - Sends completion notifications only after `agent_settled` and only when the originating terminal is unfocused.
-- Sends notifications for actual interactive permission prompts and clears them on the matching decision.
+- Sends notifications for actual interactive permission prompts, including sandbox host mounts, provisioning, rebuilds, host initialization, and port forwarding. Clears them on the matching approval, denial, or cancellation.
+- Captures permission requests from extension load onward and retains pending requests while the notifier resolves the terminal window, so sandbox startup prompts are not lost.
 - Sends notifications when `ask_user_question` opens a questionnaire, showing the first question and the remaining-question count, and clears them after the user answers or cancels.
-- Sends notifications when you need to choose between the current code and proposed corrections, authorize a file's review, recover a failed review, approve extra correction paths, select a reviewer, or waive a check. Clears the matching notice when its dialog ends or its session is retired. Ordinary agent-handled `needs_work` feedback does not notify.
+- Sends notifications when you need to choose between the current code and proposed corrections, authorize a file's review, recover a failed review, select a reviewer, or waive a check. Clears the matching notice when its dialog ends or its session is retired. Ordinary agent-handled `needs_work` feedback does not notify.
 - Keeps at most one notification per terminal window and clears only that window's notice when work resumes—including after submitting a normal response or answering/canceling an in-terminal question. Merely focusing the terminal does not clear it.
 - Never uses Hammerspoon's bulk notification clear; notices from other Pi windows and unrelated Hammerspoon automation remain intact.
 

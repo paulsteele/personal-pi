@@ -22,7 +22,15 @@ await writeFile(
 );
 await writeFile(join(agentDir, "extensions", "code-quality", "config.json"), '{"enabled":false}');
 const eventLog = join(directory, "events.jsonl");
-console.log(JSON.stringify({ directory, cwd, agentDir, eventLog, scope: "Sidebar and unavailable mandatory sandbox UI; no live LSP certification" }));
+console.log(
+	JSON.stringify({
+		directory,
+		cwd,
+		agentDir,
+		eventLog,
+		scope: "Sidebar and unavailable mandatory sandbox UI; no live LSP certification",
+	}),
+);
 execFileSync(
 	"python3",
 	[

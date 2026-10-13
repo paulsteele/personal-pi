@@ -2,6 +2,10 @@
 
 ## 2.0.0 — 2026-10-12
 
+- Remove correction-scope requests, approval prompts, path allowlists, and associated notifications. Additional correction files join the current quality case through ordinary edits; exact user-approved proposals remain restricted to their approved files.
+
+- Double the default review input/output budgets to 128,000 characters and 16,000 tokens. Automatically waive files over capture, batch, indivisible-hunk, or complete review/repair context limits without prompting; retain explicit waiver receipts and continue reviewing eligible files.
+
 - Remove tests tied to private host-installed language servers and nested Podman containers, along with their compatibility launch command. Retain the historical probe observations and container-runnable protocol, client, lifecycle, and real-Pi regressions.
 
 - Contribute Code Quality and Language Server settings menus with section-wide Apply, runtime updates, and existing pending-case waiver/LSP validation checks.

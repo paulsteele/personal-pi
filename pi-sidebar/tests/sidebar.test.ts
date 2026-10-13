@@ -872,7 +872,6 @@ describe("sidebar snapshot and layout", () => {
 			branchEntryCount: 38,
 		});
 	});
-
 });
 
 describe("legacy two-region compositor migration fixtures", () => {

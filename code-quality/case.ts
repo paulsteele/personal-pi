@@ -6,6 +6,7 @@ import type { LspFinding } from "./lsp-diagnostics.js";
 export type Phase = "captured" | "reviewing" | "correcting" | "human" | "paused" | "applying" | "closed";
 export interface LspAssessment {
 	findings: LspFinding[];
+	paths?: string[];
 	revision: string;
 	configuration: string;
 	workspaceRevision: number;
@@ -26,11 +27,13 @@ export interface QualityCase {
 	authorized: string[];
 	providerKey: string;
 	pendingPaths: string[];
-	scope: string[];
 	verdict?: ValidatedVerdict;
 	lsp?: LspAssessment;
 	lspWaived?: boolean;
 	lspRequired?: boolean;
+	lspCapturePaths?: string[];
+	lspUnavailable?: string;
+	sizeWaivers?: Array<{ path: string; reason: string }>;
 	objection?: string;
 	reason?: string;
 	approvedTargets?: Record<string, string>;
@@ -51,7 +54,6 @@ export function newCase(cwd: string, providerKey: string): QualityCase {
 		notes: [],
 		authorized: [],
 		pendingPaths: [],
-		scope: [],
 	};
 }
 export function revision(state: QualityCase): string {

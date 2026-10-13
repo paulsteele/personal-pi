@@ -155,8 +155,11 @@ it("retires active operations without permanently disabling the delegated servic
   await first.authorizeSources(fixture.sources.slice(0, 1), "Prepare");
   await fixture.service.retireOperations();
   const freshOperationAfterRetirement = fixture.service.service.open({
-    id: "after-tree", sessionId: "session", cwd: dirname(fixture.sources[0]!.path),
-    scope: "local", signal: new AbortController().signal,
+    id: "after-tree",
+    sessionId: "session",
+    cwd: dirname(fixture.sources[0]!.path),
+    scope: "local",
+    signal: new AbortController().signal,
   });
   expect(freshOperationAfterRetirement).toBeDefined();
   expect(fixture.reviewerContainers[0]!.close).toHaveBeenCalledOnce();

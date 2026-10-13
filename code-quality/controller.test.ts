@@ -3,10 +3,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { canonicalPath } from "./capture.js";
+import { buildReviewChunks, canonicalPath } from "./capture.js";
 import { QualityController, type QualityUI } from "./controller.js";
-import { saveConfig } from "./config.js";
-import { revision } from "./case.js";
+import { DEFAULT_CONFIG, saveConfig } from "./config.js";
+import { revision, resolveCase } from "./case.js";
+import { CaseStore } from "./state.js";
 import { digest } from "./proposal.js";
 import { review as runReview, type ReviewResult } from "./reviewer.js";
 import { QUALITY_CHECK_ENTRY, QUALITY_CHECK_UPDATE_ENTRY, type QualityCheckData } from "./feedback.js";
@@ -107,7 +108,12 @@ it("does not waive or save settings after the owning interaction is cancelled", 
 	writeFileSync(h.path, "pending");
 	await h.runtime.boundary(h.ctx, "aborted");
 	let resolveConfirmation!: (value: boolean) => void;
-	vi.mocked(h.ctx.ui.confirm).mockImplementation(() => new Promise<boolean>((resolve) => { resolveConfirmation = resolve; }));
+	vi.mocked(h.ctx.ui.confirm).mockImplementation(
+		() =>
+			new Promise<boolean>((resolve) => {
+				resolveConfirmation = resolve;
+			}),
+	);
 	const controller = new AbortController();
 	const applying = h.runtime.applySettings(h.ctx, { ...h.runtime.config, enabled: false }, controller.signal);
 	const rejected = expect(applying).rejects.toThrow();
@@ -125,18 +131,30 @@ it("rejects a snapshot returned after branch restoration without mutating the re
 	writeFileSync(h.path, "pending");
 	h.review.mockResolvedValue({
 		kind: "verdict",
-		value: { verdict: "needs_work", rationale: "Clarify pending source", findings: [], edits: [], proposed: {} },
+		value: {
+			verdict: "needs_work",
+			rationale: "Clarify pending source",
+			findings: [],
+			edits: [],
+			proposed: {},
+		},
 		metrics: { input: 0, output: 0, cost: 0 },
 	});
 	await h.runtime.boundary(h.ctx, "completed");
 	let resolveSnapshot!: (value: string | null) => void;
 	h.runtime.ports.filesystem = {
 		canonical: async (path) => path,
-		snapshot: () => new Promise<string | null>((resolve) => { resolveSnapshot = resolve; }),
+		snapshot: () =>
+			new Promise<string | null>((resolve) => {
+				resolveSnapshot = resolve;
+			}),
 	};
 	const checking = h.runtime.beforeTool("write", { path: h.path }, h.ctx);
 	await vi.waitFor(() => expect(resolveSnapshot).toBeDefined());
-	const replacement = { ...h.ctx, sessionManager: { getSessionId: () => "replacement", getBranch: () => [] } } as unknown as ExtensionContext;
+	const replacement = {
+		...h.ctx,
+		sessionManager: { getSessionId: () => "replacement", getBranch: () => [] },
+	} as unknown as ExtensionContext;
 	await h.runtime.start(replacement);
 	resolveSnapshot("late snapshot");
 	await expect(checking).resolves.toMatchObject({ block: true });
@@ -149,9 +167,10 @@ it("discards a retired prepare read failure before opening replacement-session c
 	let rejectSnapshot!: (error: Error) => void;
 	h.runtime.ports.filesystem = {
 		canonical: async (path) => path,
-		snapshot: () => new Promise((_resolve, reject) => {
-			rejectSnapshot = reject;
-		}),
+		snapshot: () =>
+			new Promise((_resolve, reject) => {
+				rejectSnapshot = reject;
+			}),
 	};
 	const pending = h.runtime.beforeTool("write", { path: h.path }, h.ctx);
 	await vi.waitFor(() => expect(rejectSnapshot).toBeDefined());
@@ -175,9 +194,10 @@ it("discards a retired reconcile read failure before opening replacement-session
 	let rejectSnapshot!: (error: Error) => void;
 	h.runtime.ports.filesystem = {
 		canonical: async (path) => path,
-		snapshot: () => new Promise((_resolve, reject) => {
-			rejectSnapshot = reject;
-		}),
+		snapshot: () =>
+			new Promise((_resolve, reject) => {
+				rejectSnapshot = reject;
+			}),
 	};
 	const pending = h.runtime.boundary(h.ctx, "completed");
 	await vi.waitFor(() => expect(rejectSnapshot).toBeDefined());
@@ -548,12 +568,18 @@ it("marks readability stale when guest dependency refresh changes the workspace 
 		workspaceRevision++;
 	});
 	h.runtime.ports.lsp = {
-		get revision() { return workspaceRevision; },
+		get revision() {
+			return workspaceRevision;
+		},
 		configRevision: "profile",
 		refreshWorkspace,
 		check: vi.fn(async () => ({
-			kind: "checked" as const, findings: [], generation: "server", workspaceRevision: 0,
-			hashes: {}, elapsedMs: 1,
+			kind: "checked" as const,
+			findings: [],
+			generation: "server",
+			workspaceRevision: 0,
+			hashes: {},
+			elapsedMs: 1,
 		})),
 	};
 	const result = await edit(h, "const count = 1;");
@@ -696,26 +722,70 @@ it("clears attention when a coverage dialog fails", async () => {
 	expect(h.attentionEvents[1]!.requestId).toBe(h.attentionEvents[0]!.requestId);
 });
 
-it("announces the scope approval wait but not ordinary reviewer rejection", async () => {
-	const h = harness();
-	h.review.mockResolvedValue(namingRejection(h.path, "x"));
-	await edit(h, "x");
-	expect(h.attentionEvents).toEqual([]);
-	await h.runtime.respond(
-		{
-			action: "request_scope",
-			caseId: h.runtime.state!.id,
-			revision: revision(h.runtime.state!),
-			rationale: "Add a regression test",
-			paths: ["a.test.ts"],
-		},
-		h.ctx,
-	);
-	expect(h.attentionEvents).toMatchObject([
-		{ kind: "scope", active: true },
-		{ kind: "scope", active: false },
-	]);
-});
+it.each(["readability", "LSP"])(
+	"allows additional helper and test files during %s correction without approval",
+	async (rejectionSource) => {
+		const h = harness();
+		if (rejectionSource === "readability") {
+			h.review.mockResolvedValueOnce(namingRejection(h.path, "const x = 1;"));
+		} else {
+			const cleanDiagnostics: LspCheckResult = {
+				kind: "checked",
+				findings: [],
+				generation: "server",
+				workspaceRevision: 0,
+				hashes: {},
+				elapsedMs: 1,
+			};
+			h.runtime.ports.lsp = {
+				revision: 0,
+				configRevision: "profile",
+				check: vi
+					.fn()
+					.mockResolvedValueOnce({
+						...cleanDiagnostics,
+						findings: [
+							{
+								file: h.path,
+								serverId: "fixture",
+								severity: 2,
+								message: "Resolve this diagnostic",
+								range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+							},
+						],
+					})
+					.mockResolvedValue(cleanDiagnostics),
+			};
+		}
+		await edit(h, "const x = 1;");
+		const caseId = h.runtime.state!.id;
+		expect(h.runtime.state?.phase).toBe("correcting");
+		h.runtime.start(h.ctx);
+		const correctionFiles = [
+			{ path: h.path, content: "const count = 1;" },
+			{ path: join(h.cwd, "count.ts"), content: "export const initialCount = 1;" },
+			{
+				path: join(h.cwd, "count.test.ts"),
+				content:
+					"import { initialCount } from './count.js';\nif (initialCount !== 1) { throw new Error('Expected one'); }",
+			},
+		];
+		for (const file of correctionFiles) {
+			expect(await h.runtime.beforeTool("write", file, h.ctx)).toBeUndefined();
+			writeFileSync(file.path, file.content);
+		}
+		await h.runtime.boundary(h.ctx, "completed");
+		expect(h.runtime.state).toMatchObject({ id: caseId, phase: "closed", attempts: 1 });
+		const correctionReviews = h.review.mock.calls.slice(rejectionSource === "readability" ? 1 : 0);
+		expect(
+			correctionReviews.flatMap(([review]) =>
+				review.request.files.map((file: { path: string }) => file.path),
+			),
+		).toEqual(correctionFiles.map((file) => file.path));
+		expect(h.ctx.ui.confirm).not.toHaveBeenCalled();
+		expect(h.attentionEvents).toEqual([]);
+	},
+);
 
 it("reviews distant changes in one file together without adding conversation context", async () => {
 	const h = harness();
@@ -841,9 +911,6 @@ it("arbitrates only after five disagreements and verifies exact user-approved ap
 	await edit(h, "const x = 1;");
 	expect(h.runtime.state?.phase).toBe("correcting");
 	expect(h.attentionEvents).toEqual([]);
-	expect(await h.runtime.beforeTool("write", { path: join(h.cwd, "unrelated.ts") }, h.ctx)).toMatchObject({
-		block: true,
-	});
 	vi.mocked(h.ui.arbitrate).mockImplementation(async () => {
 		expect(h.attentionEvents.at(-1)).toMatchObject({ kind: "arbitration", active: true });
 		return { choice: "proposed", note: "Use count" };
@@ -868,6 +935,10 @@ it("arbitrates only after five disagreements and verifies exact user-approved ap
 		{ kind: "arbitration", active: false },
 	]);
 	expect(h.runtime.state?.phase).toBe("applying");
+	expect(await h.runtime.beforeTool("write", { path: join(h.cwd, "unrelated.ts") }, h.ctx)).toEqual({
+		block: true,
+		reason: "Apply only the files in the user-approved proposal before continuing.",
+	});
 	await edit(h, "const count = 1;");
 	expect(h.runtime.state?.resolution).toBe("user_approved");
 	expect(h.qualityHeaders.at(-1)).toMatchObject({ checkCount: 6, rejectionCount: 6 });
@@ -1108,6 +1179,526 @@ it("arbitrates after exactly five correction attempts and preserves the next all
 		phase: "correcting",
 		notes: ["Try a local name"],
 	});
+});
+
+it.each([
+	{ stage: "before mutation", initialContent: "x".repeat(1025) },
+	{ stage: "after mutation", initialContent: null },
+])("automatically waives a file over maxFileBytes $stage", async ({ initialContent }) => {
+	const h = harness();
+	h.runtime.config.maxFileBytes = 1024;
+	if (initialContent !== null) {
+		writeFileSync(h.path, initialContent);
+	}
+	expect(await h.runtime.beforeTool("write", { path: h.path }, h.ctx, "oversized-write")).toBeUndefined();
+	writeFileSync(h.path, "x".repeat(1025));
+	const result = await h.runtime.boundary(h.ctx, "completed");
+	expect(result?.entries?.[0]).toMatchObject({ details: { outcome: "waived" } });
+	expect(h.runtime.state).toMatchObject({
+		phase: "closed",
+		resolution: "waived",
+		files: [],
+		attempts: 0,
+		reviewed: false,
+	});
+	expect(h.pi.appendEntry).toHaveBeenCalledWith(
+		"code-quality:waiver",
+		expect.objectContaining({ path: h.path, automatic: true, reviewed: false }),
+	);
+	expect(h.activityEvents.filter((event) => event.toolCallId === "oversized-write").at(-1)?.phase).toBe(
+		"waived",
+	);
+	expect(h.review).not.toHaveBeenCalled();
+	expect(h.ui.coverage).not.toHaveBeenCalled();
+	expect(h.ui.failure).not.toHaveBeenCalled();
+	expect(h.attentionEvents).toEqual([]);
+});
+
+it.each([
+	{
+		limit: "hunk",
+		maxBatchBytes: DEFAULT_CONFIG.maxBatchBytes,
+		oversizedText: "x".repeat(DEFAULT_CONFIG.maxInputChars),
+	},
+	{ limit: "batch", maxBatchBytes: 1024, oversizedText: "x".repeat(1025) },
+])(
+	"waives a file over the $limit limit while reviewing another file and preserving their distinct badges",
+	async ({ maxBatchBytes, oversizedText }) => {
+		const h = harness();
+		const eligiblePath = join(h.cwd, "small.ts");
+		h.runtime.config.maxBatchBytes = maxBatchBytes;
+		expect(await h.runtime.beforeTool("write", { path: h.path }, h.ctx, "oversized-write")).toBeUndefined();
+		writeFileSync(h.path, oversizedText);
+		expect(
+			await h.runtime.beforeTool("write", { path: eligiblePath }, h.ctx, "eligible-write"),
+		).toBeUndefined();
+		writeFileSync(eligiblePath, "const count = 1;");
+		const result = await h.runtime.boundary(h.ctx, "completed");
+		expect(h.review).toHaveBeenCalledOnce();
+		expect(h.review.mock.calls[0]![0].request.files[0].path).toBe(eligiblePath);
+		expect(h.runtime.state?.files.map((file) => file.path)).toEqual([eligiblePath]);
+		expect(h.runtime.state?.sizeWaivers).toMatchObject([{ path: h.path }]);
+		expect(result?.entries?.[0]).toMatchObject({
+			details: { outcome: "waived" },
+			content: expect.stringContaining("1 oversized file(s) automatically waived"),
+		});
+		expect(h.activityEvents.filter((event) => event.toolCallId === "oversized-write").at(-1)?.phase).toBe(
+			"waived",
+		);
+		expect(h.activityEvents.filter((event) => event.toolCallId === "eligible-write").at(-1)?.phase).toBe(
+			"approved",
+		);
+		expect(h.ui.coverage).not.toHaveBeenCalled();
+		expect(h.ui.failure).not.toHaveBeenCalled();
+	},
+);
+
+it("automatically waives an initial model-context overflow without calling the provider or failure dialog", async () => {
+	const h = harness();
+	const complete = vi.fn();
+	Object.assign(h.ctx.modelRegistry, {
+		find: () => ({ provider: "test", id: "reviewer", contextWindow: 1024, maxTokens: 16_000 }),
+		hasConfiguredAuth: () => true,
+		complete,
+	});
+	h.review.mockImplementation(runReview);
+	const result = await edit(h, "const count = 1;");
+	expect(result?.entries?.[0]).toMatchObject({ details: { outcome: "waived" } });
+	expect(h.runtime.state).toMatchObject({
+		phase: "closed",
+		resolution: "waived",
+		attempts: 0,
+		reviewed: false,
+	});
+	expect(complete).not.toHaveBeenCalled();
+	expect(h.ui.failure).not.toHaveBeenCalled();
+});
+
+it("discards earlier chunk findings for a file waived on a later chunk and still reviews other files", async () => {
+	const h = harness();
+	const unchangedMiddle = Array.from({ length: 100 }, (_, index) => `const padding${index} = ${index};`).join(
+		"\n",
+	);
+	const before = `x\n${unchangedMiddle}\nx\n`;
+	const after = `xx\n${unchangedMiddle}\nxx\n`;
+	const groupedChunks = buildReviewChunks([{ path: h.path, before, after }], h.runtime.config, h.cwd);
+	h.runtime.config.maxInputChars = 14_000 + Math.ceil(groupedChunks[0]!.input.length * 0.7);
+	writeFileSync(h.path, before);
+	expect(await h.runtime.beforeTool("write", { path: h.path }, h.ctx)).toBeUndefined();
+	writeFileSync(h.path, after);
+	const eligiblePath = join(h.cwd, "small.ts");
+	expect(await h.runtime.beforeTool("write", { path: eligiblePath }, h.ctx)).toBeUndefined();
+	writeFileSync(eligiblePath, "const count = 1;");
+	h.review.mockResolvedValueOnce(namingRejection(h.path, "xx"));
+	h.review.mockResolvedValueOnce({
+		kind: "oversized",
+		reason: "Quality verdict repair exceeds the complete-context budget.",
+		metrics: { requests: 1, latencyMs: 1, usages: [] },
+	});
+	h.review.mockResolvedValueOnce(approved());
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.review.mock.calls.map((call) => call[0].request.files[0].path)).toEqual([
+		h.path,
+		h.path,
+		eligiblePath,
+	]);
+	expect(h.runtime.state?.verdict).toMatchObject({
+		verdict: "approved",
+		findings: [],
+		edits: [],
+		proposed: {},
+	});
+	expect(h.runtime.state?.sizeWaivers).toMatchObject([{ path: h.path }]);
+	expect(h.ui.failure).not.toHaveBeenCalled();
+	expect(h.ui.arbitrate).not.toHaveBeenCalled();
+});
+
+it("keeps a size-waived file excluded while a rejected eligible file uses correction rounds", async () => {
+	const h = harness();
+	const eligiblePath = join(h.cwd, "small.ts");
+	expect(await h.runtime.beforeTool("write", { path: h.path }, h.ctx)).toBeUndefined();
+	writeFileSync(h.path, "x".repeat(h.runtime.config.maxInputChars));
+	expect(await h.runtime.beforeTool("write", { path: eligiblePath }, h.ctx)).toBeUndefined();
+	writeFileSync(eligiblePath, "x");
+	h.review.mockResolvedValue(namingRejection(eligiblePath, "x"));
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.runtime.state).toMatchObject({ phase: "correcting", attempts: 0 });
+	expect(h.runtime.state?.sizeWaivers).toMatchObject([{ path: h.path }]);
+	await h.runtime.respond(
+		{
+			action: "disagree",
+			caseId: h.runtime.state!.id,
+			revision: revision(h.runtime.state!),
+			rationale: "This is a coordinate.",
+		},
+		h.ctx,
+	);
+	h.review.mockResolvedValueOnce(approved());
+	const result = await h.runtime.boundary(h.ctx, "completed");
+	expect(h.review.mock.calls.map((call) => call[0].request.files[0].path)).toEqual([
+		eligiblePath,
+		eligiblePath,
+	]);
+	expect(h.runtime.state).toMatchObject({ phase: "closed", attempts: 1 });
+	expect(result?.entries?.[0]).toMatchObject({ details: { outcome: "waived" } });
+});
+
+it("waives a tracked file that grows past the capture limit during review and reviews the remaining file afresh", async () => {
+	const h = harness();
+	h.runtime.config.maxFileBytes = 1024;
+	const eligiblePath = join(h.cwd, "small.ts");
+	expect(await h.runtime.beforeTool("write", { path: h.path }, h.ctx)).toBeUndefined();
+	writeFileSync(h.path, "const count = 1;");
+	expect(await h.runtime.beforeTool("write", { path: eligiblePath }, h.ctx)).toBeUndefined();
+	writeFileSync(eligiblePath, "const total = 1;");
+	h.review.mockImplementationOnce(async () => {
+		writeFileSync(h.path, "x".repeat(1025));
+		return approved();
+	});
+	const stale = await h.runtime.boundary(h.ctx, "completed");
+	expect(stale?.entries?.[0]).toMatchObject({ details: { outcome: "stale" } });
+	const result = await h.runtime.boundary(h.ctx, "completed");
+	expect(h.review.mock.calls.map((call) => call[0].request.files[0].path)).toEqual([h.path, eligiblePath]);
+	expect(h.runtime.state?.sizeWaivers).toMatchObject([{ path: h.path }]);
+	expect(result?.entries?.[0]).toMatchObject({ details: { outcome: "waived" } });
+	expect(h.ui.coverage).not.toHaveBeenCalled();
+});
+
+it("reconsiders an earlier size waiver when a later write makes the file reviewable", async () => {
+	const h = harness();
+	h.runtime.config.maxFileBytes = 1024;
+	await edit(h, "x".repeat(1025));
+	await edit(h, "const count = 1;");
+	expect(h.review).not.toHaveBeenCalled();
+	await edit(h, "const count = 2;");
+	expect(h.review).toHaveBeenCalledOnce();
+	expect(h.runtime.state?.resolution).toBe("model_approved");
+	expect(h.runtime.state?.sizeWaivers).toBeUndefined();
+});
+
+it("retains pending size waivers across reload while reviewing eligible files", async () => {
+	const h = harness();
+	h.runtime.config.maxFileBytes = 1024;
+	expect(await h.runtime.beforeTool("write", { path: h.path }, h.ctx)).toBeUndefined();
+	writeFileSync(h.path, "x".repeat(1025));
+	const eligiblePath = join(h.cwd, "small.ts");
+	expect(await h.runtime.beforeTool("write", { path: eligiblePath }, h.ctx)).toBeUndefined();
+	writeFileSync(eligiblePath, "const count = 1;");
+	await h.runtime.boundary(h.ctx, "aborted");
+	const restored = new QualityController(h.pi, h.agentDir, { ui: h.ui, review: h.review });
+	await restored.start(h.ctx);
+	await restored.command("retry", h.ctx);
+	const result = await restored.boundary(h.ctx, "completed");
+	expect(h.review).toHaveBeenCalledOnce();
+	expect(restored.state?.sizeWaivers).toMatchObject([{ path: h.path }]);
+	expect(result?.entries?.[0]).toMatchObject({ details: { outcome: "waived" } });
+});
+
+it("does not let an oversized review hunk waive blocking LSP diagnostics", async () => {
+	const h = harness();
+	h.runtime.ports.lsp = {
+		revision: 0,
+		configRevision: "profile",
+		check: vi.fn(async () => ({
+			kind: "checked" as const,
+			findings: [
+				{
+					file: h.path,
+					serverId: "typescript",
+					message: "Resolve this diagnostic",
+					severity: 1 as const,
+					range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+				},
+			],
+			generation: "fixture",
+			hashes: {},
+			workspaceRevision: 0,
+			elapsedMs: 1,
+		})),
+	};
+	const result = await edit(h, "x".repeat(h.runtime.config.maxInputChars));
+	expect(result?.entries?.[0]).toMatchObject({ details: { outcome: "rejected" } });
+	expect(h.runtime.state?.sizeWaivers).toBeUndefined();
+	expect(h.runtime.state?.lspWaived).toBeUndefined();
+	expect(h.review).not.toHaveBeenCalled();
+});
+
+it("keeps known LSP diagnostics pending when correction capture becomes oversized", async () => {
+	const h = harness();
+	saveConfig(h.agentDir, { maxFileBytes: 1024 });
+	h.runtime.config.maxFileBytes = 1024;
+	const sibling = join(h.cwd, "sibling.ts");
+	const finding = {
+		file: h.path,
+		serverId: "typescript",
+		message: "Known diagnostic",
+		range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+	};
+	const check = vi.fn(
+		async (): Promise<LspCheckResult> => ({
+			kind: "checked",
+			findings: [finding],
+			hashes: { [h.path]: "hash", [sibling]: "hash" },
+			generation: "fixture",
+			workspaceRevision: 0,
+			elapsedMs: 1,
+		}),
+	);
+	h.runtime.ports.lsp = { revision: 0, configRevision: "profile", check };
+	h.ctx.ui.select = vi.fn().mockResolvedValue(undefined);
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	writeFileSync(h.path, "bad");
+	await h.runtime.beforeTool("write", { path: sibling }, h.ctx);
+	writeFileSync(sibling, "good");
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.runtime.state?.lsp?.findings).toEqual([finding]);
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	writeFileSync(h.path, "x".repeat(1025));
+	check.mockResolvedValue({
+		kind: "checked",
+		findings: [],
+		hashes: { [sibling]: "hash" },
+		generation: "fixture",
+		workspaceRevision: 0,
+		elapsedMs: 1,
+	});
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(check).toHaveBeenCalledOnce();
+	expect(h.runtime.state?.lsp?.findings).toEqual([finding]);
+	expect(h.runtime.state?.lspCapturePaths).toEqual([h.path]);
+	expect(h.runtime.state?.phase).toBe("paused");
+	expect(h.review).not.toHaveBeenCalled();
+	await h.runtime.command("retry", h.ctx);
+	vi.mocked(h.ctx.ui.select).mockResolvedValue("Waive LSP for this case");
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.runtime.state).toMatchObject({ phase: "closed", lspWaived: true });
+	expect(h.review).toHaveBeenCalledOnce();
+});
+
+it("retains a failed LSP check when its supported file is subsequently size-waived", async () => {
+	const h = harness();
+	saveConfig(h.agentDir, { maxFileBytes: 1024 });
+	h.runtime.config.maxFileBytes = 1024;
+	const check = vi.fn(
+		async (): Promise<LspCheckResult> => ({ kind: "unavailable", reason: "Server failed" }),
+	);
+	h.runtime.ports.lsp = { revision: 0, configRevision: "profile", check };
+	h.ctx.ui.select = vi.fn().mockResolvedValue(undefined);
+	await edit(h, "source");
+	expect(h.runtime.state?.lspUnavailable).toBe("Server failed");
+	writeFileSync(h.path, "x".repeat(1025));
+	await h.runtime.command("retry", h.ctx);
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.runtime.state?.lspCapturePaths).toEqual([h.path]);
+	expect(h.runtime.state?.phase).toBe("paused");
+	expect(h.review).not.toHaveBeenCalled();
+});
+
+it("counts an oversized correction as a response even without a changed sibling", async () => {
+	const h = harness();
+	h.runtime.config.maxFileBytes = 1024;
+	const sibling = join(h.cwd, "small.ts");
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	writeFileSync(h.path, "x");
+	await h.runtime.beforeTool("write", { path: sibling }, h.ctx);
+	writeFileSync(sibling, "x");
+	h.review.mockResolvedValue(namingRejection(sibling, "x"));
+	await h.runtime.boundary(h.ctx, "completed");
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	writeFileSync(h.path, "x".repeat(1025));
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.runtime.state?.attempts).toBe(1);
+});
+
+it("recovers an oversized diagnostic obligation after reload and external repair", async () => {
+	const h = harness();
+	saveConfig(h.agentDir, { maxFileBytes: 1024 });
+	h.runtime.config.maxFileBytes = 1024;
+	const finding = {
+		file: h.path,
+		serverId: "typescript",
+		message: "Known diagnostic",
+		range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+	};
+	const check = vi.fn(
+		async (): Promise<LspCheckResult> => ({
+			kind: "checked",
+			findings: [finding],
+			hashes: { [h.path]: "hash" },
+			generation: "fixture",
+			workspaceRevision: 0,
+			elapsedMs: 1,
+		}),
+	);
+	h.runtime.ports.lsp = { revision: 0, configRevision: "profile", check };
+	h.ctx.ui.select = vi.fn().mockResolvedValue(undefined);
+	await edit(h, "bad");
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	writeFileSync(h.path, "x".repeat(1025));
+	await h.runtime.boundary(h.ctx, "completed");
+	await h.runtime.start(h.ctx);
+	expect(h.runtime.state?.lspCapturePaths).toEqual([h.path]);
+	writeFileSync(h.path, "fixed");
+	check.mockResolvedValue({
+		kind: "checked",
+		findings: [],
+		hashes: { [h.path]: "hash" },
+		generation: "fixture",
+		workspaceRevision: 0,
+		elapsedMs: 1,
+	});
+	await h.runtime.command("retry", h.ctx);
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.runtime.state).toMatchObject({ phase: "closed", lspCapturePaths: [], sizeWaivers: [] });
+	expect(h.runtime.state?.lspWaived).not.toBe(true);
+	expect(check).toHaveBeenCalledTimes(2);
+});
+
+it("retires clean supported-source coverage when only Markdown remains after a size waiver", async () => {
+	const h = harness();
+	const markdown = join(h.cwd, "README.md");
+	const hasSupportedSourceFile = (files: { path: string }[]) =>
+		files.some(({ path }) => path.endsWith(".ts"));
+	const cleanSourceCheck: LspCheckResult = {
+		kind: "checked",
+		findings: [],
+		hashes: { [h.path]: "hash" },
+		generation: "fixture",
+		workspaceRevision: 0,
+		elapsedMs: 1,
+	};
+	const check = vi.fn(async (files): Promise<LspCheckResult | undefined> => {
+		if (hasSupportedSourceFile(files)) {
+			return cleanSourceCheck;
+		}
+		return undefined;
+	});
+	h.runtime.ports.lsp = { revision: 0, configRevision: "profile", check };
+	h.ctx.ui.select = vi.fn();
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	writeFileSync(h.path, "x".repeat(h.runtime.config.maxInputChars));
+	await h.runtime.beforeTool("write", { path: markdown }, h.ctx);
+	writeFileSync(markdown, "x");
+	h.review.mockResolvedValueOnce(namingRejection(markdown, "x"));
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.runtime.state?.lspRequired).toBe(false);
+	await h.runtime.beforeTool("write", { path: markdown }, h.ctx);
+	writeFileSync(markdown, "Clear text");
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.runtime.state?.phase).toBe("closed");
+	expect(h.ctx.ui.select).not.toHaveBeenCalled();
+});
+
+it("preserves an existing waiver after a blocked edit while paused", async () => {
+	const h = harness();
+	h.runtime.config.maxFileBytes = 1024;
+	writeFileSync(h.path, "x".repeat(1025));
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	const sibling = join(h.cwd, "small.ts");
+	await h.runtime.beforeTool("write", { path: sibling }, h.ctx);
+	writeFileSync(sibling, "x");
+	h.review.mockResolvedValueOnce(namingRejection(sibling, "x"));
+	await h.runtime.boundary(h.ctx, "completed");
+	h.runtime.state!.phase = "paused";
+	expect(await h.runtime.beforeTool("write", { path: h.path }, h.ctx)).toMatchObject({ block: true });
+	expect(h.runtime.state?.sizeWaivers).toMatchObject([{ path: h.path }]);
+	await h.runtime.command("retry", h.ctx);
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.runtime.state?.phase).toBe("closed");
+	expect(h.runtime.state?.sizeWaivers).toMatchObject([{ path: h.path }]);
+});
+
+it("keeps remaining exact operator targets after an application file becomes oversized", async () => {
+	const h = harness();
+	h.runtime.config.maxFileBytes = 1024;
+	const sibling = join(h.cwd, "small.ts");
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	writeFileSync(h.path, "a");
+	await h.runtime.beforeTool("write", { path: sibling }, h.ctx);
+	writeFileSync(sibling, "b");
+	h.review.mockResolvedValueOnce({
+		...approved(),
+		value: {
+			verdict: "needs_work",
+			rationale: "Name both",
+			findings: [],
+			edits: [
+				{ file: h.path, oldText: "a", newText: "x".repeat(1025) },
+				{ file: sibling, oldText: "b", newText: "count" },
+			],
+			proposed: { [h.path]: "x".repeat(1025), [sibling]: "count" },
+		},
+	});
+	await h.runtime.boundary(h.ctx, "completed");
+	resolveCase(h.runtime.state!, "proposed");
+	h.review.mockClear();
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	writeFileSync(h.path, "x".repeat(1025));
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.runtime.state?.phase).toBe("applying");
+	expect(h.runtime.state?.approvedTargets).toEqual({ [sibling]: digest("count") });
+	expect(h.review).not.toHaveBeenCalled();
+	await h.runtime.command("retry", h.ctx);
+	expect(h.runtime.state?.phase).toBe("applying");
+	await h.runtime.beforeTool("write", { path: sibling }, h.ctx);
+	writeFileSync(sibling, "count");
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.runtime.state).toMatchObject({ phase: "closed", resolution: "user_approved" });
+	expect(h.review).not.toHaveBeenCalled();
+});
+
+it("drops a queued disagreement when external growth changes the reviewed scope", async () => {
+	const h = harness();
+	h.runtime.config.maxFileBytes = 1024;
+	const sibling = join(h.cwd, "small.ts");
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	writeFileSync(h.path, "x");
+	await h.runtime.beforeTool("write", { path: sibling }, h.ctx);
+	writeFileSync(sibling, "clear");
+	h.review.mockResolvedValueOnce(namingRejection(h.path, "x"));
+	await h.runtime.boundary(h.ctx, "completed");
+	await disagree(h, "An argument about the old revision");
+	writeFileSync(h.path, "x".repeat(1025));
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.review.mock.calls.at(-1)?.[0].request.objection).toBeUndefined();
+	expect(h.runtime.state?.attempts).toBe(0);
+});
+
+it("does not overwrite an earlier rejected tool badge with a correction size waiver", async () => {
+	const h = harness();
+	h.runtime.config.maxFileBytes = 1024;
+	h.review.mockResolvedValueOnce(namingRejection(h.path, "x"));
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx, "initial");
+	writeFileSync(h.path, "x");
+	await h.runtime.boundary(h.ctx, "completed");
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx, "correction");
+	writeFileSync(h.path, "x".repeat(1025));
+	await h.runtime.boundary(h.ctx, "completed");
+	expect(h.activityEvents.filter((event) => event.toolCallId === "initial").at(-1)?.phase).toBe("needs_work");
+	expect(h.activityEvents.filter((event) => event.toolCallId === "correction").at(-1)?.phase).toBe("waived");
+});
+
+it("publishes planning size waivers together without intermediate case snapshots", async () => {
+	const h = harness();
+	h.runtime.config.maxBatchBytes = 1024;
+	const paths = [h.path, join(h.cwd, "b.ts"), join(h.cwd, "c.ts")];
+	for (const path of paths) {
+		await h.runtime.beforeTool("write", { path }, h.ctx);
+		writeFileSync(path, "x".repeat(1025));
+	}
+	const originalSave = CaseStore.prototype.save;
+	const waiverCounts: number[] = [];
+	const save = vi.spyOn(CaseStore.prototype, "save").mockImplementation(function (this: CaseStore, state) {
+		waiverCounts.push(state.sizeWaivers?.length ?? 0);
+		return originalSave.call(this, state);
+	});
+	try {
+		await h.runtime.boundary(h.ctx, "completed");
+		expect(waiverCounts.filter((count) => count > 0 && count < paths.length)).toEqual([]);
+		expect(waiverCounts).toEqual([0, paths.length, paths.length]);
+	} finally {
+		save.mockRestore();
+	}
 });
 
 it("new secrets require authorization after a write and are not silently sent or persisted", async () => {

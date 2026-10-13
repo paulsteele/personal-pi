@@ -38,6 +38,7 @@ export interface ReviewMetrics {
 }
 export type ReviewResult =
 	| { kind: "verdict"; value: ValidatedVerdict; metrics: ReviewMetrics }
+	| { kind: "oversized"; reason: string; metrics: ReviewMetrics }
 	| { kind: "unavailable" | "failed" | "cancelled"; reason: string; metrics: ReviewMetrics };
 export type ReviewerRegistry = Pick<
 	ExtensionContext["modelRegistry"],
@@ -162,14 +163,17 @@ export async function review(options: {
 		if (options.signal?.aborted) return finish({ kind: "cancelled", reason: "Review cancelled", metrics });
 		const attemptInput = repairFeedback ? `${reviewInput}\n\n${repairFeedback}` : reviewInput;
 		const inputChars = systemPrompt.length + attemptInput.length + JSON.stringify(tools).length;
-		if (inputChars > config.maxInputChars || Math.ceil(inputChars / 3) + maxTokens > model.contextWindow)
+		const exceedsInputBudget = inputChars > config.maxInputChars;
+		const exceedsModelContext = Math.ceil(inputChars / 3) + maxTokens > model.contextWindow;
+		if (exceedsInputBudget || exceedsModelContext) {
 			return finish({
-				kind: repairFeedback ? "failed" : "unavailable",
+				kind: "oversized",
 				reason: repairFeedback
-					? "Quality verdict repair exceeds the complete-context budget; review remains unresolved."
-					: "Review input exceeds its complete-context budget; adjust limits or waive this case.",
+					? "Quality verdict repair exceeds the complete-context budget."
+					: "Review input exceeds its complete-context budget.",
 				metrics,
 			});
+		}
 		let response: AssistantMessage;
 		try {
 			options.onAttempt?.(metrics.requests + 1);

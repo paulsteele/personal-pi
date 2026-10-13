@@ -78,7 +78,9 @@ it("returns the published draft revision without adopting a subsequent writer's 
 	const saved = (await loadLspDraft(agentDir, project))!;
 	expect(publication).toEqual({ path: lspProfilePath(agentDir, project, true), revision: saved.revision });
 	await publishLspDraft(agentDir, project, { ...profile, enabled: false }, null, publication.revision);
-	await expect(publishLspDraft(agentDir, project, profile, null, publication.revision)).rejects.toThrow("changed since preview");
+	await expect(publishLspDraft(agentDir, project, profile, null, publication.revision)).rejects.toThrow(
+		"changed since preview",
+	);
 	expect((await loadLspDraft(agentDir, project))!.draft.profile.enabled).toBe(false);
 });
 

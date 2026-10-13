@@ -97,12 +97,7 @@ export function registerSandboxTools(pi: ExtensionAPI, getSession: () => Sandbox
     ...grep,
     async execute(_id, input, signal) {
       const path = await filesystem().canonical(input.path ?? ".", signal);
-      const args = [
-        "rg",
-        "--json",
-        "--color=never",
-        "--hidden",
-      ];
+      const args = ["rg", "--json", "--color=never", "--hidden"];
       if (input.ignoreCase) {
         args.push("--ignore-case");
       }
@@ -138,12 +133,13 @@ export function registerSandboxTools(pi: ExtensionAPI, getSession: () => Sandbox
       const truncated = truncateHead(grepPreview.output);
       return {
         content: [{ type: "text", text: truncated.content || "No matches found" }],
-        details: truncated.truncated || grepPreview.truncated ? { truncation: truncated, resultLimitReached: grepPreview.truncated } : undefined,
+        details:
+          truncated.truncated || grepPreview.truncated
+            ? { truncation: truncated, resultLimitReached: grepPreview.truncated }
+            : undefined,
       };
     },
   });
-  const confirmNativeOperation = (category: string, reason: string, signal?: AbortSignal) =>
-    getSession().options.confirm(`${category}: ${reason}`, signal);
   const bash = createBashToolDefinition(cwd, {
     exposeSessionEnvironment: false,
     spawnHook: (context) => ({ ...context, cwd: getSession().environment.workspace, env: {} }),
@@ -154,7 +150,6 @@ export function registerSandboxTools(pi: ExtensionAPI, getSession: () => Sandbox
           signal: options.signal,
           timeoutMs: options.timeout ? options.timeout * 1000 : undefined,
           onData: options.onData,
-          confirmNative: (_context, category, reason) => confirmNativeOperation(category, reason, options.signal),
         });
         return { exitCode: result.code };
       },
@@ -211,7 +206,6 @@ export function registerSandboxTools(pi: ExtensionAPI, getSession: () => Sandbox
           signal: options.signal,
           timeoutMs: options.timeout ? options.timeout * 1000 : undefined,
           onData: options.onData,
-          confirmNative: (_context, category, reason) => confirmNativeOperation(category, reason, options.signal),
         });
         return { exitCode: result.code };
       },

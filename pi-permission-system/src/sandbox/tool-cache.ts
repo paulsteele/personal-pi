@@ -51,23 +51,27 @@ export function toolArtifactKey(input: ToolArtifactInput): string {
   });
 }
 
-export function equippedBaseKey(input: {
+export function infrastructureImageKey(input: {
   baseImageId: string;
   platformKey: string;
   nativeDependenciesRevision: string;
-  artifactImageIds: readonly string[];
   assemblyRevision: string;
-  copyMode: "linked" | "ordinary";
 }): string {
-  return buildContentKey({ kind: "equipped-base-v1", ...input });
+  return buildContentKey({
+    kind: "infrastructure-image-v1",
+    baseImageId: input.baseImageId,
+    platformKey: input.platformKey,
+    nativeDependenciesRevision: input.nativeDependenciesRevision,
+    assemblyRevision: input.assemblyRevision,
+  });
 }
 
 export function projectImageKey(input: {
-  equippedImageId: string;
+  infrastructureImageId: string;
   recipe: string;
   files: Record<string, string>;
 }): string {
-  return buildContentKey({ kind: "project-image-v1", ...input });
+  return buildContentKey({ kind: "project-image-v2", ...input });
 }
 
 const cachedImageSchema = z.strictObject({
@@ -104,7 +108,7 @@ export interface CachedBuildPorts {
 
 export async function ensureCachedImage(options: {
   directory: string;
-  kind: "artifact" | "equipped" | "project";
+  kind: "artifact" | "infrastructure" | "project";
   key: string;
   ports: CachedBuildPorts;
   signal?: AbortSignal;

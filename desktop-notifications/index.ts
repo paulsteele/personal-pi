@@ -20,6 +20,7 @@ type NativeTarget =
 
 type PermissionPrompt = { requestId?: unknown; surface?: unknown; value?: unknown };
 type PermissionDecision = { requestId?: unknown };
+type PendingPermission = { requestId: string; subtitle: string; body: string };
 type AskUserPrompt = { questions?: unknown };
 type AskUserBlocked = { active?: unknown };
 type CommandResult = { stdout: string; stderr: string; code: number | null };
@@ -29,6 +30,7 @@ type Runtime = {
 	target?: NativeTarget;
 	project: string;
 	disabled: boolean;
+	notificationsReady: boolean;
 	warned: boolean;
 	generation: number;
 	queue: Promise<void>;
@@ -100,7 +102,7 @@ async function hsCall(expression: string): Promise<Record<string, unknown>> {
 	return parsed;
 }
 
-async function resolveMacTarget(runtime: Runtime, marker: string): Promise<NativeTarget> {
+async function resolveMacTarget(marker: string): Promise<NativeTarget> {
 	const preflight = await hsCall("piNotify.preflight()");
 	if (preflight.ok !== true) throw new Error("grant Hammerspoon Accessibility permission, then reload Pi");
 	for (let attempt = 0; attempt < 12; attempt++) {
@@ -144,7 +146,7 @@ async function resolveTarget(runtime: Runtime): Promise<void> {
 	runtime.ctx.ui.setTitle(marker);
 	try {
 		if (process.platform === "darwin") {
-			runtime.target = await resolveMacTarget(runtime, marker);
+			runtime.target = await resolveMacTarget(marker);
 		} else if (process.platform === "linux" && process.env.HYPRLAND_INSTANCE_SIGNATURE) {
 			runtime.target = await resolveHyprlandTarget(marker);
 		} else {
@@ -272,13 +274,78 @@ function shutdown(runtime: Runtime): void {
 
 export default function desktopNotifications(pi: ExtensionAPI): void {
 	let runtime: Runtime | undefined;
+	let pendingPermission: PendingPermission | undefined;
+	const permissionUnsubscribers: Array<() => void> = [];
+
+	function notifyPendingPermission(current: Runtime): void {
+		const notification = pendingPermission;
+		if (!notification || !current.notificationsReady) {
+			return;
+		}
+		enqueue(current, async (generation) => {
+			await sendNotification(current, notification.subtitle, notification.body, generation);
+		});
+	}
+
+	function subscribePermissions(): void {
+		if (permissionUnsubscribers.length) {
+			return;
+		}
+		permissionUnsubscribers.push(
+			pi.events.on("permissions:ui_prompt", (raw) => {
+				if (!raw || typeof raw !== "object") {
+					return;
+				}
+				const event = raw as PermissionPrompt;
+				if (typeof event.requestId !== "string") {
+					return;
+				}
+				const surface = typeof event.surface === "string" ? event.surface : "permission";
+				const value = typeof event.value === "string" ? event.value : "Pi needs your decision";
+				pendingPermission = {
+					requestId: event.requestId,
+					subtitle: `Permission needed: ${surface}`,
+					body: notificationPreview(value, 180),
+				};
+				if (!runtime) {
+					return;
+				}
+				runtime.permissionRequest = event.requestId;
+				runtime.qualityNotice = false;
+				runtime.generation++;
+				notifyPendingPermission(runtime);
+			}),
+			pi.events.on("permissions:decision", (raw) => {
+				if (!raw || typeof raw !== "object") {
+					return;
+				}
+				const event = raw as PermissionDecision;
+				if (typeof event.requestId !== "string" || event.requestId !== pendingPermission?.requestId) {
+					return;
+				}
+				pendingPermission = undefined;
+				if (!runtime) {
+					return;
+				}
+				const current = runtime;
+				current.permissionRequest = undefined;
+				current.generation++;
+				enqueue(current, async () => clearNotification(current));
+			}),
+		);
+	}
+
+	subscribePermissions();
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (runtime) shutdown(runtime);
+		subscribePermissions();
 		runtime = {
 			ctx,
 			project: safeProjectLabel(ctx.cwd),
 			disabled: false,
+			notificationsReady: false,
+			permissionRequest: pendingPermission?.requestId,
 			warned: false,
 			generation: 0,
 			queue: Promise.resolve(),
@@ -287,27 +354,6 @@ export default function desktopNotifications(pi: ExtensionAPI): void {
 			qualityNotice: false,
 		};
 		const current = runtime;
-		const promptUnsubscribe = pi.events.on("permissions:ui_prompt", (raw) => {
-			if (runtime !== current) return;
-			const event = raw as PermissionPrompt;
-			if (typeof event.requestId !== "string") return;
-			current.permissionRequest = event.requestId;
-			current.qualityNotice = false;
-			current.generation++;
-			enqueue(current, async (generation) => {
-				const surface = typeof event.surface === "string" ? event.surface : "permission";
-				const value = typeof event.value === "string" ? event.value : "Pi needs your decision";
-				await sendNotification(current, `Permission needed: ${surface}`, notificationPreview(value, 180), generation);
-			});
-		});
-		const decisionUnsubscribe = pi.events.on("permissions:decision", (raw) => {
-			if (runtime !== current) return;
-			const event = raw as PermissionDecision;
-			if (typeof event.requestId !== "string" || event.requestId !== current.permissionRequest) return;
-			current.permissionRequest = undefined;
-			current.generation++;
-			enqueue(current, async () => clearNotification(current));
-		});
 		const questionPromptUnsubscribe = pi.events.on("rpiv:ask-user:prompt", (raw) => {
 			if (runtime !== current) return;
 			current.pendingQuestion = askUserNotification(raw as AskUserPrompt);
@@ -355,8 +401,6 @@ export default function desktopNotifications(pi: ExtensionAPI): void {
 		});
 		current.unsubscribers.push(
 			qualityUnsubscribe,
-			promptUnsubscribe,
-			decisionUnsubscribe,
 			questionPromptUnsubscribe,
 			questionBlockedUnsubscribe,
 		);
@@ -367,6 +411,11 @@ export default function desktopNotifications(pi: ExtensionAPI): void {
 			warnOnce(current, error instanceof Error ? error.message : String(error));
 			ctx.ui.setTitle(normalTitle(current.project));
 		}
+		if (runtime !== current) {
+			return;
+		}
+		current.notificationsReady = true;
+		notifyPendingPermission(current);
 	});
 
 	const clearWhenWorkStarts = async (): Promise<void> => {
@@ -408,7 +457,13 @@ export default function desktopNotifications(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
-		if (!runtime) return;
+		for (const unsubscribe of permissionUnsubscribers.splice(0)) {
+			unsubscribe();
+		}
+		pendingPermission = undefined;
+		if (!runtime) {
+			return;
+		}
 		shutdown(runtime);
 		runtime = undefined;
 	});

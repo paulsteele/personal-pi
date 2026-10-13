@@ -42,7 +42,8 @@ async function settingsFixture(options: { initialStartupFailure?: boolean } = {}
 	const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
 	const listeners = new Map<string, Set<(event: unknown) => void>>();
 	const pi = {
-		on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => handlers.set(name, handler),
+		on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) =>
+			handlers.set(name, handler),
 		events: {
 			on(name: string, listener: (event: unknown) => void) {
 				const subscribers = listeners.get(name) ?? new Set();
@@ -52,27 +53,33 @@ async function settingsFixture(options: { initialStartupFailure?: boolean } = {}
 			},
 			emit(name: string, event: unknown) {
 				if (name === "sandbox:service:v1") {
-					(event as { accept(value: unknown): void }).accept({ session: { filesystem: {
-						canonical: async (path: string) => resolve(cwd, path),
-						read: (path: string) => readFile(path),
-						stat: async (path: string) => {
-							try {
-								return { file: true, size: (await stat(path)).size };
-							} catch (error) {
-								if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-									throw new Error("FileNotFoundError");
-								}
-								throw error;
-							}
+					(event as { accept(value: unknown): void }).accept({
+						session: {
+							filesystem: {
+								canonical: async (path: string) => resolve(cwd, path),
+								read: (path: string) => readFile(path),
+								stat: async (path: string) => {
+									try {
+										return { file: true, size: (await stat(path)).size };
+									} catch (error) {
+										if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+											throw new Error("FileNotFoundError");
+										}
+										throw error;
+									}
+								},
+							},
 						},
-					} } });
+					});
 				}
 				for (const listener of listeners.get(name) ?? []) {
 					listener(event);
 				}
 			},
 		},
-		appendEntry: vi.fn((customType: string, data: unknown) => entries.push({ type: "custom", customType, data })),
+		appendEntry: vi.fn((customType: string, data: unknown) =>
+			entries.push({ type: "custom", customType, data }),
+		),
 		sendMessage: vi.fn(),
 		registerMessageRenderer() {},
 		registerEntryRenderer() {},
@@ -86,7 +93,12 @@ async function settingsFixture(options: { initialStartupFailure?: boolean } = {}
 		statusText: () => "fixture",
 		restart: vi.fn(async () => {}),
 		check: vi.fn(async () => ({
-			kind: "checked" as const, findings: [], hashes: {}, workspaceRevision: 0, generation: "fixture", elapsedMs: 1,
+			kind: "checked" as const,
+			findings: [],
+			hashes: {},
+			workspaceRevision: 0,
+			generation: "fixture",
+			elapsedMs: 1,
 		})),
 		revision: 0,
 		configRevision: "fixture",
@@ -110,11 +122,19 @@ async function settingsFixture(options: { initialStartupFailure?: boolean } = {}
 		value: { verdict: "approved" as const, rationale: "Readable", findings: [], edits: [], proposed: {} },
 		metrics: { requests: 1, latencyMs: 1, usages: [] },
 	}));
-	registerQualityGate(pi, {
-		review,
-		ui: { coverage: async () => undefined, failure: async () => undefined, arbitrate: async () => undefined },
-		createLspManager: () => manager,
-	}, agentDir);
+	registerQualityGate(
+		pi,
+		{
+			review,
+			ui: {
+				coverage: async () => undefined,
+				failure: async () => undefined,
+				arbitrate: async () => undefined,
+			},
+			createLspManager: () => manager,
+		},
+		agentDir,
+	);
 	await handlers.get("session_start")!({}, ctx);
 	const project = await resolveLspProject(cwd, agentDir);
 	const profile = { version: 1 as const, projectId: project.id, enabled: true, routes: [] };
@@ -125,7 +145,12 @@ async function settingsFixture(options: { initialStartupFailure?: boolean } = {}
 it("replaces a rejected startup barrier when the quality recovery flow retries LSP", async () => {
 	const fixture = await settingsFixture({ initialStartupFailure: true });
 	const path = join(fixture.ctx.cwd, "app.ts");
-	expect(await fixture.handlers.get("tool_call")!({ toolName: "write", toolCallId: "write", input: { path } }, fixture.ctx)).toBeUndefined();
+	expect(
+		await fixture.handlers.get("tool_call")!(
+			{ toolName: "write", toolCallId: "write", input: { path } },
+			fixture.ctx,
+		),
+	).toBeUndefined();
 	await writeFile(path, "const value = 1;\n");
 	const retry = await fixture.handlers.get("turn_end")!({ outcome: "completed" }, fixture.ctx);
 	expect(retry).toMatchObject({ entries: [{ details: { outcome: "retrying" } }] });
@@ -143,7 +168,9 @@ it("keeps the editable draft usable after validation fails and a corrected Apply
 	const fixture = await settingsFixture();
 	const draft = await fixture.section.load(fixture.ctx);
 	approveSetup.mockRejectedValueOnce(new Error("Diagnostic validation failed"));
-	await expect(draft.apply({ ...draft.value, mode: "explicit" })).rejects.toThrow("Diagnostic validation failed");
+	await expect(draft.apply({ ...draft.value, mode: "explicit" })).rejects.toThrow(
+		"Diagnostic validation failed",
+	);
 	approveSetup.mockImplementationOnce(async () => {
 		const pending = (await loadLspDraft(fixture.agentDir, fixture.project))!;
 		return approveLspDraft(fixture.agentDir, fixture.project, pending.revision);
@@ -158,7 +185,13 @@ it("refuses another Apply after an external writer changes the draft during fail
 	const draft = await fixture.section.load(fixture.ctx);
 	approveSetup.mockImplementationOnce(async () => {
 		const pending = (await loadLspDraft(fixture.agentDir, fixture.project))!;
-		await saveLspDraft(fixture.agentDir, fixture.project, { ...fixture.profile, enabled: false }, null, pending.revision);
+		await saveLspDraft(
+			fixture.agentDir,
+			fixture.project,
+			{ ...fixture.profile, enabled: false },
+			null,
+			pending.revision,
+		);
 		throw new Error("Diagnostic validation failed");
 	});
 	await expect(draft.apply(draft.value)).rejects.toThrow("Diagnostic validation failed");
@@ -171,15 +204,22 @@ it("preserves the pending draft's null base revision when an active profile appe
 	const fixture = await settingsFixture();
 	await saveLspDraft(fixture.agentDir, fixture.project, fixture.profile, null, null);
 	const activeProfile = { ...fixture.profile, enabled: false };
-	await publishLspJson(lspProfilePath(fixture.agentDir, fixture.project), {
-		profile: activeProfile, approvedDigest: digest(JSON.stringify(activeProfile)),
-	}, undefined);
+	await publishLspJson(
+		lspProfilePath(fixture.agentDir, fixture.project),
+		{
+			profile: activeProfile,
+			approvedDigest: digest(JSON.stringify(activeProfile)),
+		},
+		undefined,
+	);
 	const draft = await fixture.section.load(fixture.ctx);
 	approveSetup.mockResolvedValueOnce(undefined);
 	await expect(draft.apply({ ...draft.value, mode: "explicit" })).rejects.toThrow("cancelled");
 	const pending = (await loadLspDraft(fixture.agentDir, fixture.project))!;
 	expect(pending.draft.baseRevision).toBeNull();
 	expect(pending.draft.profile).toMatchObject({ enabled: true, mode: "explicit" });
-	await expect(approveLspDraft(fixture.agentDir, fixture.project, pending.revision)).rejects.toThrow("changed since preview");
+	await expect(approveLspDraft(fixture.agentDir, fixture.project, pending.revision)).rejects.toThrow(
+		"changed since preview",
+	);
 	expect((await loadLspProfile(fixture.agentDir, fixture.project))!.profile.enabled).toBe(false);
 });

@@ -68,7 +68,7 @@ describe("notification text", () => {
 describe("quality attention", () => {
 	const request = { version: 1, sessionId: "session", requestId: "request-a", kind: "arbitration", active: true };
 
-	test.each(["arbitration", "coverage", "failure", "scope", "model", "waiver"])("shows and clears a %s decision without exposing source data", (kind) => {
+	test.each(["arbitration", "coverage", "failure", "model", "waiver"])("shows and clears a %s decision without exposing source data", (kind) => {
 		const tracker = createQualityAttentionTracker("session");
 		const event = { ...request, kind, findings: "PRIVATE_SOURCE", reason: "SECRET" };
 		const result = tracker.update(event);
@@ -113,8 +113,8 @@ describe("quality attention", () => {
 	test("restores a remaining decision when the newest one closes", () => {
 		const tracker = createQualityAttentionTracker("session");
 		const initial = tracker.update(request);
-		tracker.update({ ...request, requestId: "request-b", kind: "scope" });
-		expect(tracker.update({ ...request, requestId: "request-b", kind: "scope", active: false })).toEqual(initial);
+		tracker.update({ ...request, requestId: "request-b", kind: "coverage" });
+		expect(tracker.update({ ...request, requestId: "request-b", kind: "coverage", active: false })).toEqual(initial);
 		expect(tracker.active).toBe(true);
 	});
 });

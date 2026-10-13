@@ -47,7 +47,9 @@ async function fixture() {
 
 function settingsContextThatCapturesRenderedLines(rendered: string[]): ExtensionContext {
   return {
-    mode: "tui", hasUI: true, isIdle: () => true,
+    mode: "tui",
+    hasUI: true,
+    isIdle: () => true,
     ui: {
       notify: vi.fn(),
       custom: async (factory: Parameters<ExtensionContext["ui"]["custom"]>[0]) => {
@@ -99,19 +101,25 @@ it("hides base environment and build credentials while preserving them across or
   await mkdir(dirname(path), { recursive: true });
   const definition = {
     build: { dockerfile: "Containerfile", args: { TOKEN: "build-credential" } },
-    containerEnv: { TOKEN: "container-credential" }, remoteEnv: { TOKEN: "remote-credential" },
+    containerEnv: { TOKEN: "container-credential" },
+    remoteEnv: { TOKEN: "remote-credential" },
   };
   await writeFile(path, JSON.stringify(definition));
   const section = setup.sections.find((section) => section.id === "sandbox-base-global")!;
   const draft = await section.load({} as never);
   expect(JSON.stringify(draft.value.definition)).not.toContain("credential");
-  const secretFieldPaths = section.fields.filter((field) => field.secret).map((field) => field.path);
+  const secretFieldPaths = section.fields
+    .filter((field) => field.secret)
+    .map((field) => field.path);
   expect(secretFieldPaths).toEqual(["containerEnv", "remoteEnv", "buildArgs"]);
   const rendered: string[] = [];
   const ctx = settingsContextThatCapturesRenderedLines(rendered);
   await openSettingsSection(ctx, section, new AbortController().signal);
   expect(rendered.join("\n")).not.toContain("credential");
-  await draft.apply({ ...draft.value, definition: { ...(draft.value.definition as object), name: "Edited base" } });
+  await draft.apply({
+    ...draft.value,
+    definition: { ...(draft.value.definition as object), name: "Edited base" },
+  });
   expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ ...definition, name: "Edited base" });
 });
 
@@ -134,7 +142,9 @@ it("does not publish native authority when Apply is cancelled during pending pub
   cancellation.abort(new Error("Cancelled settings"));
   continuePublication();
   await rejected;
-  expect(await privateStorage.readPrivateText(hostCommandProfilePath(setup.agentDir, setup.project))).toBeUndefined();
+  expect(
+    await privateStorage.readPrivateText(hostCommandProfilePath(setup.agentDir, setup.project)),
+  ).toBeUndefined();
 });
 
 it("invalid permission settings remain a rejected draft", async () => {

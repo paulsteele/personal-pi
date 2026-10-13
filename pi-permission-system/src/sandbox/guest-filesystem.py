@@ -49,9 +49,11 @@ elif operation == "list":
 elif operation == "glob":
     result = sorted(glob.glob(request["pattern"], root_dir=str(path), recursive=True))[:request["limit"]]
 elif operation == "access":
-    if not os.access(path, os.R_OK):
-        raise PermissionError(str(path))
-    result = None
+    result = {
+        "path": str(path),
+        "exists": os.path.exists(path),
+        "readable": os.access(path, os.R_OK),
+    }
 elif operation == "mime":
     result = mimetypes.guess_type(str(path))[0]
 else:

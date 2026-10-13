@@ -30,7 +30,9 @@ export class PathNormalizer {
 
   forPath(pathValue: string, options?: { resolveBase?: string }): AccessPath {
     if (this.mode === "guest") {
-      const guestHomeExpandedPath = this.guestHome ? pathValue.replace(/^~(?=\/|$)/, this.guestHome) : pathValue;
+      const guestHomeExpandedPath = this.guestHome
+        ? pathValue.replace(/^~(?=\/|$)/, this.guestHome)
+        : pathValue;
       return AccessPath.forGuestPath(guestHomeExpandedPath, { cwd: this.cwd, ...options });
     }
     return AccessPath.forPath(pathValue, {
@@ -112,10 +114,17 @@ export class PathNormalizer {
     }
     const paths = [...this.pendingGuestEntryPaths];
     const maxPathsPerProbeBatch = 128;
-    for (let batchStartIndex = 0; batchStartIndex < paths.length; batchStartIndex += maxPathsPerProbeBatch) {
+    for (
+      let batchStartIndex = 0;
+      batchStartIndex < paths.length;
+      batchStartIndex += maxPathsPerProbeBatch
+    ) {
       const batch = paths.slice(batchStartIndex, batchStartIndex + maxPathsPerProbeBatch);
       const existence = await probe(batch);
-      if (existence.length !== batch.length || existence.some((value) => typeof value !== "boolean")) {
+      if (
+        existence.length !== batch.length ||
+        existence.some((value) => typeof value !== "boolean")
+      ) {
         throw new Error("Guest existence probe returned incomplete results");
       }
       for (const [index, path] of batch.entries()) {

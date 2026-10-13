@@ -66,32 +66,65 @@ it.each(['"dotnet" build', "'dotnet' test", "dotnet test < <(printf data)"])(
 
 it.each([
   '"$TOOL" build',
+  "dot\\net build",
   'eval "dotnet build"',
   'bash -c "dotnet build"',
   "command dotnet build",
   "env MODE=Debug dotnet build",
-  "dotnet() { echo guest; }; dotnet build",
-  "PATH=/other dotnet build",
-  "NODE_OPTIONS=--require=./inject.js dotnet build",
-  "dotnet build && (",
-])(
-  "rejects opaque or unsupported routing rather than executing a host shell: %s",
+  "dotnet() { dotnet build; echo guest; }; dotnet build",
+  "function dotnet() { echo guest; }; dotnet build",
+  "function dotnet { echo guest; }; dotnet build",
+  "outer() { dotnet() { printf guest; }; }; outer; dotnet build",
+  "alias dotnet='echo guest'",
+  "source ./build.sh",
+])("leaves dynamic, wrapped, and function commands in the guest: %s", async (source) => {
+  const plan = await planHostCommands(source, rules);
+  expect(plan.invocations).toEqual([]);
+  expect(rewriteHostCommands(plan, () => "bridge")).toBe(source);
+});
+
+it("routes literal host commands alongside unresolved and opaque guest commands", async () => {
+  const source = '"$TOOL" build; bash -c "dotnet build"; dotnet test';
+  const plan = await planHostCommands(source, rules);
+  expect(plan.invocations.map((invocation) => invocation.command)).toEqual(["dotnet"]);
+  expect(rewriteHostCommands(plan, () => "bridge")).toBe(
+    '"$TOOL" build; bash -c "dotnet build"; bridge test',
+  );
+});
+
+it("leaves incomplete syntax to guest Bash without partially routing it", async () => {
+  const source = "dotnet build && (";
+  expect(await planHostCommands(source, rules)).toEqual({ source, invocations: [] });
+});
+
+it.each(["PATH=/other dotnet build", "NODE_OPTIONS=--require=./inject.js dotnet build"])(
+  "retains native lookup environment restrictions: %s",
   async (source) => {
-    await expect(planHostCommands(source, rules)).rejects.toThrow();
+    await expect(planHostCommands(source, rules)).rejects.toThrow("lookup environment variables");
   },
 );
 
-it.each(["NODE_PATH", "PYTHONUSERBASE"])("rejects lookup environment variable assignment %s", async (name) => {
-  await expect(planHostCommands(`${name}=/untrusted dotnet build`, rules)).rejects.toThrow("lookup environment variables");
-});
+it.each(["NODE_PATH", "PYTHONUSERBASE"])(
+  "rejects lookup environment variable assignment %s",
+  async (name) => {
+    await expect(planHostCommands(`${name}=/untrusted dotnet build`, rules)).rejects.toThrow(
+      "lookup environment variables",
+    );
+  },
+);
 
 it.each([
   { command: "./构建.sh", script: "构建.sh" },
   { command: "'./build@v2.sh'", script: "build@v2.sh" },
-])("accepts the literal script name $command without confusing it with expansion", async ({ command, script }) => {
-  expect((await planHostCommands(command, [{ script }])).invocations).toHaveLength(1);
-  expect((await planHostCommands(command, [{ executable: "unrelated" }])).invocations).toEqual([]);
-});
+])(
+  "accepts the literal script name $command without confusing it with expansion",
+  async ({ command, script }) => {
+    expect((await planHostCommands(command, [{ script }])).invocations).toHaveLength(1);
+    expect((await planHostCommands(command, [{ executable: "unrelated" }])).invocations).toEqual(
+      [],
+    );
+  },
+);
 
 it("leaves arbitrary shell syntax unchanged when the project has no host rules", async () => {
   const source = 'bash -c "echo guest"';
@@ -181,6 +214,33 @@ async function routingFixture(guestRoot?: string) {
     });
   return { root, agentDir, project, profilePath, profile, executable, run };
 }
+
+it.each([
+  { scenario: "dynamic command", command: 'TOOL=printf; "$TOOL" guest-output' },
+  { scenario: "escaped command", command: "pr\\intf guest-output" },
+  { scenario: "opaque shell", command: 'bash -c "printf guest-output"' },
+  { scenario: "eval", command: 'eval "printf guest-output"' },
+  { scenario: "prefix wrapper", command: "env MODE=Debug printf guest-output" },
+  {
+    scenario: "function shadowing a host executable",
+    command: "native() { printf guest-output; }; native",
+  },
+  {
+    scenario: "nested function shadowing a host executable",
+    command: "outer() { native() { printf guest-output; }; }; outer; native",
+  },
+  {
+    scenario: "function containing a host script name",
+    command: "build() { ./build.sh guest-output; }; build",
+  },
+])("executes $scenario in the guest alongside a routed host command", async ({ command }) => {
+  const fixture = await routingFixture();
+  const result = await fixture.run(`${command}; ./build.sh native-output`);
+  expect(result.code).toBe(0);
+  expect(result.output.toString()).toContain("guest-output");
+  expect(result.output.toString()).toContain(`host:${fixture.root}:default:native-output`);
+  expect(result.stderr.match(/\[HOST\]/g)).toEqual(["[HOST]"]);
+});
 
 it("streams host output into a guest pipeline and preserves short-circuiting and argv quoting", async () => {
   const fixture = await routingFixture();
@@ -324,8 +384,14 @@ it("terminates inherited-pipe descendants when the native leader exits", async (
 
 it("stops a guest producer while a native command stays alive with stdin closed", async () => {
   const fixture = await routingFixture();
-  await writeFile(fixture.executable, "#!/bin/bash\nexec 0<&-\nsleep 0.3\nprintf native-finished\n");
-  const result = await fixture.run("yes x | ./build.sh; printf producer-exit:%s ${PIPESTATUS[0]}", AbortSignal.timeout(3000));
+  await writeFile(
+    fixture.executable,
+    "#!/bin/bash\nexec 0<&-\nsleep 0.3\nprintf native-finished\n",
+  );
+  const result = await fixture.run(
+    "yes x | ./build.sh; printf producer-exit:%s ${PIPESTATUS[0]}",
+    AbortSignal.timeout(3000),
+  );
   expect(result.code).toBe(0);
   expect(result.output.toString()).toContain("native-finished");
   expect(result.output.toString()).toContain("producer-exit:141");
@@ -333,9 +399,12 @@ it("stops a guest producer while a native command stays alive with stdin closed"
 
 it("keeps another native pipeline flowing while a consumer blocks on large output", async () => {
   const fixture = await routingFixture();
-  await writeFile(fixture.executable, '#!/bin/bash\nif [ "$1" = flood ]; then\n  head -c 4194304 /dev/zero\nelse\n  printf independent-output\nfi\n');
+  await writeFile(
+    fixture.executable,
+    '#!/bin/bash\nif [ "$1" = flood ]; then\n  head -c 4194304 /dev/zero\nelse\n  printf independent-output\nfi\n',
+  );
   const result = await fixture.run(
-    './build.sh flood | { sleep 0.2; wc -c; } & ./build.sh small; wait',
+    "./build.sh flood | { sleep 0.2; wc -c; } & ./build.sh small; wait",
     AbortSignal.timeout(4000),
   );
   expect(result.code).toBe(0);
@@ -360,37 +429,43 @@ it("denies a native argument by its canonical symlink target after guest expansi
   await writeFile(target, "private source");
   await symlink("protected.txt", join(fixture.root, "public"));
   await writeFile(fixture.executable, '#!/bin/bash\ncat "$1"\n');
-  await writeFile(join(fixture.agentDir, "extensions/pi-permission-system/config.json"), JSON.stringify({
-    permission: { path: { [target]: "deny" } },
-  }));
+  await writeFile(
+    join(fixture.agentDir, "extensions/pi-permission-system/config.json"),
+    JSON.stringify({
+      permission: { path: { [target]: "deny" } },
+    }),
+  );
   const result = await fixture.run('FILE=public; native "$FILE"');
   expect(result.code).toBe(125);
   expect(result.stderr).toContain("Host argument path denied");
   expect(result.output.toString()).not.toContain("private source");
 });
 
-it("requires sensitive-file authority for a native bare symlink operand", async () => {
+it("runs an authorized native command with a sensitive symlink operand without another approval", async () => {
   const fixture = await routingFixture();
   await writeFile(join(fixture.root, ".env"), "private credential");
   await symlink(".env", join(fixture.root, "public"));
   await writeFile(fixture.executable, '#!/bin/bash\ncat "$1"\n');
   const result = await fixture.run("native public");
-  expect(result.code).toBe(125);
-  expect(result.stderr).toContain("Human denied native sensitive");
-  expect(result.output.toString()).not.toContain("private credential");
+  expect(result.code).toBe(0);
+  expect(result.output.toString()).toContain("private credential");
+  expect(result.stderr).toContain("[HOST] native");
 });
 
-it("requires external-effect authority for an expanded native git subcommand", async () => {
+it("runs an authorized native command with an expanded remote-mutation subcommand without another approval", async () => {
   const fixture = await routingFixture();
-  await writeFile(fixture.executable, "#!/bin/bash\nprintf dispatch-must-not-run\n");
-  await writeFile(fixture.profilePath, JSON.stringify({ hostCommands: [{ executable: "git", path: fixture.executable }] }));
+  await writeFile(fixture.executable, '#!/bin/bash\nprintf "native-subcommand:%s" "$1"\n');
+  await writeFile(
+    fixture.profilePath,
+    JSON.stringify({ hostCommands: [{ executable: "git", path: fixture.executable }] }),
+  );
   const updatedProfile = await loadHostCommandProfile(fixture.agentDir, fixture.project);
   fixture.profile.rules = updatedProfile.rules;
   fixture.profile.revision = updatedProfile.revision;
   const result = await fixture.run('ACTION=push; git "$ACTION"');
-  expect(result.code).toBe(125);
-  expect(result.stderr).toContain("Human denied native sensitive or external-effect operation");
-  expect(result.output.toString()).not.toContain("dispatch-must-not-run");
+  expect(result.code).toBe(0);
+  expect(result.output.toString()).toContain("native-subcommand:push");
+  expect(result.stderr).toContain("[HOST] git");
 });
 
 it("a private host profile selects the parent project for non-Git descendants", async () => {
@@ -470,13 +545,20 @@ it("does not signal completed native process identities on late disconnect or br
   const fixture = await routingFixture();
   await writeFile(fixture.executable, "#!/bin/bash\nexit 0\n");
   const mount = await createMountGrant({
-    path: fixture.root, access: "rw", privateStorage: join(fixture.agentDir, "extensions/pi-permission-system"),
+    path: fixture.root,
+    access: "rw",
+    privateStorage: join(fixture.agentDir, "extensions/pi-permission-system"),
   });
   let finishInvocation!: () => void;
   const broker = new HostCommandBroker({
-    agentDir: fixture.agentDir, project: fixture.project, profile: fixture.profile,
-    plan: await planHostCommands("./build.sh", fixture.profile.rules), token: "fixture",
-    mounts: [mount], canonicalGuestPath: (path) => realpath(path), signal: new AbortController().signal,
+    agentDir: fixture.agentDir,
+    project: fixture.project,
+    profile: fixture.profile,
+    plan: await planHostCommands("./build.sh", fixture.profile.rules),
+    token: "fixture",
+    mounts: [mount],
+    canonicalGuestPath: (path) => realpath(path),
+    signal: new AbortController().signal,
     send(_id, message) {
       if (message.type === "exit") {
         finishInvocation();
@@ -487,9 +569,17 @@ it("does not signal completed native process identities on late disconnect or br
   try {
     const completedConnectionIds = [1, 2, 3];
     for (const connectionId of completedConnectionIds) {
-      const completed = new Promise<void>((resolve) => { finishInvocation = resolve; });
-      broker.receive(connectionId, { type: "start", token: "fixture", invocation: 0,
-        command: "./build.sh", args: [], cwd: fixture.root, environment: {},
+      const completed = new Promise<void>((resolve) => {
+        finishInvocation = resolve;
+      });
+      broker.receive(connectionId, {
+        type: "start",
+        token: "fixture",
+        invocation: 0,
+        command: "./build.sh",
+        args: [],
+        cwd: fixture.root,
+        environment: {},
       });
       await completed;
       await broker.close();

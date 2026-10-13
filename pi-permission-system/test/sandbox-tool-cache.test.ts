@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import {
   buildContentKey,
   ensureCachedImage,
-  equippedBaseKey,
+  infrastructureImageKey,
   projectImageKey,
   toolArtifactKey,
   type ToolArtifactInput,
@@ -50,22 +50,30 @@ it.each([
   expect(toolArtifactKey({ ...artifact, ...change })).not.toBe(toolArtifactKey(artifact));
 });
 
-it("changes the equipped-base identity when the application base changes", () => {
-  const equipped = {
+it("changes infrastructure identity only for application base and native dependency inputs", () => {
+  const infrastructure = {
     baseImageId: "base-one",
     platformKey: artifact.platformKey,
     nativeDependenciesRevision: "libraries",
-    artifactImageIds: ["pyright"],
     assemblyRevision: "assembly",
-    copyMode: "linked" as const,
   };
-  expect(equippedBaseKey(equipped)).not.toBe(
-    equippedBaseKey({ ...equipped, baseImageId: "base-two" }),
+  expect(infrastructureImageKey(infrastructure)).not.toBe(
+    infrastructureImageKey({ ...infrastructure, baseImageId: "base-two" }),
   );
+  expect(infrastructureImageKey(infrastructure)).not.toBe(
+    infrastructureImageKey({ ...infrastructure, nativeDependenciesRevision: "new-libraries" }),
+  );
+  const firstArtifactSet = { ...infrastructure, artifactImageIds: ["first"] };
+  const secondArtifactSet = { ...infrastructure, artifactImageIds: ["second"] };
+  expect(infrastructureImageKey(firstArtifactSet)).toBe(infrastructureImageKey(secondArtifactSet));
 });
 
-it("changes project identity without changing the equipped-base input", () => {
-  const project = { equippedImageId: "equipped", recipe: "RUN install-sdk-one", files: {} };
+it("changes project identity without changing the infrastructure input", () => {
+  const project = {
+    infrastructureImageId: "infrastructure",
+    recipe: "RUN install-sdk-one",
+    files: {},
+  };
   expect(projectImageKey(project)).not.toBe(
     projectImageKey({ ...project, recipe: "RUN install-sdk-two" }),
   );

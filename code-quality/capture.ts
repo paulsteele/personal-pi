@@ -134,6 +134,39 @@ function groupFileHunks(file: SnapshotFile, hunks: ReviewHunk[], totalChangedHun
 	};
 }
 
+export interface ReviewBatchPlan {
+	chunks: ReviewChunk[];
+	waivers: CoverageError[];
+}
+
+export function planReviewBatch(files: SnapshotFile[], config: QualityConfig, cwd: string): ReviewBatchPlan {
+	const plan: ReviewBatchPlan = { chunks: [], waivers: [] };
+	let capturedBytes = 0;
+	for (const file of files) {
+		if (file.before === file.after) {
+			continue;
+		}
+		const fileSnapshotBytes = Buffer.byteLength(file.before ?? "") + Buffer.byteLength(file.after ?? "");
+		if (capturedBytes + fileSnapshotBytes > config.maxBatchBytes) {
+			plan.waivers.push(
+				new CoverageError(file.path, "size", "File snapshots exceed the remaining maxBatchBytes budget"),
+			);
+			continue;
+		}
+		try {
+			const chunks = buildReviewChunks([file], config, cwd);
+			plan.chunks.push(...chunks);
+			capturedBytes += fileSnapshotBytes;
+		} catch (error) {
+			if (!(error instanceof CoverageError) || error.kind !== "size") {
+				throw error;
+			}
+			plan.waivers.push(error);
+		}
+	}
+	return plan;
+}
+
 export function buildReviewChunks(files: SnapshotFile[], config: QualityConfig, cwd: string): ReviewChunk[] {
 	if (
 		files.reduce((n, f) => n + Buffer.byteLength(f.before ?? "") + Buffer.byteLength(f.after ?? ""), 0) >

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { DEFAULT_CONFIG } from "./config.js";
-import { readSnapshot, canonicalPath, buildReviewChunks, CoverageError } from "./capture.js";
+import { readSnapshot, canonicalPath, buildReviewChunks, planReviewBatch, CoverageError } from "./capture.js";
 import { newCase, recordVerdict, resolveCase, proposalApplied } from "./case.js";
 import { CaseStore, countRejectedReviews, latestReference, STATE_ENTRY } from "./state.js";
 import { validateVerdict } from "./proposal.js";
@@ -49,9 +49,39 @@ it("builds complete changed hunks and explicitly rejects indivisible over-budget
 	expect(chunks[0]!.files[0]!.changedRanges).toContainEqual([1, 1]);
 	expect(buildReviewChunks([{ path, before: "same", after: "same" }], DEFAULT_CONFIG, cwd)).toEqual([]);
 	expect(() =>
-		buildReviewChunks([{ path, before: null, after: "x".repeat(64000) }], DEFAULT_CONFIG, cwd),
+		buildReviewChunks(
+			[{ path, before: null, after: "x".repeat(DEFAULT_CONFIG.maxInputChars) }],
+			DEFAULT_CONFIG,
+			cwd,
+		),
 	).toThrow(/hunk/);
 });
+it("waives an indivisible oversized hunk without retaining partial chunks or skipping another file", () => {
+	const file = separatedFileChanges();
+	const oversizedFile = { ...file, after: `${file.after}${"x".repeat(DEFAULT_CONFIG.maxInputChars)}` };
+	const eligibleFile = { path: "/repo/count.ts", before: null, after: "const count = 1;" };
+	const plan = planReviewBatch([oversizedFile, eligibleFile], DEFAULT_CONFIG, "/repo");
+	expect(plan.waivers).toMatchObject([
+		{ path: file.path, kind: "size", message: expect.stringContaining("hunk") },
+	]);
+	expect(plan.chunks.map((chunk) => chunk.files[0]!.path)).toEqual([eligibleFile.path]);
+});
+
+it("waives files that exceed the remaining batch bytes and still considers later smaller files", () => {
+	const firstFile = { path: "/repo/first.ts", before: null, after: "x".repeat(700) };
+	const overBudgetFile = { path: "/repo/large.ts", before: null, after: "x".repeat(500) };
+	const lastFile = { path: "/repo/last.ts", before: null, after: "x".repeat(200) };
+	const plan = planReviewBatch(
+		[firstFile, overBudgetFile, lastFile],
+		{ ...DEFAULT_CONFIG, maxBatchBytes: 1024 },
+		"/repo",
+	);
+	expect(plan.waivers).toMatchObject([
+		{ path: overBudgetFile.path, kind: "size", message: expect.stringContaining("maxBatchBytes") },
+	]);
+	expect(plan.chunks.map((chunk) => chunk.files[0]!.path)).toEqual([firstFile.path, lastFile.path]);
+});
+
 function separatedFileChanges() {
 	const unchangedMiddle = Array.from({ length: 80 }, (_, index) => `const padding${index} = ${index};`).join(
 		"\n",
@@ -232,6 +262,7 @@ it("persists private, hashed branch-local state and fails on missing/corrupt sta
 	const store = new CaseStore(join(dir, "agent"), cwd);
 	const state = newCase(cwd, "p/m");
 	state.files.push({ path, before: null, after: "text" });
+	state.sizeWaivers = [{ path: join(cwd, "large.ts"), reason: "File exceeds maxFileBytes" }];
 	const ref = store.save(state);
 	expect(store.load(ref)).toEqual(state);
 	expect(statSync(join(store.root, `${ref.blob}.json`)).mode & 0o777).toBe(0o600);

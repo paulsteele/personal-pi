@@ -35,7 +35,9 @@ async function sandboxAuthorizationFixture() {
     options: { sessionId: "session" },
     revision: "authority",
     environment: {
-      container: "container", workspace: "/workspace", configuration: {},
+      container: "container",
+      workspace: "/workspace",
+      configuration: {},
       remoteEnvironment: { HOME: "/home/developer" },
     },
     mounts: [grant],
@@ -185,9 +187,7 @@ it("a prevalidated canonical path still checks live explicit denies without anot
       agentDir: sandbox.agentDir,
       toolName: "read",
       input: { path: "/workspace/a.ts" },
-      toolCallId: "capture",
       ctx: {} as never,
-      confirm: async () => false,
     }),
   ).rejects.toThrow("Path denied by explicit policy");
   expect(sandbox.canonical).not.toHaveBeenCalled();
@@ -195,18 +195,29 @@ it("a prevalidated canonical path still checks live explicit denies without anot
 
 it("passes guest HOME to batched entry probes and preserves explicit existence results", async () => {
   const execute = vi.fn(async (_options: { input: Buffer }) => ({
-    code: 0, output: Buffer.from("[true,false]"), stderr: "",
+    code: 0,
+    output: Buffer.from("[true,false]"),
+    stderr: "",
   }));
   const remoteEnvironment = { HOME: "/home/developer" };
   const filesystem = new GuestFilesystem(
-    () => ({ container: "container", user: "developer", workspace: "/workspace", remoteEnvironment }) as never,
+    () =>
+      ({
+        container: "container",
+        user: "developer",
+        workspace: "/workspace",
+        remoteEnvironment,
+      }) as never,
     execute as never,
   );
   const signal = new AbortController().signal;
   expect(await filesystem.entriesExist(["secret", "missing"], signal)).toEqual([true, false]);
-  expect(execute).toHaveBeenCalledWith(expect.objectContaining({ environment: remoteEnvironment, timeoutMs: 10_000, signal }));
+  expect(execute).toHaveBeenCalledWith(
+    expect.objectContaining({ environment: remoteEnvironment, timeoutMs: 10_000, signal }),
+  );
   expect(JSON.parse(execute.mock.calls[0]![0].input.toString())).toMatchObject({
-    operation: "entries_exist", paths: ["secret", "missing"],
+    operation: "entries_exist",
+    paths: ["secret", "missing"],
   });
 });
 

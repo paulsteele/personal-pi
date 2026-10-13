@@ -234,11 +234,18 @@ export function registerSandboxSettings(
           delete definitionWithoutSecrets.build.args;
         }
         return {
-          value: { definition: definitionWithoutSecrets, containerEnv, remoteEnv, buildArgs: secretBuildArgs },
+          value: {
+            definition: definitionWithoutSecrets,
+            containerEnv,
+            remoteEnv,
+            buildArgs: secretBuildArgs,
+          },
           needsInitialPublication: !stored,
           async apply(value, signal) {
             const submittedDefinition = value.definition as Record<string, unknown>;
-            const buildConfiguration = submittedDefinition.build as Record<string, unknown> | undefined;
+            const buildConfiguration = submittedDefinition.build as
+              | Record<string, unknown>
+              | undefined;
             const definitionWithSecrets = { ...submittedDefinition };
             if (value.containerEnv !== undefined) {
               definitionWithSecrets.containerEnv = value.containerEnv;

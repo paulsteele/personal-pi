@@ -2,7 +2,14 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { DEFAULT_CONFIG, loadConfig, saveConfig, configPath, parseConfig, qualityConfigRevision } from "./config.js";
+import {
+	DEFAULT_CONFIG,
+	loadConfig,
+	saveConfig,
+	configPath,
+	parseConfig,
+	qualityConfigRevision,
+} from "./config.js";
 import { exclusionRule, EXCLUDED_FILENAMES, GENERATED_SUFFIXES } from "./exclusions.js";
 import { applyExactEdits, validateVerdict, type ReviewFile } from "./proposal.js";
 import { POLICY, review, type ReviewerRegistry } from "./reviewer.js";
@@ -34,6 +41,14 @@ it("excludes only explicit names and generated suffixes, including canonical tar
 		expect(exclusionRule(path)).toBeUndefined();
 	expect(exclusionRule("bun.lock", "src.ts")).toBeUndefined();
 });
+it("defaults to doubled input and output budgets while preserving explicit limits", () => {
+	expect(DEFAULT_CONFIG).toMatchObject({ maxInputChars: 128_000, maxOutputTokens: 16_000 });
+	expect(parseConfig({ maxInputChars: 64_000, maxOutputTokens: 8_000 })).toMatchObject({
+		maxInputChars: 64_000,
+		maxOutputTokens: 8_000,
+	});
+});
+
 it("requires explicit model configuration and preserves malformed config", () => {
 	const dir = mkdtempSync(join(tmpdir(), "quality-config-"));
 	dirs.push(dir);
@@ -176,6 +191,42 @@ it("sends the shared readability requirements and exclusions without task or con
 	expect(context.tools.map((tool: { name: string }) => tool.name)).toEqual(["submit_quality_verdict"]);
 	expect(complete.mock.calls[0]![2].maxRetries).toBe(0);
 });
+it.each([
+	{ modelMaxTokens: 32_000, expectedMaxTokens: 16_000 },
+	{ modelMaxTokens: 8_000, expectedMaxTokens: 8_000 },
+])(
+	"caps the doubled output budget at $expectedMaxTokens for model limit $modelMaxTokens",
+	async ({ modelMaxTokens, expectedMaxTokens }) => {
+		const complete = vi.fn().mockResolvedValue(submissionResponse(approval));
+		const models = registry(complete);
+		const model = models.find("test", "m")!;
+		models.find = () => ({ ...model, maxTokens: modelMaxTokens });
+		expect((await review({ registry: models, config, request })).kind).toBe("verdict");
+		expect(complete.mock.calls[0]![2].maxTokens).toBe(expectedMaxTokens);
+	},
+);
+
+it.each(["maxInputChars", "contextWindow"])(
+	"identifies an initial oversized %s request without calling the provider",
+	async (budget) => {
+		const complete = vi.fn();
+		const models = registry(complete);
+		const limitedConfig = { ...config };
+		if (budget === "maxInputChars") {
+			limitedConfig.maxInputChars = 1024;
+		} else {
+			const model = models.find("test", "m")!;
+			models.find = () => ({ ...model, contextWindow: 1024 });
+		}
+		expect(await review({ registry: models, config: limitedConfig, request })).toMatchObject({
+			kind: "oversized",
+			reason: "Review input exceeds its complete-context budget.",
+			metrics: { requests: 0 },
+		});
+		expect(complete).not.toHaveBeenCalled();
+	},
+);
+
 it("passes a disagreement as bounded untrusted input rather than operator instructions", async () => {
 	const complete = vi.fn().mockResolvedValue({
 		stopReason: "toolUse",
@@ -455,13 +506,13 @@ it.each(["maxInputChars", "contextWindow"])(
 			const model = limitedRegistry.find("test", "m")!;
 			limitedRegistry.find = () => ({
 				...model,
-				contextWindow: Math.ceil(initialChars / 3) + config.maxOutputTokens,
+				contextWindow: Math.ceil(initialChars / 3) + Math.min(config.maxOutputTokens, model.maxTokens),
 			});
 		}
 		const result = await review({ registry: limitedRegistry, config: limitedConfig, request });
 		expect(result).toMatchObject({
-			kind: "failed",
-			reason: "Quality verdict repair exceeds the complete-context budget; review remains unresolved.",
+			kind: "oversized",
+			reason: "Quality verdict repair exceeds the complete-context budget.",
 			metrics: { requests: 1 },
 		});
 		expect(complete).toHaveBeenCalledTimes(1);

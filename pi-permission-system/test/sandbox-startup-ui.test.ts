@@ -301,26 +301,33 @@ it("cancels pending overlay installation without running startup or reviving a l
   type CustomUI = ExtensionContext["ui"]["custom"];
   let mount!: () => void;
   const completed = vi.fn();
-  const custom = vi.fn((factory: Parameters<CustomUI>[0], options?: Parameters<CustomUI>[1]) =>
-    new Promise<void>((resolve) => {
-      const finishInstallation = () => {
-        completed();
-        resolve();
-      };
-      mount = () => {
-        factory(
-          { terminal: { rows: 20 }, requestRender: vi.fn() } as never,
-          plainTheme as Theme,
-          {} as never,
-          finishInstallation,
-        );
-        options?.onHandle?.({ setHidden: vi.fn() } as unknown as OverlayHandle);
-      };
-    }),
+  const custom = vi.fn(
+    (factory: Parameters<CustomUI>[0], options?: Parameters<CustomUI>[1]) =>
+      new Promise<void>((resolve) => {
+        const finishInstallation = () => {
+          completed();
+          resolve();
+        };
+        mount = () => {
+          factory(
+            { terminal: { rows: 20 }, requestRender: vi.fn() } as never,
+            plainTheme as Theme,
+            {} as never,
+            finishInstallation,
+          );
+          options?.onHandle?.({ setHidden: vi.fn() } as unknown as OverlayHandle);
+        };
+      }),
   );
-  const ui = new SandboxStartupUI(() => ({
-    mode: "tui", hasUI: true, cwd: "/project", ui: { custom, notify: vi.fn() },
-  }) as unknown as ExtensionContext);
+  const ui = new SandboxStartupUI(
+    () =>
+      ({
+        mode: "tui",
+        hasUI: true,
+        cwd: "/project",
+        ui: { custom, notify: vi.fn() },
+      }) as unknown as ExtensionContext,
+  );
   const operation = vi.fn(async () => "ready");
   const cancellation = new AbortController();
   const pending = ui.run("Starting", operation, cancellation.signal);

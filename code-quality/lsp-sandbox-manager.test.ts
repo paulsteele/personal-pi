@@ -20,7 +20,7 @@ const clients = vi.hoisted(
 		[] as {
 			start: ReturnType<typeof vi.fn>;
 			stop: ReturnType<typeof vi.fn>;
-		check: ReturnType<typeof vi.fn>;
+			check: ReturnType<typeof vi.fn>;
 		}[],
 );
 const constructedRoutes = vi.hoisted(() => [] as LspRoute[]);
@@ -193,7 +193,10 @@ it("does not launch saved routes when the approved profile is disabled", async (
 
 it("migrates realpath-resolved commands from the former private managed installation", async () => {
 	const fixture = await approvedProfileFixture();
-	const managedDirectory = join(fixture.agentDir, "extensions/code-quality/tools/pyright/1.1.414/darwin-arm64");
+	const managedDirectory = join(
+		fixture.agentDir,
+		"extensions/code-quality/tools/pyright/1.1.414/darwin-arm64",
+	);
 	await mkdir(managedDirectory, { recursive: true });
 	const target = join(managedDirectory, "pyright-langserver.js");
 	await writeFile(target, "legacy managed server");
@@ -213,7 +216,10 @@ it("migrates realpath-resolved commands from the former private managed installa
 	};
 	const result = await fixture.manager.validate(route, fixture.project, new AbortController().signal);
 	expect(result.ready).toBe(true);
-	expect(constructedRoutes[0]).toMatchObject({ command: "/opt/pi-tools/pyright/current/server", version: "1.1.415" });
+	expect(constructedRoutes[0]).toMatchObject({
+		command: "/opt/pi-tools/pyright/current/server",
+		version: "1.1.415",
+	});
 	expect(constructedRoutes[0]?.root).toBe(route.root);
 	await fixture.manager.stop();
 });
@@ -237,7 +243,10 @@ it("validates a representative Python file through the sandbox's complete diagno
 	});
 	expect(clients).toHaveLength(1);
 	expect(clients[0]!.start).toHaveBeenCalledTimes(1);
-	expect(fixture.sandbox.session.filesystem.canonical).toHaveBeenCalledWith("/workspace", expect.any(AbortSignal));
+	expect(fixture.sandbox.session.filesystem.canonical).toHaveBeenCalledWith(
+		"/workspace",
+		expect.any(AbortSignal),
+	);
 	expect(fixture.retirementListeners.size).toBe(1);
 	expect(clients[0]!.check).toHaveBeenCalledWith("/workspace/app.py", "python", "", expect.any(AbortSignal));
 	await fixture.manager.stop();
@@ -341,7 +350,12 @@ it("validates relative routes under the mapped project root instead of the start
 	const result = await fixture.manager.validate(fixture.route, fixture.project, new AbortController().signal);
 	expect(result.ready).toBe(true);
 	expect(fixture.sandbox.guestPath).toHaveBeenCalledWith("/host/project");
-	expect(clients[0]!.check).toHaveBeenCalledWith("/workspace/project/app.py", "python", "", expect.any(AbortSignal));
+	expect(clients[0]!.check).toHaveBeenCalledWith(
+		"/workspace/project/app.py",
+		"python",
+		"",
+		expect.any(AbortSignal),
+	);
 	await fixture.manager.stop();
 });
 
@@ -360,7 +374,9 @@ it("cancels a validation-owned pending launch without publishing a ready server"
 	await fixture.manager.stop();
 	expect(clients[0]!.stop).toHaveBeenCalledOnce();
 	expect(fixture.manager.header.some((status) => status.phase === "ready")).toBe(false);
-	expect((await fixture.manager.validate(fixture.route, fixture.project, new AbortController().signal)).ready).toBe(true);
+	expect(
+		(await fixture.manager.validate(fixture.route, fixture.project, new AbortController().signal)).ready,
+	).toBe(true);
 	expect(clients).toHaveLength(2);
 	await fixture.manager.stop();
 });

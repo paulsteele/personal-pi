@@ -2,7 +2,7 @@
 
 Pi remains on the host, but its built-in file tools, Bash shell, and quality language-server subprocesses execute in a per-session Podman development container. Manually configured project host-command rules can route selected executable invocations to the host. Sandbox failures block guest tool execution; no auto mode, off switch, or automatic host fallback exists. The explicitly authorized web and Plannotator package tools retain their host execution, as described under Integration. The initial writable bind is the canonical directory where the session starts.
 
-This is tool/process isolation, not whole-Pi isolation. Pi and loaded extensions are trusted host code. Writable binds expose real host files to modification/deletion. Internet access permits uploads. Sensitive-file and external-effect guards are best-effort command/path recognition, not secret exclusion from a raw bind.
+This is tool/process isolation, not whole-Pi isolation. Pi and loaded extensions are trusted host code. Writable binds expose real host files to modification/deletion. Internet access permits uploads. Commands are not screened for sensitive files, external effects, or suspicious shell syntax. The sandbox boundary and explicit policy denies remain enforced, but path/command deny recognition is best-effort rather than secret exclusion from a raw bind.
 
 ## Environment definitions
 
@@ -27,12 +27,24 @@ Three private configuration files extend the selected base without rewriting it:
 - `{repos|projects}/<id>/devcontainer/tools.json`: project tool additions and catalog-version overrides.
 - `{repos|projects}/<id>/devcontainer/project-environment.json`: project SDK/native-library installation recipes, companion files, explicit environment overrides, and ordered container lifecycle additions.
 
-Build sequence:
-1. Resolve the tool versions listed in `tools.json` against the extension's pinned installation catalog. Build each server/runtime into a reusable image containing its files (a **tool artifact**).
-2. Copy those files into the selected base with required native libraries. This **tool-equipped base image** is shared by projects with identical base/tool inputs.
-3. Apply private project installations last. Different compatible bases can still reuse the tool artifacts from step 1.
+Provisioning sequence:
+1. Resolve catalog versions from `tools.json` and build independently cached server/runtime artifact images.
+2. Add sandbox infrastructure and compatible native libraries to the selected project base, then apply ordinary private project installations. These image builds do not receive LSP artifacts or their private runtimes.
+3. Mount each catalog artifact's versioned directory read-only from its artifact image to `/opt/pi-tools/<id>/<version>` in the project container. Language servers run in the project container, where they can access project source, dependencies, and application toolchains.
 
-A backend probe selects linked copies when supported, otherwise ordinary copies. Image reuse does not grant host mounts or share running containers.
+A tool-only artifact change reuses the project image when native libraries and project recipes are unchanged. It still requires an approved session recreation and restarts language servers. Private LSP runtimes do not replace application executables or the application's global PATH. Server caches belong in writable home/temp/cache locations, not in the artifact mounts.
+
+Startup probes the active Podman backend for immutable image subpath mounts, effective read-only enforcement, inspect provenance, and checkpoint exclusion. Effective read-only checks accept an explicit `ro` mount or Podman/Buildah's lowerdir-only overlay with no writable upper/work layer; the capability probe also attempts writes as root. Unsupported backends fail clearly; there is no copy or engine-storage bind fallback. Tool mounts are internal provisioning authority, not host access grants. `/sandbox status` reports them separately. Host binds cannot overlap `/opt/pi-tools`.
+
+Older layered sessions with copied tools offer the existing approved rebuild on resume. Rebuilds preserve host binds but discard container-local changes; declining leaves the prior record/container unchanged. Resuming a session or recreating its container after a host mount change reattaches the saved artifact images, including for `commit --include-volumes=false` checkpoints. Missing saved images offer rebuild approval during startup, without requiring a ready session; denial or failed replacement preserves the saved record. Restoration remains an alternative, never silent version substitution. Pruned sessions retain saved catalog artifact identities while recreating their application image. Session pruning does not prune shared artifact images.
+
+For an explicit local backend check, first pull a compatible Linux image with `sh`, `sleep`, and `awk`, then run:
+
+```sh
+bun run --cwd pi-permission-system test:mounted-tools docker.io/library/alpine:3.23
+```
+
+This synthetic probe verifies mount behavior, not real language-server compatibility. A user-run probe passed on Podman 6.0.2 with a macOS ARM64 client and Linux ARM64 server; the full native-library matrix remains unverified.
 
 The extension's built-in server/runtime installation catalog targets Debian 12/13, Ubuntu 22.04/24.04, and Alpine 3.21/3.22/3.23 on ARM64/x86-64. Its download checksums and platform-specific installation recipes are pinned; the complete real-container matrix remains unverified in the implementation environment. Alpine Node is built from pinned source, so a cold build can be substantial. Bash, Python 3, ripgrep, Git, certificates, and required native libraries are added inside the derived image. Application runtimes are not replaced by the private LSP runtimes.
 
@@ -48,7 +60,7 @@ The extension's built-in server/runtime installation catalog targets Debian 12/1
 }
 ```
 
-Legacy `auto` configuration requires explicit migration through setup; its classifier settings never authorize sandbox operations. Existing explicit denies remain policy restrictions. Ordinary container-local installs, chmod, cleanup, and destructive project operations do not prompt. Recognizable credential and external-effect operations retain human approval.
+Legacy `auto` configuration requires explicit migration through setup; its classifier settings never authorize sandbox operations. Existing explicit denies remain policy restrictions. Operations within granted capabilities do not prompt, including installs, destructive project operations, credential-file access, remote mutations, and unresolved shell expansions. New host access and sandbox provisioning retain separate operator authorization. Delegated PR source disclosure is distinct from guest execution: recognized sensitive sources require fresh parent-owned disclosure approval, and sensitive local scans are refused without prompting. An approved bind alone does not authorize sending credentials to a provider.
 
 ## Setup and controls
 
@@ -116,7 +128,9 @@ Host stdout/stderr and stdin stream through the bridge; nonzero native exit code
 
 The working directory must map through an approved bind to a directory inside the current host project. Arguments expand in the guest and are passed as argv without host shell reparsing; arbitrary argument paths are not translated. Prefer project-relative files shared by the workspace bind. Guest `$HOME`, guest-only temporary files, and guest process-substitution `/dev/fd` paths do not name equivalent host resources. Host execution inherits the Pi host environment/toolchain; only explicit command-prefix assignments are forwarded from the guest. PATH, HOME, shell initialization/options, and Node/Python/dynamic-loader lookup overrides are rejected for native invocations.
 
-With any host rules configured, dynamic executable names, shell function definitions, and opaque wrappers (`eval`, `source`, `bash -c`, `env`, `sudo`, `command`, and related forms) are rejected with instructions to use direct calls. Code inside external scripts is not rewritten: a guest script stays guest, while an authorized native script and its children stay host. Other literal commands run in the container; failure never retries them on the host. Existing explicit-deny and sensitive/external-effect preflight checks remain effective, but are not comprehensive controls over arbitrary host arguments or script behavior.
+Host routing rewrites only statically matched command names. Dynamic or escaped executable names, function definitions and calls to functions declared in the same shell input, and command names inside opaque strings or wrapper arguments (`eval`, `source`, `bash -c`, `env`, `sudo`, `command`, and related forms) are left to guest Bash rather than rejected. Separately visible literal commands in the same input can still route natively. A wrapper itself routes natively if explicitly configured as a host executable. Inputs the parser cannot fully parse are passed unchanged to guest Bash without partial host routing; Bash reports any syntax errors.
+
+Code inside external scripts is not rewritten: a guest script stays guest, while an authorized native script and its children stay host. Other literal commands run in the container; failure never retries them on the host. Existing explicit-deny checks remain effective, but are not comprehensive controls over arbitrary host arguments or script behavior. Sensitive-file and external-effect operations do not receive additional approval prompts.
 
 **These are trusted host exceptions, not isolation.** A rule authorizes everything its executable can do with any arguments, including modified project scripts, MSBuild targets, package restores, tests, Xcode phases, host files, network access, and host credentials. File tools and LSPs remain container-backed. Native script/command mutations are not covered by the explicit edit/write quality gate. Use a dedicated account or machine if those host privileges are unacceptable.
 
@@ -124,9 +138,13 @@ With any host rules configured, dynamic executable names, shell function definit
 
 The model-only `request_host_mount` tool accepts a host `path`, optional guest `destination`, `access` (`ro`/`rw`), and `reason`. The broker displays canonical source, destination, mode, and restart impact. Mount grants persist privately for the Pi session, including resume, but new sessions/forks do not inherit them. Configuration identity never grants access to another worktree or shared Git metadata.
 
+Failed guest read-access checks report the resolved guest path, guest existence/readability, and whether the checked host path exists as a file, directory, or other entry. Approved mounts translate guest paths to their host sources; unmounted paths are checked at the same absolute host path. Host metadata failures report an unknown status rather than absence. These diagnostics inspect metadata only, never read host contents or grant access. The error instructs the model to call `request_host_mount` for an existing unmounted host file or directory, request read-only access, and retry after human approval; already-mounted paths point to permissions or missing-path troubleshooting instead.
+
 Reload and resume validate each approved source's canonical path, kind, and device/inode identity. If a regular file or directory at the same canonical path was replaced (for example, a configuration file saved atomically), startup asks for renewed approval. Approval retains its destination and access mode, checkpoints container-local state, and recreates the container with the replacement bind. Denial leaves stored authority unchanged and the sandbox unavailable. Missing sources, changed kinds, and redirected symlinks remain blocked.
 
-Mount changes stop active container processes, checkpoint container-local changes without including bind volumes, and recreate the devcontainer with the approved topology. Normal resume reuses the stopped container and its start/attach lifecycle; recreation runs new-container creation hooks, which should be idempotent. Private checkpoint images can contain copied sensitive data and must never be published.
+Mount changes stop active container processes, checkpoint container-local changes without including bind volumes, and recreate the devcontainer with the approved topology. Session container stops use zero graceful-stop delay and a separate 15-second command timeout during rebuild, resume recreation, rollback cleanup, and shutdown. Stop failures identify the container and retain Podman stderr and termination details.
+
+During a mount update, progress reports stopping and checkpointing separately. Both commands follow operation cancellation. Normal resume reuses the stopped container and its start/attach lifecycle; recreation runs new-container creation hooks, which should be idempotent. Private checkpoint images can contain copied sensitive data and must never be published.
 
 LSP installation belongs to sandbox provisioning. `/quality lsp setup` only configures exceptional analysis settings against already provisioned servers; it never installs tools or rebuilds the container. Trusted projects with quality enabled infer ordinary routes automatically. Project SDKs/dependencies still belong in the selected base or private project supplement.
 
@@ -170,7 +188,7 @@ The following installed npm package tools are authorized to execute on the host 
 | --- | --- | --- |
 | `@juicesharp/rpiv-ask-user-question` | `ask_user_question` | `index.ts` |
 | `pi-web-access` | `web_search`, `source_check`, `fetch_content`, `get_search_content` | `index.ts`, `dist/index.js` |
-| `@plannotator/pi-extension` | `plannotator`, `plannotator_submit_plan`, `plannotator_mark_done` | `index.ts` |
+| `@plannotator/pi-extension` | `plannotator`, `plannotator_submit_plan`, `plannotator_mark_done` | Package root (`./`), `index.ts` |
 
 These exceptions require matching package provenance, entry point, and tool name; versioned and unversioned npm specifications are accepted. They do not activate tools disabled by their package or current UI/phase settings. Explicit tool denies and cancellation still apply, and unreadable/invalid permission settings fail closed. Sandbox migration is not required for these host tools. Other extensions with the same names, unlisted package capabilities, and unknown host/MCP tools remain blocked.
 

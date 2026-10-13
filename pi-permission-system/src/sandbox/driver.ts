@@ -23,7 +23,17 @@ import {
   verifyRuntimeInventory,
 } from "./tool-build-runtime.ts";
 import { authorizeBuildInputs } from "./build-inputs.ts";
-import { resolveToolCopyMode } from "./tool-copy-capability.ts";
+import { requireToolImageMountCapability } from "./tool-mount-capability.ts";
+import {
+  toolImageMountsSchema,
+  SavedToolArtifactUnavailableError,
+  validateToolImageInventory,
+  verifyToolMountDestinations,
+  type ToolImageMount,
+} from "./tool-image-mounts.ts";
+import { randomUUID } from "node:crypto";
+import type { ToolEngineOutput } from "./tool-build-runtime.ts";
+import type { ImageDetails } from "./metadata-policy.ts";
 
 const execute = promisify(execFile);
 
@@ -50,6 +60,26 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+async function verifySavedToolArtifact(
+  mount: ToolImageMount,
+  run: ToolEngineOutput,
+  signal?: AbortSignal,
+): Promise<void> {
+  let artifact: ImageDetails;
+  try {
+    const inspectionOutput = await run(["inspect", "--type", "image", mount.imageId], signal);
+    const inspectedImages = JSON.parse(inspectionOutput) as unknown[];
+    artifact = imageDetailsSchema.parse(inspectedImages[0]);
+  } catch (error) {
+    signal?.throwIfAborted();
+    throw new SavedToolArtifactUnavailableError(mount, error);
+  }
+  if (artifact.Id !== mount.imageId) {
+    throw new Error(`Tool artifact inspection returned a different identity: ${mount.toolId}`);
+  }
+  validateImageIsolation(artifact);
+}
+
 export interface PreparedEnvironment {
   container: string;
   image: string;
@@ -58,6 +88,7 @@ export interface PreparedEnvironment {
   configuration: Record<string, unknown>;
   remoteEnvironment?: Record<string, string>;
   toolInventory?: ToolInventory;
+  toolImageMounts?: ToolImageMount[];
 }
 
 export async function createDevcontainer(options: {
@@ -77,6 +108,7 @@ export async function createDevcontainer(options: {
   startupTimeoutMs?: number;
   cacheDirectory?: string;
   checkpointInventory?: ToolInventory;
+  checkpointToolImageMounts?: ToolImageMount[];
 }): Promise<PreparedEnvironment> {
   options.progress?.("Preparing devcontainer configuration…\n");
   await authorizeBuildInputs({
@@ -279,6 +311,7 @@ export async function createDevcontainer(options: {
       timeoutMs: args[0] === "build" ? options.buildTimeoutMs : options.startupTimeoutMs,
     });
   let toolInventory = options.checkpointInventory;
+  let toolImageMounts = options.checkpointToolImageMounts;
   const toolEngine = (args: string[], signal?: AbortSignal) => {
     const isImageBuild = args[0] === "build";
     const timeoutMs = isImageBuild ? (options.buildTimeoutMs ?? 1_800_000) : 120_000;
@@ -286,6 +319,16 @@ export async function createDevcontainer(options: {
   };
   let createdContainer: string | undefined;
   try {
+    if (toolImageMounts !== undefined) {
+      toolImageMounts = toolImageMountsSchema.parse(toolImageMounts);
+      if (!toolInventory) {
+        throw new Error("Mounted tools require their saved tool inventory");
+      }
+      validateToolImageInventory(toolImageMounts, toolInventory);
+      for (const mount of toolImageMounts) {
+        await verifySavedToolArtifact(mount, toolEngine, options.signal);
+      }
+    }
     if (options.checkpointImage) {
       delete definition.build;
       delete definition.dockerFile;
@@ -345,10 +388,13 @@ export async function createDevcontainer(options: {
       if (!options.cacheDirectory) {
         throw new Error("Layered provisioning requires a private image cache directory");
       }
-      options.progress?.("Resolving shared tooling artifacts and equipped base…\n");
+      options.progress?.("Resolving shared tooling artifacts and infrastructure image…\n");
       const approvedMountArguments = options.mounts.map(mountArgument);
       const platform = await inspectToolPlatform({
-        run: toolEngine, imageId: image.Id, signal: options.signal, approvedMountArguments,
+        run: toolEngine,
+        imageId: image.Id,
+        signal: options.signal,
+        approvedMountArguments,
       });
       const ports = createToolBuildPorts({
         directory: options.cacheDirectory,
@@ -356,7 +402,7 @@ export async function createDevcontainer(options: {
         approvedMountArguments,
       });
       const builderImageId = await ports.resolveBuilder(platform, options.signal);
-      const copyMode = await resolveToolCopyMode({
+      await requireToolImageMountCapability({
         directory: options.cacheDirectory,
         builderImageId,
         ports,
@@ -370,8 +416,11 @@ export async function createDevcontainer(options: {
         platform,
         layers: options.resolved.layers,
         cacheDirectory: options.cacheDirectory,
-        copyMode,
         ports,
+        savedTools:
+          toolImageMounts !== undefined && toolInventory
+            ? { inventory: toolInventory, mounts: toolImageMounts }
+            : undefined,
         signal: options.signal,
         report: (text) => options.progress?.(`${text}\n`),
       });
@@ -381,7 +430,31 @@ export async function createDevcontainer(options: {
         )[0],
       );
       toolInventory = provisioned.inventory;
+      toolImageMounts = provisioned.toolImageMounts;
       validateImageIsolation(image, options.mounts.map(mountArgument));
+    }
+    if (options.resolved.layers && options.checkpointImage && toolImageMounts === undefined) {
+      throw new Error(
+        "Approve a session rebuild to replace legacy copied tools with image mounts. The checkpoint remains unchanged.",
+      );
+    }
+    if (toolImageMounts !== undefined) {
+      toolImageMounts = toolImageMountsSchema.parse(toolImageMounts);
+      if (!toolInventory) {
+        throw new Error("Mounted tools require their saved tool inventory");
+      }
+      validateToolImageInventory(toolImageMounts, toolInventory);
+      for (const mount of toolImageMounts) {
+        await verifySavedToolArtifact(mount, toolEngine, options.signal);
+      }
+      await verifyToolMountDestinations({
+        run: toolEngine,
+        imageId: image.Id,
+        mounts: toolImageMounts,
+        containerName: `pi-tool-destinations-${randomUUID()}`,
+        signal: options.signal,
+      });
+      authority.toolImageMounts = toolImageMounts;
     }
     authority.images.push(image.Id);
     definition.image = image.Id;
@@ -408,6 +481,7 @@ export async function createDevcontainer(options: {
       JSON.parse(await podmanOutput(["inspect", result.containerId], options.signal))[0],
       options.sessionId,
       options.mounts,
+      toolImageMounts,
     );
     options.progress?.("Loading container environment…\n");
     const remoteEnvironmentOutput = await run([
@@ -435,6 +509,7 @@ export async function createDevcontainer(options: {
         container: result.containerId,
         user: result.remoteUser || image.Config.User || "root",
         inventory: toolInventory,
+        toolImageMounts,
         remoteEnvironment,
         workspace: result.remoteWorkspaceFolder || definition.workspaceFolder!,
         signal: options.signal,
@@ -448,6 +523,7 @@ export async function createDevcontainer(options: {
       configuration: result.mergedConfiguration ?? {},
       remoteEnvironment,
       ...(toolInventory ? { toolInventory } : {}),
+      ...(toolImageMounts !== undefined ? { toolImageMounts } : {}),
     };
   } catch (error) {
     if (createdContainer && createdContainer !== options.previousContainer) {

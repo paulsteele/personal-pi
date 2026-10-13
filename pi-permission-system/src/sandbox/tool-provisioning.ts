@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import {
-  equippedBaseRecipe,
+  infrastructureImageRecipe,
   projectImageRecipe,
   type GeneratedImageRecipe,
   type ToolArtifactImage,
@@ -9,7 +9,7 @@ import { nativeToolDependencies, toolArtifactRecipe } from "./tool-artifacts.ts"
 import {
   buildContentKey,
   ensureCachedImage,
-  equippedBaseKey,
+  infrastructureImageKey,
   projectImageKey,
   toolArtifactKey,
 } from "./tool-cache.ts";
@@ -19,6 +19,12 @@ import type { ImageToolInstallation } from "./image-tool-recipe.ts";
 
 import { toolInventorySchema, type ToolInventory } from "./tool-inventory.ts";
 export { toolInventorySchema, type ToolInventory } from "./tool-inventory.ts";
+import {
+  toolImageMount,
+  SavedToolArtifactUnavailableError,
+  validateToolImageInventory,
+  type ToolImageMount,
+} from "./tool-image-mounts.ts";
 
 export interface ToolBuildPorts {
   inspect(imageId: string, signal?: AbortSignal): Promise<string | undefined>;
@@ -33,17 +39,47 @@ export async function provisionEnvironmentImage(options: {
   platform: ToolPlatform;
   layers: EnvironmentLayers;
   cacheDirectory: string;
-  copyMode: "linked" | "ordinary";
   ports: ToolBuildPorts;
+  savedTools?: { inventory: ToolInventory; mounts: readonly ToolImageMount[] };
   signal?: AbortSignal;
   report?: (text: string) => void;
-}): Promise<{ imageId: string; inventory: ToolInventory }> {
+}): Promise<{ imageId: string; inventory: ToolInventory; toolImageMounts: ToolImageMount[] }> {
   const platform = resolveToolPlatform(options.platform);
   const platformKey = toolPlatformKey(platform);
+  const savedTools = options.savedTools;
+  if (savedTools) {
+    validateToolImageInventory(savedTools.mounts, savedTools.inventory);
+    if (savedTools.inventory.platform !== platformKey) {
+      throw new Error("Saved tooling platform changed; approve a session rebuild");
+    }
+    const catalogEntries = options.layers.tools.filter((resolved) => resolved.catalog);
+    if (
+      catalogEntries.length !== savedTools.mounts.length ||
+      catalogEntries.some(
+        (resolved) =>
+          !savedTools.mounts.some(
+            (mount) => mount.toolId === resolved.id && mount.version === resolved.catalog!.version,
+          ),
+      )
+    ) {
+      throw new Error("Saved tooling differs from the definition; approve a session rebuild");
+    }
+    for (const mount of savedTools.mounts) {
+      if ((await options.ports.inspect(mount.imageId, options.signal)) !== mount.imageId) {
+        throw new SavedToolArtifactUnavailableError(
+          mount,
+          "Saved immutable image inspection failed",
+        );
+      }
+      await options.ports.validateImage(mount.imageId, options.signal);
+    }
+  }
   const installationIds = new Set(options.layers.tools.map((tool) => tool.id));
   for (const installation of options.layers.projectEnvironment.installations) {
     if (installationIds.has(installation.id)) {
-      throw new Error(`Duplicate installation ID across profiles and project environment: ${installation.id}`);
+      throw new Error(
+        `Duplicate installation ID across profiles and project environment: ${installation.id}`,
+      );
     }
     installationIds.add(installation.id);
   }
@@ -69,6 +105,14 @@ export async function provisionEnvironmentImage(options: {
     const tool = resolved.catalog;
     if (!tool) {
       throw new Error(`Missing resolved catalog entry: ${resolved.id}`);
+    }
+    if (savedTools) {
+      const savedInventoryEntry = savedTools.inventory.tools.find((entry) => entry.id === tool.id);
+      if (!savedInventoryEntry) {
+        throw new Error(`Saved tool inventory entry unavailable: ${tool.id}`);
+      }
+      inventoryEntries.push(savedInventoryEntry);
+      continue;
     }
     const dependencies = resolved.dependencies.map((id) => {
       const artifact = artifactById.get(id);
@@ -113,29 +157,25 @@ export async function provisionEnvironmentImage(options: {
     });
   }
   const nativeDependenciesScript = nativeToolDependencies(platform);
-  const equippedRecipe = equippedBaseRecipe({
+  const infrastructureRecipe = infrastructureImageRecipe({
     baseImageId: options.baseImageId,
     imageUser: options.imageUser,
-    artifacts,
     nativeDependenciesScript,
-    copyMode: options.copyMode,
   });
-  const equipped = await ensureCachedImage({
+  const infrastructure = await ensureCachedImage({
     directory: join(options.cacheDirectory, "images"),
-    kind: "equipped",
-    key: equippedBaseKey({
+    kind: "infrastructure",
+    key: infrastructureImageKey({
       baseImageId: options.baseImageId,
       platformKey,
       nativeDependenciesRevision: buildContentKey(nativeDependenciesScript),
-      artifactImageIds: artifacts.map((artifact) => artifact.imageId),
-      assemblyRevision: buildContentKey(equippedRecipe),
-      copyMode: options.copyMode,
+      assemblyRevision: buildContentKey(infrastructureRecipe),
     }),
     signal: options.signal,
     report: options.report,
     ports: {
       inspect: options.ports.inspect,
-      build: (name, signal) => options.ports.build(equippedRecipe, name, signal),
+      build: (name, signal) => options.ports.build(infrastructureRecipe, name, signal),
       verify: options.ports.validateImage,
     },
   });
@@ -144,14 +184,16 @@ export async function provisionEnvironmentImage(options: {
   const installedIds = new Set(inventoryEntries.map((tool) => tool.id));
   for (const installation of installations) {
     if (installedIds.has(installation.id)) {
-      throw new Error(`Duplicate installation ID across profiles and project environment: ${installation.id}`);
+      throw new Error(
+        `Duplicate installation ID across profiles and project environment: ${installation.id}`,
+      );
     }
     installedIds.add(installation.id);
   }
-  let imageId = equipped.imageId;
+  let imageId = infrastructure.imageId;
   if (installations.length || Object.keys(project.files).length) {
     const recipe = projectImageRecipe({
-      equippedImageId: equipped.imageId,
+      infrastructureImageId: infrastructure.imageId,
       imageUser: options.imageUser,
       installations,
       companionFiles: project.files,
@@ -160,7 +202,7 @@ export async function provisionEnvironmentImage(options: {
       directory: join(options.cacheDirectory, "images"),
       kind: "project",
       key: projectImageKey({
-        equippedImageId: equipped.imageId,
+        infrastructureImageId: infrastructure.imageId,
         recipe: recipe.containerfile,
         files: recipe.files,
       }),
@@ -192,5 +234,12 @@ export async function provisionEnvironmentImage(options: {
     platform: platformKey,
     tools: inventoryEntries,
   });
-  return { imageId, inventory };
+  let toolImageMounts: ToolImageMount[];
+  if (savedTools) {
+    toolImageMounts = [...savedTools.mounts];
+  } else {
+    toolImageMounts = artifacts.map((artifact) => toolImageMount(artifact.tool, artifact.imageId));
+  }
+  validateToolImageInventory(toolImageMounts, inventory);
+  return { imageId, inventory, toolImageMounts };
 }

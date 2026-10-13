@@ -40,8 +40,40 @@ import {
 } from "./host-command-runner.ts";
 import { sessionRecordSchema, type SandboxSessionRecord } from "./session-record.ts";
 import { pruneInactiveSessions, removeSupersededContainer } from "./prune.ts";
+import { SavedToolArtifactUnavailableError } from "./tool-image-mounts.ts";
 
 export type { SandboxSessionRecord } from "./session-record.ts";
+
+async function stopSessionContainer(container: string, signal?: AbortSignal): Promise<void> {
+  const stopCommandTimeoutMs = 15_000;
+  try {
+    await podmanOutput(["stop", "--time=0", container], signal, undefined, stopCommandTimeoutMs);
+  } catch (error) {
+    signal?.throwIfAborted();
+    const stopCommandError = error as Error & {
+      stderr?: string;
+      killed?: boolean;
+      signal?: string;
+      code?: string | number;
+    };
+    const stopFailureDetails = [
+      stopCommandError.stderr?.trim(),
+      stopCommandError.killed
+        ? `Stop command terminated (timeout budget ${stopCommandTimeoutMs}ms)`
+        : undefined,
+      stopCommandError.signal ? `Signal: ${stopCommandError.signal}` : undefined,
+      stopCommandError.code !== undefined ? `Exit code: ${stopCommandError.code}` : undefined,
+    ]
+      .filter(Boolean)
+      .join("; ");
+    throw new Error(
+      `Devcontainer stop failed: ${container}. ${stopFailureDetails || stopCommandError.message}`,
+      {
+        cause: error,
+      },
+    );
+  }
+}
 
 async function restartPreviousContainer(previousContainer: string): Promise<void> {
   try {
@@ -91,6 +123,7 @@ export class SandboxSession {
     this.filesystem = new GuestFilesystem(
       () => this.environment,
       (processOptions) => this.execute(processOptions),
+      { mounts: () => this.mounts },
     );
   }
 
@@ -126,9 +159,11 @@ export class SandboxSession {
   private withStartup<T>(
     title: string,
     operation: (progress: SandboxStartupProgress) => Promise<T>,
+    callerSignal?: AbortSignal,
   ): Promise<T> {
+    const operationSignal = this.lifecycleSignal(callerSignal);
     return this.options.startup
-      ? this.options.startup.run(title, operation, this.executionSignal(this.options.signal))
+      ? this.options.startup.run(title, operation, operationSignal)
       : operation(silentStartupProgress);
   }
 
@@ -206,7 +241,26 @@ export class SandboxSession {
       this.record = record;
       this.recordRevision = stored.revision;
       this.recordPublished = true;
-      this.record = await this.resumeContainer(record, mounts, startupSignal, progress);
+      try {
+        this.record = await this.resumeContainer(record, mounts, startupSignal, progress);
+      } catch (error) {
+        if (!(error instanceof SavedToolArtifactUnavailableError)) {
+          throw error;
+        }
+        this.record = undefined;
+        this.recordPublished = false;
+        startupSignal.throwIfAborted();
+        const approved = await this.options.confirm(
+          `${error.message}\nRebuild this session using its validated definition and saved host binds? Container-local changes will be discarded.`,
+          startupSignal,
+        );
+        startupSignal.throwIfAborted();
+        if (!approved) {
+          throw error;
+        }
+        this.record = await this.resumeContainer(record, mounts, startupSignal, progress, true);
+        this.recordPublished = true;
+      }
     } else {
       const privateStorage = sandboxStorageRoot(this.options.agentDir);
       await ensurePrivateDirectory(privateStorage);
@@ -289,7 +343,9 @@ export class SandboxSession {
       };
     }
     const declaredPorts = devcontainerPorts(this.options.resolved.definition.forwardPorts ?? []);
-    const requiresPortApproval = declaredPorts.some((port) => !this.record?.approvedPorts?.includes(port));
+    const requiresPortApproval = declaredPorts.some(
+      (port) => !this.record?.approvedPorts?.includes(port),
+    );
     if (requiresPortApproval) {
       const approvedPortForwarding = await this.options.confirm(
         `Expose these devcontainer ports on host loopback only? ${declaredPorts.join(", ")}`,
@@ -317,7 +373,7 @@ export class SandboxSession {
         previousRecord &&
         this.record.environment.container !== previousRecord.environment.container
       ) {
-        await podmanOutput(["stop", this.record.environment.container]).catch(() => {});
+        await stopSessionContainer(this.record.environment.container).catch(() => {});
         this.record = previousRecord;
         if (previousRecord.containerPrunedAtUnixMs === undefined) {
           await restartPreviousContainer(previousRecord.environment.container);
@@ -340,12 +396,14 @@ export class SandboxSession {
     mounts: MountGrant[],
     signal: AbortSignal,
     progress: SandboxStartupProgress,
+    approvedArtifactRebuild = false,
   ): Promise<SandboxSessionRecord> {
     const requiresMountRecreation = mounts.some(
       (mount, index) => mount.identity !== record.mounts[index].identity,
     );
     const containerWasPruned = record.containerPrunedAtUnixMs !== undefined;
-    const toolingChanged = record.definitionRevision !== this.options.resolved.revision;
+    const toolingChanged =
+      approvedArtifactRebuild || record.definitionRevision !== this.options.resolved.revision;
     const requiresNewContainer = requiresMountRecreation || containerWasPruned || toolingChanged;
     const generation = record.generation + (requiresNewContainer ? 1 : 0);
     let checkpointImage =
@@ -357,10 +415,11 @@ export class SandboxSession {
         );
       } else if (toolingChanged) {
         progress.stage("Stopping previous container for changed tooling…");
-        await podmanOutput(["stop", record.environment.container], signal);
+        await stopSessionContainer(record.environment.container, signal);
       } else if (requiresMountRecreation) {
+        progress.stage("Stopping the previous devcontainer…");
+        await stopSessionContainer(record.environment.container, signal);
         progress.stage("Checkpointing container-local state before rebinding replaced sources…");
-        await podmanOutput(["stop", record.environment.container], signal);
         checkpointImage = (
           await podmanOutput(
             ["commit", "--include-volumes=false", record.environment.container],
@@ -374,7 +433,8 @@ export class SandboxSession {
         cacheDirectory: join(sandboxStorageRoot(this.options.agentDir), "tool-cache"),
         buildTimeoutMs: this.options.buildTimeoutMs,
         startupTimeoutMs: this.options.startupTimeoutMs,
-        checkpointInventory: checkpointImage ? record.environment.toolInventory : undefined,
+        checkpointInventory: toolingChanged ? undefined : record.environment.toolInventory,
+        checkpointToolImageMounts: toolingChanged ? undefined : record.environment.toolImageMounts,
         mounts,
         privateStorage: sandboxStorageRoot(this.options.agentDir),
         sessionId: this.options.sessionId,
@@ -459,10 +519,21 @@ if record.exists():
     except ProcessLookupError:
         pass`;
     await runGuestProcess({
-      container: environment.container, user: environment.user, cwd: environment.workspace,
+      container: environment.container,
+      user: environment.user,
+      cwd: environment.workspace,
       command: ["python3", "-c", terminateRecordedGroup, processRecordPath],
-      timeoutMs: 5000, signal: AbortSignal.timeout(5000),
+      timeoutMs: 5000,
+      signal: AbortSignal.timeout(5000),
     });
+  }
+
+  private lifecycleSignal(callerSignal?: AbortSignal): AbortSignal {
+    return AbortSignal.any([
+      this.lifetime.signal,
+      ...(this.options.signal ? [this.options.signal] : []),
+      ...(callerSignal ? [callerSignal] : []),
+    ]);
   }
 
   private executionSignal(callerSignal?: AbortSignal): AbortSignal {
@@ -482,8 +553,11 @@ if record.exists():
     toolCallId?: string,
   ): Promise<MountGrant> {
     const operation = this.topologyQueue.then(() =>
-      this.withStartup("Updating devcontainer mounts", (progress) =>
-        this.changeMount(path, access, destination, reason, progress, signal, toolCallId),
+      this.withStartup(
+        "Updating devcontainer mounts",
+        (progress) =>
+          this.changeMount(path, access, destination, reason, progress, signal, toolCallId),
+        signal,
       ),
     );
     this.topologyQueue = operation.catch(() => {});
@@ -500,9 +574,7 @@ if record.exists():
     toolCallId?: string,
   ): Promise<MountGrant> {
     progress.stage("Validating requested host mount…");
-    const operationSignal = signal
-      ? AbortSignal.any([signal, this.lifetime.signal])
-      : this.lifetime.signal;
+    const operationSignal = this.lifecycleSignal(signal);
     operationSignal.throwIfAborted();
     const previous = this.record;
     if (!previous) {
@@ -539,21 +611,25 @@ if record.exists():
       throw new Error("Sandbox mount request became stale");
     }
     await validateMountIdentity(grant);
+    progress.stage("Stopping devcontainer language servers…");
     await this.retireGeneration();
     this.changing = true;
     this.options.changed?.();
     let replacementContainer: string | undefined;
     try {
+      progress.stage("Waiting for active guest processes…");
       await Promise.allSettled([...this.active]);
       operationSignal.throwIfAborted();
-      progress.stage("Checkpointing container-local state…");
+      progress.stage("Stopping the previous devcontainer…");
       await this.forwarders?.close();
-      await podmanOutput(["stop", previous.environment.container]);
-      const checkpoint = await podmanOutput([
-        "commit",
-        "--include-volumes=false",
-        previous.environment.container,
-      ]);
+      await stopSessionContainer(previous.environment.container, operationSignal);
+      operationSignal.throwIfAborted();
+      progress.stage("Checkpointing container-local state…");
+      const checkpoint = await podmanOutput(
+        ["commit", "--include-volumes=false", previous.environment.container],
+        operationSignal,
+      );
+      operationSignal.throwIfAborted();
       const generation = previous.generation + 1;
       const environment = await createDevcontainer({
         resolved: this.options.resolved,
@@ -561,6 +637,7 @@ if record.exists():
         buildTimeoutMs: this.options.buildTimeoutMs,
         startupTimeoutMs: this.options.startupTimeoutMs,
         checkpointInventory: previous.environment.toolInventory,
+        checkpointToolImageMounts: previous.environment.toolImageMounts,
         mounts: updatedMounts,
         privateStorage: sandboxStorageRoot(this.options.agentDir),
         sessionId: this.options.sessionId,
@@ -574,13 +651,15 @@ if record.exists():
           this.options.confirm(preview, operationSignal, toolCallId),
       });
       replacementContainer = environment.container;
+      progress.stage("Starting updated devcontainer port forwarders…");
       await this.startForwarders(environment);
       this.record = { ...previous, generation, mounts: updatedMounts, environment };
+      progress.stage("Saving updated host mounts…");
       await this.persist();
     } catch (error) {
       await this.forwarders?.close();
       if (replacementContainer) {
-        await podmanOutput(["stop", replacementContainer]).catch(() => {});
+        await stopSessionContainer(replacementContainer).catch(() => {});
       }
       this.record = previous;
       if (!this.lifetime.signal.aborted) {
@@ -599,6 +678,7 @@ if record.exists():
       this.record!.environment.container,
       (text) => progress.output(text),
     );
+    progress.stage("Devcontainer mounts updated.");
     return grant;
   }
 
@@ -627,8 +707,10 @@ if record.exists():
     publication?: { commit(): Promise<void>; rollback(): Promise<void> },
   ): Promise<void> {
     const operation = this.topologyQueue.then(() =>
-      this.withStartup("Rebuilding devcontainer", (progress) =>
-        this.replaceDefinition(resolved, progress, signal, publication),
+      this.withStartup(
+        "Rebuilding devcontainer",
+        (progress) => this.replaceDefinition(resolved, progress, signal, publication),
+        signal,
       ),
     );
     this.topologyQueue = operation.catch(() => {});
@@ -671,9 +753,7 @@ if record.exists():
         throw new Error(`Definition rebuild cannot change sandbox topology: ${field}`);
       }
     }
-    const operationSignal = signal
-      ? AbortSignal.any([signal, this.lifetime.signal])
-      : this.lifetime.signal;
+    const operationSignal = this.lifecycleSignal(signal);
     operationSignal.throwIfAborted();
     for (const mount of previous.mounts) {
       await validateMountIdentity(mount);
@@ -689,7 +769,7 @@ if record.exists():
       operationSignal.throwIfAborted();
       progress.stage("Stopping the previous devcontainer…");
       await this.forwarders?.close();
-      await podmanOutput(["stop", previous.environment.container], operationSignal);
+      await stopSessionContainer(previous.environment.container, operationSignal);
       operationSignal.throwIfAborted();
       const generation = previous.generation + 1;
       const environment = await createDevcontainer({
@@ -730,7 +810,7 @@ if record.exists():
       this.record = previous;
       await this.forwarders?.close();
       if (replacementContainer) {
-        await podmanOutput(["stop", replacementContainer]).catch(() => {});
+        await stopSessionContainer(replacementContainer).catch(() => {});
       }
       if (!this.lifetime.signal.aborted) {
         await restartPreviousContainer(previous.environment.container);
@@ -772,24 +852,34 @@ if record.exists():
   private async retireGeneration(): Promise<void> {
     this.drainingGeneration = true;
     this.executionGeneration.abort();
-    const results = await Promise.allSettled([...this.retirementListeners].map(async (listener) => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          Promise.resolve().then(listener),
-          new Promise<never>((_resolve, reject) => {
-            timer = setTimeout(() => reject(new Error("Sandbox service retirement timed out")), 20_000);
-          }),
-        ]);
-      } finally {
-        clearTimeout(timer);
-      }
-    }));
-    const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    const results = await Promise.allSettled(
+      [...this.retirementListeners].map(async (listener) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            Promise.resolve().then(listener),
+            new Promise<never>((_resolve, reject) => {
+              timer = setTimeout(
+                () => reject(new Error("Sandbox service retirement timed out")),
+                20_000,
+              );
+            }),
+          ]);
+        } finally {
+          clearTimeout(timer);
+        }
+      }),
+    );
+    const failures = results.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
     if (failures.length) {
       this.executionGeneration = new AbortController();
       this.drainingGeneration = false;
-      throw new AggregateError(failures.map((result) => result.reason), "Sandbox service retirement failed");
+      throw new AggregateError(
+        failures.map((result) => result.reason),
+        "Sandbox service retirement failed",
+      );
     }
   }
 
@@ -815,7 +905,7 @@ if record.exists():
     await Promise.allSettled([...this.active]);
     await attemptCleanup(async () => this.forwarders?.close());
     if (this.record) {
-      await attemptCleanup(() => podmanOutput(["stop", "--time=0", this.record!.environment.container]));
+      await attemptCleanup(() => stopSessionContainer(this.record!.environment.container));
     }
     const lock = this.lock;
     if (lock) {

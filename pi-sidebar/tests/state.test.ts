@@ -52,18 +52,31 @@ function createRuntime(
 }
 
 function sandboxPulseFixture() {
-	const execute = vi.fn(async (_options: { command: string[]; timeoutMs?: number; signal?: AbortSignal }) => ({
-		output: Buffer.alloc(0), stderr: "", code: 0,
-	}));
+	const execute = vi.fn(
+		async (_options: { command: string[]; timeoutMs?: number; signal?: AbortSignal }) => ({
+			output: Buffer.alloc(0),
+			stderr: "",
+			code: 0,
+		}),
+	);
 	execute.mockResolvedValueOnce({ output: Buffer.from("true\n/repo\n"), stderr: "", code: 0 });
-	execute.mockResolvedValueOnce({ output: Buffer.from("# branch.oid abc\0# branch.head main\0"), stderr: "", code: 0 });
+	execute.mockResolvedValueOnce({
+		output: Buffer.from("# branch.oid abc\0# branch.head main\0"),
+		stderr: "",
+		code: 0,
+	});
 	execute.mockResolvedValueOnce({ output: Buffer.from("tree\n"), stderr: "", code: 0 });
 	const runtime = new SidebarRuntime({
-		pi: { events: { emit(_channel: string, request: { accept(value: unknown): void }) {
-			request.accept({ session: { environment: { workspace: "/repo" }, execute } });
-		} } } as never,
+		pi: {
+			events: {
+				emit(_channel: string, request: { accept(value: unknown): void }) {
+					request.accept({ session: { environment: { workspace: "/repo" }, execute } });
+				},
+			},
+		} as never,
 		ctx: {
-			modelRegistry: {}, getContextUsage: () => undefined,
+			modelRegistry: {},
+			getContextUsage: () => undefined,
 			sessionManager: { getEntries: () => [] },
 		} as never,
 		autoCompact: null,
@@ -84,7 +97,10 @@ it("forwards every Workspace Pulse deadline to guest execution and retains stale
 		}
 		fixture.execute.mockRejectedValueOnce(new Error("Guest process timed out"));
 		await fixture.runtime.flushWorkspacePulseRefresh();
-		expect(fixture.runtime.getState().workspacePulse).toMatchObject({ status: "stale", data: { branch: "main" } });
+		expect(fixture.runtime.getState().workspacePulse).toMatchObject({
+			status: "stale",
+			data: { branch: "main" },
+		});
 	} finally {
 		fixture.runtime.dispose();
 	}
@@ -93,9 +109,12 @@ it("forwards every Workspace Pulse deadline to guest execution and retains stale
 it("cancels a pending guest Workspace Pulse probe when Sidebar retires", async () => {
 	const fixture = sandboxPulseFixture();
 	fixture.execute.mockReset();
-	fixture.execute.mockImplementation(async (options) => new Promise((_resolve, reject) => {
-		options.signal!.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
-	}));
+	fixture.execute.mockImplementation(
+		async (options) =>
+			new Promise((_resolve, reject) => {
+				options.signal!.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
+			}),
+	);
 	const pending = fixture.runtime.flushWorkspacePulseRefresh();
 	await vi.waitFor(() => expect(fixture.execute).toHaveBeenCalledOnce());
 	fixture.runtime.dispose();

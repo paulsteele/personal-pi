@@ -228,7 +228,9 @@ export async function setupSandboxLsp(options: {
 	}
 	profile.routes = profile.routes.filter((route) => selection.selected.includes(route.preset));
 	if (profile.mode === "auto") {
-		profile.disabledLanguages = LSP_PRESETS.filter((preset) => !selection.selected.includes(preset.id)).map((preset) => preset.id);
+		profile.disabledLanguages = LSP_PRESETS.filter((preset) => !selection.selected.includes(preset.id)).map(
+			(preset) => preset.id,
+		);
 	}
 	if (advancedAction === "Add a server with custom options") {
 		const route = await addAdvancedContainerRoute(

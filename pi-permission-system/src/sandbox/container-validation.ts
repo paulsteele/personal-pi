@@ -1,9 +1,15 @@
 import { z } from "zod";
 import type { MountGrant } from "./mounts.ts";
+import {
+  consumeInspectedToolImageMounts,
+  inspectedToolMountSchema,
+  type ToolImageMount,
+} from "./tool-image-mounts.ts";
 
 export const containerDetailsSchema = z.looseObject({
   Id: z.string().min(1),
   Image: z.string().min(1),
+  StaticDir: z.string().optional(),
   State: z.looseObject({ Running: z.boolean() }),
   Config: z.looseObject({ Labels: z.record(z.string(), z.string()).nullable() }),
   HostConfig: z.looseObject({
@@ -14,20 +20,14 @@ export const containerDetailsSchema = z.looseObject({
     Devices: z.array(z.unknown()).nullable(),
   }),
   EffectiveCaps: z.array(z.string()).nullable().optional(),
-  Mounts: z.array(
-    z.looseObject({
-      Type: z.string(),
-      Source: z.string(),
-      Destination: z.string(),
-      RW: z.boolean(),
-    }),
-  ),
+  Mounts: z.array(inspectedToolMountSchema),
 });
 
 export function validateCreatedContainer(
   value: unknown,
   sessionId: string,
   mounts: readonly MountGrant[],
+  toolImageMounts: readonly ToolImageMount[] = [],
 ): string {
   const container = containerDetailsSchema.parse(value);
   const belongsToSession = container.Config.Labels?.["pi.sandbox.session"] === sessionId;
@@ -49,16 +49,30 @@ export function validateCreatedContainer(
   if (!meetsSessionIsolationPolicy) {
     throw new Error("Created container does not meet the approved session isolation policy");
   }
-  if (container.Mounts.length !== mounts.length) {
+  const inspectedMounts = {
+    mounts: container.Mounts,
+    expected: toolImageMounts,
+    containerId: container.Id,
+    staticDir: container.StaticDir,
+  };
+  const hostMounts = consumeInspectedToolImageMounts(inspectedMounts);
+  if (hostMounts.length !== mounts.length) {
     throw new Error("Created container has an unexpected mount count");
   }
-  for (const mounted of container.Mounts) {
+  const seenDestinations = new Set<string>();
+  for (const mounted of hostMounts) {
     const approved = mounts.find(
       (grant) => grant.source === mounted.Source && grant.destination === mounted.Destination,
     );
-    if (!approved || mounted.Type !== "bind" || mounted.RW !== (approved.access === "rw")) {
+    const matchesApprovedGrant =
+      approved !== undefined &&
+      mounted.Type === "bind" &&
+      mounted.RW === (approved.access === "rw");
+    const isDuplicateDestination = seenDestinations.has(mounted.Destination);
+    if (!matchesApprovedGrant || isDuplicateDestination) {
       throw new Error(`Created container has an unapproved mount: ${mounted.Destination}`);
     }
+    seenDestinations.add(mounted.Destination);
   }
   return container.Id;
 }

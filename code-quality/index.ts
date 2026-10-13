@@ -72,7 +72,12 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 					if (modelSelection && !model) {
 						throw new Error("Select an available quality reviewer");
 					}
-					await runtime.applySettings(ctx, { ...settings, provider: model?.provider, model: model?.id }, signal, settingsFormConfigRevision);
+					await runtime.applySettings(
+						ctx,
+						{ ...settings, provider: model?.provider, model: model?.id },
+						signal,
+						settingsFormConfigRevision,
+					);
 					await lsp?.stop();
 					lspStartup = lsp?.start(ctx.cwd, ctx.isProjectTrusted(), runtime.active) ?? Promise.resolve();
 					await lspStartup;
@@ -125,14 +130,15 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 			const pendingDraft = await loadLspDraft(agentDir, project);
 			let ownedDraftRevision = pendingDraft?.revision ?? null;
 			const baseRevision = pendingDraft ? pendingDraft.draft.baseRevision : (stored?.revision ?? null);
-			const value = pendingDraft?.draft.profile ?? stored?.profile ?? {
-				version: 1,
-				projectId: project.id,
-				enabled: true,
-				mode: "auto",
-				routes: [],
-				disabledLanguages: [],
-			};
+			const value = pendingDraft?.draft.profile ??
+				stored?.profile ?? {
+					version: 1,
+					projectId: project.id,
+					enabled: true,
+					mode: "auto",
+					routes: [],
+					disabledLanguages: [],
+				};
 			return {
 				value: { ...value },
 				async apply(next, signal = new AbortController().signal) {
@@ -343,14 +349,13 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 		exposure: "model-only",
 		label: "Quality response",
 		description:
-			"Send a bounded disagreement to the quality reviewer for reconsideration, or request user-approved helper/test paths. Corrections and disagreements share five review rounds before automatic operator arbitration. Cannot approve, disable, or waive a review.",
+			"Send a bounded disagreement to the quality reviewer for reconsideration. Corrections and disagreements share five review rounds before automatic operator arbitration. Cannot approve, disable, or waive a review.",
 		executionMode: "sequential",
 		parameters: Type.Object({
-			action: Type.String({ enum: ["disagree", "request_scope"] }),
+			action: Type.Literal("disagree"),
 			caseId: Type.String(),
 			revision: Type.String(),
 			rationale: Type.String({ minLength: 1, maxLength: 2000 }),
-			paths: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), { maxItems: 12 })),
 		}),
 		async execute(_id, input, _signal, _update, ctx) {
 			const text = await runtime.respond(input as Parameters<typeof runtime.respond>[0], ctx);

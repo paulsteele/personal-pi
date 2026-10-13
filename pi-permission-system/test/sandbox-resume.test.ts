@@ -6,7 +6,13 @@ import { SandboxSession } from "../src/sandbox/session.ts";
 import type { ResolvedDefinition } from "../src/sandbox/definition.ts";
 import { readPrivateText, sha256Hex } from "../src/sandbox/storage.ts";
 import { inactiveSessionRetentionMs } from "../src/sandbox/prune.ts";
-import type { SandboxStartupDisplay, SandboxStartupProgress } from "../src/sandbox/startup-ui.ts";
+import { SavedToolArtifactUnavailableError } from "../src/sandbox/tool-image-mounts.ts";
+import {
+  SandboxStartupUI,
+  type SandboxStartupDisplay,
+  type SandboxStartupProgress,
+} from "../src/sandbox/startup-ui.ts";
+import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 
 const ports = vi.hoisted(() => ({ create: vi.fn(), podman: vi.fn(), forward: vi.fn() }));
 vi.mock("../src/sandbox/driver.ts", () => ({
@@ -55,12 +61,23 @@ async function resumeFixture(startup?: SandboxStartupDisplay) {
     confirm,
     startup,
   };
-  ports.create.mockImplementation(async ({ generation }) => ({
+  const toolImageMounts = [
+    {
+      toolId: "node-runtime",
+      version: "24.21.0",
+      imageId: "a".repeat(64),
+      subpath: "/opt/pi-tools/node-runtime/24.21.0",
+      destination: "/opt/pi-tools/node-runtime/24.21.0",
+      readOnly: true,
+    },
+  ];
+  ports.create.mockImplementation(async ({ generation, checkpointToolImageMounts }) => ({
     container: `container-g${generation}`,
     image: "node",
     user: "root",
     workspace: root,
     configuration: {},
+    toolImageMounts: checkpointToolImageMounts ?? toolImageMounts,
   }));
   ports.podman.mockImplementation(async (args: string[]) =>
     args[0] === "commit" ? "checkpoint-image\n" : "",
@@ -88,10 +105,120 @@ async function resumeFixture(startup?: SandboxStartupDisplay) {
   return { resumed, source, approvedMounts, confirm, replaceFile, recordPath, stored };
 }
 
+it("reattaches the saved tool artifact identities on same-generation resume", async () => {
+  const fixture = await resumeFixture();
+  const savedMounts = JSON.parse(fixture.stored.text).environment.toolImageMounts;
+  await fixture.resumed.start();
+  expect(ports.create.mock.calls[0]![0].checkpointToolImageMounts).toEqual(savedMounts);
+  expect(fixture.resumed.environment.toolImageMounts).toEqual(savedMounts);
+});
+
+it("preserves tool artifact identities when rebinding a replaced configuration file", async () => {
+  const fixture = await resumeFixture();
+  const savedMounts = JSON.parse(fixture.stored.text).environment.toolImageMounts;
+  await fixture.replaceFile();
+  await fixture.resumed.start();
+  expect(ports.create.mock.calls[0]![0].checkpointToolImageMounts).toEqual(savedMounts);
+  expect(ports.create.mock.calls[0]![0].checkpointImage).toBe("checkpoint-image");
+  expect(fixture.resumed.environment.toolImageMounts).toEqual(savedMounts);
+});
+
+async function legacyToolingResumeFixture() {
+  const fixture = await resumeFixture();
+  const legacyRecord = JSON.parse(fixture.stored.text);
+  delete legacyRecord.environment.toolImageMounts;
+  await writeFile(fixture.recordPath, JSON.stringify(legacyRecord));
+  fixture.resumed.options.resolved.revision = "mounted-tooling-revision";
+  fixture.resumed.options.resolved.baseRevision = "original";
+  return fixture;
+}
+
+it("requires approval to migrate an older session with copied tools and preserves the saved record on denial", async () => {
+  const fixture = await legacyToolingResumeFixture();
+  const legacyStored = await readPrivateText(fixture.recordPath);
+  fixture.confirm.mockResolvedValue(false);
+  await expect(fixture.resumed.start()).rejects.toThrow("Tooling rebuild was not approved");
+  expect(ports.create).not.toHaveBeenCalled();
+  expect(await readPrivateText(fixture.recordPath)).toEqual(legacyStored);
+});
+
+it("migrates an approved older session from its definition rather than checkpointing copied tools", async () => {
+  const fixture = await legacyToolingResumeFixture();
+  await fixture.resumed.start();
+  expect(fixture.confirm).toHaveBeenCalledWith(
+    expect.stringContaining("Rebuild this session"),
+    expect.any(AbortSignal),
+  );
+  expect(ports.create.mock.calls[0]![0].checkpointImage).toBeUndefined();
+  expect(ports.create.mock.calls[0]![0].checkpointToolImageMounts).toBeUndefined();
+  expect(ports.podman.mock.calls.some(([args]) => args[0] === "commit")).toBe(false);
+  expect(fixture.resumed.environment.toolImageMounts).toHaveLength(1);
+});
+
+it("preserves saved state when missing-artifact recovery approval is denied", async () => {
+  const fixture = await resumeFixture();
+  const mount = JSON.parse(fixture.stored.text).environment.toolImageMounts[0];
+  ports.create.mockRejectedValueOnce(new SavedToolArtifactUnavailableError(mount, "image missing"));
+  fixture.confirm.mockResolvedValue(false);
+  await expect(fixture.resumed.start()).rejects.toThrow("Saved tool artifact unavailable");
+  await fixture.resumed.close();
+  expect(await readPrivateText(fixture.recordPath)).toEqual(fixture.stored);
+  expect(ports.create).toHaveBeenCalledTimes(1);
+  expect(ports.podman).not.toHaveBeenCalled();
+});
+
+it("preserves saved state when missing-artifact recovery approval is cancelled", async () => {
+  const fixture = await resumeFixture();
+  const mount = JSON.parse(fixture.stored.text).environment.toolImageMounts[0];
+  ports.create.mockRejectedValueOnce(new SavedToolArtifactUnavailableError(mount, "image missing"));
+  fixture.confirm.mockRejectedValue(new Error("Recovery cancelled"));
+  await expect(fixture.resumed.start()).rejects.toThrow("Recovery cancelled");
+  await fixture.resumed.close();
+  expect(await readPrivateText(fixture.recordPath)).toEqual(fixture.stored);
+  expect(ports.create).toHaveBeenCalledTimes(1);
+  expect(ports.podman).not.toHaveBeenCalled();
+});
+
+it("restores the previous container when an approved missing-artifact replacement fails", async () => {
+  const fixture = await resumeFixture();
+  const mount = JSON.parse(fixture.stored.text).environment.toolImageMounts[0];
+  ports.create.mockRejectedValueOnce(new SavedToolArtifactUnavailableError(mount, "image missing"));
+  ports.create.mockRejectedValueOnce(new Error("Replacement failed"));
+  await expect(fixture.resumed.start()).rejects.toThrow("Replacement failed");
+  await fixture.resumed.close();
+  expect(await readPrivateText(fixture.recordPath)).toEqual(fixture.stored);
+  expect(ports.create).toHaveBeenCalledTimes(2);
+  expect(ports.podman.mock.calls.map(([args]) => args)).toEqual([
+    ["stop", "--time=0", "container-g2"],
+    ["start", "container-g2"],
+  ]);
+});
+
+it("offers missing-artifact rebuild approval during startup without needing a ready session", async () => {
+  const fixture = await resumeFixture();
+  const mount = JSON.parse(fixture.stored.text).environment.toolImageMounts[0];
+  ports.create.mockRejectedValueOnce(new SavedToolArtifactUnavailableError(mount, "image missing"));
+  await fixture.resumed.start();
+  expect(fixture.confirm).toHaveBeenCalledWith(
+    expect.stringContaining("saved host binds"),
+    expect.any(AbortSignal),
+  );
+  expect(ports.create).toHaveBeenCalledTimes(2);
+  expect(ports.create.mock.calls[1]![0]).toMatchObject({
+    mounts: fixture.approvedMounts,
+    checkpointImage: undefined,
+    checkpointInventory: undefined,
+    checkpointToolImageMounts: undefined,
+    generation: 3,
+  });
+  expect(fixture.resumed.environment.container).toBe("container-g3");
+});
+
 it("does not save denied port authority or reuse it on the next startup", async () => {
   const fixture = await resumeFixture();
   const options = {
-    ...fixture.resumed.options, sessionId: "port-session",
+    ...fixture.resumed.options,
+    sessionId: "port-session",
     resolved: {
       ...fixture.resumed.options.resolved,
       definition: { image: "node", forwardPorts: [3000] },
@@ -103,14 +230,23 @@ it("does not save denied port authority or reuse it on the next startup", async 
   await expect(deniedStartup.start()).rejects.toThrow("port forwarding was not approved");
   await deniedStartup.close();
   expect(await readPrivateText(join(deniedStartup.directory, "session.json"))).toBeUndefined();
-  expect(fixture.confirm).toHaveBeenCalledWith(expect.stringContaining("3000"), expect.any(AbortSignal));
+  expect(fixture.confirm).toHaveBeenCalledWith(
+    expect.stringContaining("3000"),
+    expect.any(AbortSignal),
+  );
   fixture.confirm.mockClear();
   fixture.confirm.mockResolvedValue(true);
   const approvedStartup = new SandboxSession(options);
   sessions.push(approvedStartup);
   await approvedStartup.start();
-  expect(fixture.confirm).toHaveBeenCalledWith(expect.stringContaining("3000"), expect.any(AbortSignal));
-  expect(JSON.parse((await readPrivateText(join(approvedStartup.directory, "session.json")))!.text).approvedPorts).toEqual([3000]);
+  expect(fixture.confirm).toHaveBeenCalledWith(
+    expect.stringContaining("3000"),
+    expect.any(AbortSignal),
+  );
+  expect(
+    JSON.parse((await readPrivateText(join(approvedStartup.directory, "session.json")))!.text)
+      .approvedPorts,
+  ).toEqual([3000]);
 });
 
 it.each([
@@ -194,7 +330,12 @@ it("reapproves an atomically saved config and recreates the bind from a containe
   expect(fixture.confirm).toHaveBeenCalledTimes(1);
   expect(fixture.confirm.mock.calls[0][0]).toContain(`Source: ${fixture.source}`);
   expect(fixture.confirm.mock.calls[0][0]).toContain("Access: ro");
-  expect(ports.podman).toHaveBeenCalledWith(["stop", "container-g2"], expect.any(AbortSignal));
+  expect(ports.podman).toHaveBeenCalledWith(
+    ["stop", "--time=0", "container-g2"],
+    expect.any(AbortSignal),
+    undefined,
+    15_000,
+  );
   expect(ports.podman).toHaveBeenCalledWith(
     ["commit", "--include-volumes=false", "container-g2"],
     expect.any(AbortSignal),
@@ -253,6 +394,7 @@ it("reports initial startup, mount recreation, resume, and definition rebuild to
     "Starting devcontainer",
     "Updating devcontainer mounts",
   ]);
+  expect(progress.stage).toHaveBeenLastCalledWith("Devcontainer mounts updated.");
   run.mockClear();
   ports.create.mockImplementation(async ({ progress: report }) => {
     report("Starting lifecycle hooks\n");
@@ -270,6 +412,7 @@ it("reports initial startup, mount recreation, resume, and definition rebuild to
   run.mockClear();
   await fixture.resumed.rebuildFromDefinition(fixture.resumed.options.resolved);
   expect(run.mock.calls.map(([title]) => title)).toEqual(["Rebuilding devcontainer"]);
+  expect(run.mock.calls[0]![2]?.aborted).toBe(false);
   expect(progress.stage).toHaveBeenCalledWith("Stopping devcontainer language servers…");
   expect(progress.stage).toHaveBeenCalledWith("Waiting for active guest processes…");
   expect(progress.stage).toHaveBeenCalledWith("Stopping the previous devcontainer…");
@@ -277,6 +420,91 @@ it("reports initial startup, mount recreation, resume, and definition rebuild to
   expect(progress.stage).toHaveBeenCalledWith("Saving rebuilt devcontainer session…");
   expect(progress.stage).toHaveBeenCalledWith("Removing superseded devcontainer…");
   expect(progress.stage).toHaveBeenLastCalledWith("Devcontainer rebuild complete.");
+});
+
+it("keeps the mount progress screen visible until the replacement container is ready", async () => {
+  type CustomUI = ExtensionContext["ui"]["custom"];
+  const presentations: Array<{ finished: boolean }> = [];
+  const custom = vi.fn(
+    (factory: Parameters<CustomUI>[0], options?: Parameters<CustomUI>[1]) =>
+      new Promise<unknown>((resolve) => {
+        const presentation = { finished: false };
+        presentations.push(presentation);
+        factory(
+          { terminal: { rows: 20 }, requestRender: vi.fn() } as never,
+          { fg: (_color: string, text: string) => text } as Theme,
+          {} as never,
+          (result) => {
+            presentation.finished = true;
+            resolve(result);
+          },
+        );
+        options?.onHandle?.({ setHidden: vi.fn() } as never);
+      }),
+  );
+  const startup = new SandboxStartupUI(
+    () =>
+      ({
+        mode: "tui",
+        hasUI: true,
+        cwd: "/project",
+        ui: { custom, notify: vi.fn() },
+      }) as unknown as ExtensionContext,
+  );
+  const fixture = await resumeFixture(startup);
+  await fixture.resumed.start();
+  const source = join(fixture.source, "..", "additional.json");
+  await writeFile(source, '{"additional":true}');
+  const { promise: recreationWait, resolve: completeRecreation } = Promise.withResolvers<void>();
+  ports.create.mockClear();
+  ports.create.mockImplementationOnce(async ({ generation }) => {
+    await recreationWait;
+    return {
+      container: `container-g${generation}`,
+      image: "node",
+      user: "root",
+      workspace: fixture.resumed.options.resolved.startupDirectory,
+      configuration: {},
+    };
+  });
+  const mountRequest = fixture.resumed.requestMount(
+    source,
+    "ro",
+    "/additional.json",
+    "Read additional configuration",
+  );
+  try {
+    await vi.waitFor(() => expect(ports.create).toHaveBeenCalledOnce());
+    expect(presentations).toHaveLength(4);
+    expect(presentations.at(-1)!.finished).toBe(false);
+    expect(ports.podman).toHaveBeenCalledWith(
+      ["stop", "--time=0", "container-g2"],
+      expect.any(AbortSignal),
+      undefined,
+      15_000,
+    );
+    expect(ports.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        generation: 3,
+        checkpointImage: "checkpoint-image",
+        mounts: expect.arrayContaining([
+          expect.objectContaining({ source, destination: "/additional.json" }),
+        ]),
+      }),
+    );
+  } finally {
+    completeRecreation();
+    await mountRequest;
+  }
+  expect(presentations.at(-1)!.finished).toBe(true);
+  expect(fixture.resumed.environment.container).toBe("container-g3");
+  expect(JSON.parse((await readPrivateText(fixture.recordPath))!.text)).toMatchObject({
+    generation: 3,
+    environment: { container: "container-g3" },
+    mounts: expect.arrayContaining([
+      expect.objectContaining({ source, destination: "/additional.json" }),
+    ]),
+  });
 });
 
 it("retains stored grants and restarts the prior container if replacement creation fails", async () => {
@@ -314,7 +542,12 @@ it("retains the prior generation if replacement forwarders cannot start on resum
   await fixture.replaceFile();
   ports.forward.mockRejectedValueOnce(new Error("Forwarding failed"));
   await expect(fixture.resumed.start()).rejects.toThrow("Forwarding failed");
-  expect(ports.podman).toHaveBeenCalledWith(["stop", "container-g3"]);
+  expect(ports.podman).toHaveBeenCalledWith(
+    ["stop", "--time=0", "container-g3"],
+    undefined,
+    undefined,
+    15_000,
+  );
   expect(ports.podman).toHaveBeenCalledWith(["start", "container-g2"]);
   expect(ports.podman.mock.calls.filter(([args]) => args[0] === "rm")).toEqual([]);
   expect(await readPrivateText(fixture.recordPath)).toEqual(fixture.stored);
@@ -339,6 +572,7 @@ it("recreates a pruned session from its definition with saved grants instead of 
       generation: 3,
       previousContainer: undefined,
       checkpointImage: undefined,
+      checkpointToolImageMounts: record.environment.toolImageMounts,
     }),
   );
   expect(ports.podman).not.toHaveBeenCalled();
@@ -383,6 +617,73 @@ it("does not restart a pruned container when fresh recreation fails", async () =
   expect(JSON.parse((await readPrivateText(fixture.recordPath))!.text)).toEqual(prunedRecord);
 });
 
+it("stops immediately before checkpointing a mount change and passes cancellation to the checkpoint", async () => {
+  const fixture = await resumeFixture();
+  await fixture.resumed.start();
+  ports.podman.mockClear();
+  const cancellation = new AbortController();
+  const stages: string[] = [];
+  fixture.resumed.options.startup = {
+    run: async (_title, operation) =>
+      operation({ stage: (text) => stages.push(text), output: () => {} }),
+  };
+  await fixture.resumed.requestMount(
+    fixture.source,
+    "rw",
+    "/config.json",
+    "Update configuration",
+    cancellation.signal,
+  );
+  expect(ports.podman.mock.calls[0]).toEqual([
+    ["stop", "--time=0", "container-g2"],
+    expect.any(AbortSignal),
+    undefined,
+    15_000,
+  ]);
+  expect(ports.podman.mock.calls[1]).toEqual([
+    ["commit", "--include-volumes=false", "container-g2"],
+    expect.any(AbortSignal),
+  ]);
+  expect(stages.indexOf("Stopping the previous devcontainer…")).toBeLessThan(
+    stages.indexOf("Checkpointing container-local state…"),
+  );
+  expect(fixture.resumed.environment.container).toBe("container-g3");
+});
+
+it("cancels a stalled mount checkpoint and restores the previous generation without publishing grants", async () => {
+  const fixture = await resumeFixture();
+  await fixture.resumed.start();
+  const stored = await readPrivateText(fixture.recordPath);
+  const cancellation = new AbortController();
+  const checkpointStarted = vi.fn();
+  ports.podman.mockImplementation(async (args: string[], signal?: AbortSignal) => {
+    if (args[0] !== "commit") {
+      return "";
+    }
+    checkpointStarted();
+    return new Promise<string>((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+  });
+  ports.create.mockClear();
+  const request = fixture.resumed.requestMount(
+    fixture.source,
+    "rw",
+    "/config.json",
+    "Update configuration",
+    cancellation.signal,
+  );
+  const cancelledRequest = expect(request).rejects.toThrow("Cancelled checkpoint");
+  await vi.waitFor(() => expect(checkpointStarted).toHaveBeenCalledOnce());
+  cancellation.abort(new Error("Cancelled checkpoint"));
+  await cancelledRequest;
+  expect(ports.create).not.toHaveBeenCalled();
+  expect(ports.podman).toHaveBeenCalledWith(["start", "container-g2"]);
+  expect(fixture.resumed.environment.container).toBe("container-g2");
+  expect(fixture.resumed.mounts).toEqual(fixture.approvedMounts);
+  expect(await readPrivateText(fixture.recordPath)).toEqual(stored);
+});
+
 it("removes the previous generation after a successful mount change", async () => {
   const fixture = await resumeFixture();
   await fixture.resumed.start();
@@ -423,7 +724,12 @@ it("keeps the previous generation if the updated mount record cannot be saved", 
     await expect(
       fixture.resumed.requestMount(fixture.source, "rw", "/config.json", "Update configuration"),
     ).rejects.toThrow("inspect stale locks");
-    expect(ports.podman).toHaveBeenCalledWith(["stop", "container-g3"]);
+    expect(ports.podman).toHaveBeenCalledWith(
+      ["stop", "--time=0", "container-g3"],
+      undefined,
+      undefined,
+      15_000,
+    );
     expect(ports.podman).toHaveBeenCalledWith(["start", "container-g2"]);
     expect(ports.podman.mock.calls.filter(([args]) => args[0] === "rm")).toEqual([]);
     expect(await readPrivateText(fixture.recordPath)).toEqual(stored);

@@ -19,6 +19,9 @@ export default function observeLspSmoke(pi: ExtensionAPI): void {
 		appendFileSync(output, `${JSON.stringify({ kind: "started", pid: process.pid, sidebarLoaded })}\n`);
 	});
 	pi.on("session_shutdown", (event) => {
-		appendFileSync(output, `${JSON.stringify({ kind: "shutdown", pid: process.pid, reason: event.reason })}\n`);
+		appendFileSync(
+			output,
+			`${JSON.stringify({ kind: "shutdown", pid: process.pid, reason: event.reason })}\n`,
+		);
 	});
 }

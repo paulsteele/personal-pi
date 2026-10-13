@@ -2,6 +2,13 @@
 
 ## 2.0.0 — 2026-10-12
 
+- Stop session devcontainers with zero graceful-stop delay and a separate 15-second command timeout across rebuilds, mount recreation, rollback cleanup, and shutdown. Retain container-specific Podman failure diagnostics; make mount checkpointing cancellable and report stopping separately from checkpointing.
+
+- Keep mount-change and rebuild progress screens alive across container-generation retirement. Their cancellation now follows the session and requested operation rather than the guest processes being stopped; report mount-update completion after the replacement is ready and saved.
+
+- Remove sensitive-file, external-effect, and unresolved-shell-path approval prompts from guest tool review and native host-command dispatch. Retain explicit denies and separate host-access/provisioning authorization.
+- Leave dynamic/escaped executable names, opaque shell payloads, and function definitions/calls in guest Bash instead of rejecting them when host rules exist. Continue routing separately matched literal host commands; pass incomplete parser input unchanged to guest Bash without partial routing.
+
 - Remove tests that require creating nested Podman containers. Retain the engine-contract, lifecycle, native-shell, and Python-process tests that run in the container. This change does not verify compatibility with a live engine.
 
 - Resolve selected devcontainer configuration through the pinned CLI without contacting Podman or executing initialization. A configuration-only engine adapter reports no existing containers and rejects all other operations; build/startup retain their authorized engine adapter.

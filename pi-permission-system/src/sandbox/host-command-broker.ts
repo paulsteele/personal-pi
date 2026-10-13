@@ -5,7 +5,6 @@ import { constants as osConstants } from "node:os";
 import { z } from "zod";
 import type { ProjectLocation } from "@paulsteele/pi-project-locations";
 import { checkPolicy } from "../policy.ts";
-import { evaluateSafety, type SafetyContext } from "../auto/safety-policy.ts";
 import { guestToHost, validateMountIdentity, type MountGrant } from "./mounts.ts";
 import { isPathInside } from "./storage.ts";
 import { loadSandboxSettings } from "./settings.ts";
@@ -18,7 +17,6 @@ import { shellQuote, type HostCommandPlan, type HostInvocation } from "./host-co
 import { BashProgram } from "../access-intent/bash/program.ts";
 import { PathNormalizer } from "../path-normalizer.ts";
 
-import { externalEffectCategories } from "./gate.ts";
 const MAX_ARGUMENT_BYTES = 256 * 1024;
 const startRequest = z.strictObject({
   type: z.literal("start"),
@@ -85,7 +83,6 @@ export class HostCommandBroker {
       canonicalGuestPath(path: string): Promise<string>;
       signal: AbortSignal;
       send(id: number, message: HostBridgeReply): void;
-      confirm?(context: SafetyContext, category: string, reason: string): Promise<boolean>;
     },
   ) {}
 
@@ -106,15 +103,17 @@ export class HostCommandBroker {
         finished: undefined as Promise<void> | undefined,
       };
       this.connections.set(id, connection);
-      connection.finished = this.start(id, raw).catch((error) => {
-        this.options.send(id, {
-          type: "stderr",
-          data: Buffer.from(`Host routing failed: ${String(error)}\n`).toString("base64"),
+      connection.finished = this.start(id, raw)
+        .catch((error) => {
+          this.options.send(id, {
+            type: "stderr",
+            data: Buffer.from(`Host routing failed: ${String(error)}\n`).toString("base64"),
+          });
+          this.options.send(id, { type: "exit", code: 125 });
+        })
+        .finally(() => {
+          this.connections.delete(id);
         });
-        this.options.send(id, { type: "exit", code: 125 });
-      }).finally(() => {
-        this.connections.delete(id);
-      });
       return;
     }
     const connection = this.connections.get(id);
@@ -128,7 +127,8 @@ export class HostCommandBroker {
       return;
     }
     if (!connection) {
-      const isInputForClosedInvocation = message.type === "stdin_end" ||
+      const isInputForClosedInvocation =
+        message.type === "stdin_end" ||
         (message.type === "stdin" && typeof message.data === "string");
       if (isInputForClosedInvocation) {
         this.options.send(id, { type: "stdin_closed" });
@@ -220,14 +220,18 @@ export class HostCommandBroker {
         if (!("script" in candidate)) {
           continue;
         }
-        const candidatePath = await realpath(posix.resolve(this.options.project.root, candidate.script));
+        const candidatePath = await realpath(
+          posix.resolve(this.options.project.root, candidate.script),
+        );
         if (candidatePath === hostCommand) {
           matchingScriptRule = candidate;
           break;
         }
       }
       if (!matchingScriptRule) {
-        throw new Error(`Host script does not match the configured project path: ${request.command}`);
+        throw new Error(
+          `Host script does not match the configured project path: ${request.command}`,
+        );
       }
       matchingRule = matchingScriptRule;
     }
@@ -252,53 +256,21 @@ export class HostCommandBroker {
     ) {
       throw new Error("Host command denied by explicit policy or pending sandbox migration");
     }
-    const syntheticShellCommand: NonNullable<SafetyContext["shell"]>["commands"][number] = {
-      text: commandText,
-      argv: [request.command, ...request.args],
-      context: null,
-      wrapperKind: null,
-      executedUnit: null,
-    };
     const expandedProgram = await BashProgram.parse(
       [request.command, ...request.args].map(shellQuote).join(" "),
       new PathNormalizer(cwd),
     );
-    const toSafetyPath = ({ path }: ReturnType<typeof expandedProgram.pathRuleCandidates>[number]) => ({
-      value: path.value(),
-      matchValues: path.matchValues(),
-      boundaryValue: path.boundaryValue(),
-      mountAliases: [],
-      mountResolutionIncomplete: false,
-    });
-    const argumentPaths = expandedProgram.pathRuleCandidates().map(toSafetyPath);
-    const deniesArgumentPath = argumentPaths.some((path) => path.matchValues.some(
-      (alias) => checkPolicy(settings.settings.permission, "path", alias).state === "deny",
-    ));
+    const deniesArgumentPath = expandedProgram
+      .pathRuleCandidates()
+      .some(({ path }) =>
+        path
+          .matchValues()
+          .some(
+            (alias) => checkPolicy(settings.settings.permission, "path", alias).state === "deny",
+          ),
+      );
     if (deniesArgumentPath) {
       throw new Error("Host argument path denied by explicit policy");
-    }
-    const safetyContext: SafetyContext = {
-      requestId: "native-dispatch",
-      toolCallId: "native-dispatch",
-      toolName: "bash",
-      agentName: null,
-      input: { command: request.command, args: request.args },
-      cwd,
-      platform: process.platform,
-      shell: {
-        command: commandText,
-        workdir: cwd,
-        parseComplete: true,
-        commands: [syntheticShellCommand],
-      },
-      paths: argumentPaths,
-      riskMarkers: [],
-    };
-    const safety = evaluateSafety(safetyContext, false, { home: process.env.HOME ?? "" }, (category) => externalEffectCategories.has(category));
-    if (safety.kind === "require_human" && externalEffectCategories.has(safety.category)) {
-      if (!(await this.options.confirm?.(safetyContext, safety.category, safety.reason))) {
-        throw new Error("Human denied native sensitive or external-effect operation");
-      }
     }
     if ((await loadSandboxSettings(this.options.agentDir)).revision !== settings.revision) {
       throw new Error("Host permission settings changed during authorization");

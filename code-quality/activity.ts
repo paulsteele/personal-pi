@@ -9,7 +9,6 @@ export type QualityDecisionKind =
 	| "arbitration"
 	| "coverage"
 	| "failure"
-	| "scope"
 	| "model"
 	| "waiver"
 	| "lsp_setup"

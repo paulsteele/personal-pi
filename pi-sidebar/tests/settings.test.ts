@@ -160,16 +160,24 @@ it("opening settings during agent work does not read or write configuration", as
 it("does not open Settings while an idle background extension owns a permission prompt", async () => {
 	const listeners = new Map<string, (raw: unknown) => void>();
 	const ctx = { isIdle: () => true, ui: { notify: vi.fn() } } as unknown as ExtensionContext;
-	const settings = createSidebarSettings({ events: {
-		emit() {},
-		on: (name: string, listener: (raw: unknown) => void) => {
-			listeners.set(name, listener);
-			return () => listeners.delete(name);
-		},
-	} } as never, ctx);
+	const settings = createSidebarSettings(
+		{
+			events: {
+				emit() {},
+				on: (name: string, listener: (raw: unknown) => void) => {
+					listeners.set(name, listener);
+					return () => listeners.delete(name);
+				},
+			},
+		} as never,
+		ctx,
+	);
 	listeners.get("permissions:ui_prompt")!({ requestId: "approval" });
 	await settings.open("web");
-	expect(ctx.ui.notify).toHaveBeenCalledWith("Finish the permission decision before reopening Settings.", "info");
+	expect(ctx.ui.notify).toHaveBeenCalledWith(
+		"Finish the permission decision before reopening Settings.",
+		"info",
+	);
 	listeners.get("permissions:decision")!({ requestId: "approval" });
 	settings.dispose();
 	expect(listeners.size).toBe(0);
@@ -179,21 +187,32 @@ it("preserves the unavailable phase through multiline engine diagnostics and Sid
 	let published: unknown;
 	const publisher = createSandboxPublisher({
 		on: () => () => {},
-		emit: (_channel, value) => { published = value; },
+		emit: (_channel, value) => {
+			published = value;
+		},
 	});
 	publisher.update({
-		sessionId: "session", phase: "unavailable", definitionPath: "/private/devcontainer.json",
-		mounts: [], ports: [], error: "Engine failed\n\u001b[31mSecond diagnostic line\u001b[0m\n" + "x".repeat(5000),
+		sessionId: "session",
+		phase: "unavailable",
+		definitionPath: "/private/devcontainer.json",
+		mounts: [],
+		ports: [],
+		error: "Engine failed\n\u001b[31mSecond diagnostic line\u001b[0m\n" + "x".repeat(5000),
 	});
 	const state = parseSandboxState(published);
 	expect(state?.phase).toBe("unavailable");
 	expect(state?.error?.length).toBe(4096);
 	expect(state?.error).toContain("Engine failed Second diagnostic line");
-	const rendered = renderSandboxContent(state, {
-		fg: (_color, text) => text,
-		bold: (text) => text,
-		italic: (text) => text,
-	}, 100, false).join("\n");
+	const rendered = renderSandboxContent(
+		state,
+		{
+			fg: (_color, text) => text,
+			bold: (text) => text,
+			italic: (text) => text,
+		},
+		100,
+		false,
+	).join("\n");
 	expect(rendered).toContain("UNAVAILABLE");
 	expect(rendered).toContain("Engine failed");
 	publisher.dispose();

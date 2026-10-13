@@ -15,7 +15,11 @@ export interface SandboxStartupProgress {
 }
 
 export interface SandboxStartupDisplay {
-  run<T>(title: string, operation: (progress: SandboxStartupProgress) => Promise<T>, cancellationSignal?: AbortSignal): Promise<T>;
+  run<T>(
+    title: string,
+    operation: (progress: SandboxStartupProgress) => Promise<T>,
+    cancellationSignal?: AbortSignal,
+  ): Promise<T>;
 }
 
 export const silentStartupProgress: SandboxStartupProgress = {
@@ -274,7 +278,9 @@ export class SandboxStartupUI implements SandboxStartupDisplay {
     }
     const owner = new AbortController();
     this.presentationOwner = owner;
-    const presentationSignal = cancellationSignal ? AbortSignal.any([cancellationSignal, owner.signal]) : owner.signal;
+    const presentationSignal = cancellationSignal
+      ? AbortSignal.any([cancellationSignal, owner.signal])
+      : owner.signal;
     const abortPresentation = () => {
       if (this.presentationOwner === owner) {
         this.dispose();

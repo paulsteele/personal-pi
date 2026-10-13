@@ -98,7 +98,8 @@ vi.mock("./snapshot.js", () => ({
 	capture: async () => {
 		if (state.captureFailures-- > 0) throw new Error("Fixture source temporarily unavailable");
 		return {
-			changes: [{ file: "a.ts", patch: "fixture" }], omitted: [],
+			changes: [{ file: "a.ts", patch: "fixture" }],
+			omitted: [],
 			dispose: async () => {
 				state.snapshotCleanupStarted = true;
 				await state.snapshotCleanupWait;
@@ -475,43 +476,67 @@ it("cancels the initial sandbox source probe before opening permissions or start
 
 it("shows and cancels the owned work presenter for settings-launched repository setup", async () => {
 	const h = harness();
-	const pendingSetup = vi.spyOn(repositorySetup, "setup").mockImplementation(async (_context, _repository, _rootPath, abortSignal, reportProgress, runOwnedWork) => {
-		return runOwnedWork!("Generating setup context", async () => {
-			reportProgress("Discovering fixture sources");
-			return new Promise<string>((_resolve, reject) => {
-				abortSignal.addEventListener("abort", () => reject(abortSignal.reason), { once: true });
-			});
-		});
-	});
+	const pendingSetup = vi
+		.spyOn(repositorySetup, "setup")
+		.mockImplementation(
+			async (_context, _repository, _rootPath, abortSignal, reportProgress, runOwnedWork) => {
+				return runOwnedWork!("Generating setup context", async () => {
+					reportProgress("Discovering fixture sources");
+					return new Promise<string>((_resolve, reject) => {
+						abortSignal.addEventListener("abort", () => reject(abortSignal.reason), { once: true });
+					});
+				});
+			},
+		);
 	const prSettingsSection = discoverSettingsSections(h.api).find((section) => section.id === "pr")!;
-	const repositorySetupAction = prSettingsSection.actions!.find((settingsAction) => settingsAction.id === "setup-create")!;
+	const repositorySetupAction = prSettingsSection.actions!.find(
+		(settingsAction) => settingsAction.id === "setup-create",
+	)!;
 	const pending = repositorySetupAction.run(h.ctx, new AbortController().signal);
 	const cancelled = expect(pending).rejects.toThrow();
-	await vi.waitFor(() => expect(h.ui.state.active?.render(100).join("\n")).toContain("Discovering fixture sources"));
+	await vi.waitFor(() =>
+		expect(h.ui.state.active?.render(100).join("\n")).toContain("Discovering fixture sources"),
+	);
 	h.ui.state.active!.handleInput!("cancel-key");
 	await cancelled;
 	expect(h.ui.state.active).toBeUndefined();
 	expect(pendingSetup).toHaveBeenCalledOnce();
 });
 
-it.each(["command", "tool"])("cancels %s handoff while final journal publication is pending", async (entry) => {
-	const h = harness();
-	state.browser = { decision: "feedback", requestedIds: ["F1"], discussion: [], feedback: "Fix F1" };
-	let release!: () => void;
-	state.journalWait = new Promise<void>((resolve) => { release = resolve; });
-	const pending = entry === "tool"
-		? h.tool.execute("fixture", {}, new AbortController().signal, undefined, h.ctx).catch((error: unknown) => error)
-		: h.command.handler("", h.ctx);
-	await vi.waitFor(() => expect(state.journalStarted).toBe(true));
-	await h.command.handler("cancel", h.ctx);
-	release();
-	await pending;
-	if (entry === "command") {
-		await vi.waitFor(() => expect(h.api.sendMessage).toHaveBeenCalledOnce());
-		expect(h.api.sendMessage.mock.calls[0]![0].content).toContain("cancelled");
-	}
-	await expect(h.resultTool.execute("read", { reportId: "fixture", section: "action" }, new AbortController().signal, undefined, h.ctx)).rejects.toThrow("Unknown or expired");
-});
+it.each(["command", "tool"])(
+	"cancels %s handoff while final journal publication is pending",
+	async (entry) => {
+		const h = harness();
+		state.browser = { decision: "feedback", requestedIds: ["F1"], discussion: [], feedback: "Fix F1" };
+		let release!: () => void;
+		state.journalWait = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const pending =
+			entry === "tool"
+				? h.tool
+						.execute("fixture", {}, new AbortController().signal, undefined, h.ctx)
+						.catch((error: unknown) => error)
+				: h.command.handler("", h.ctx);
+		await vi.waitFor(() => expect(state.journalStarted).toBe(true));
+		await h.command.handler("cancel", h.ctx);
+		release();
+		await pending;
+		if (entry === "command") {
+			await vi.waitFor(() => expect(h.api.sendMessage).toHaveBeenCalledOnce());
+			expect(h.api.sendMessage.mock.calls[0]![0].content).toContain("cancelled");
+		}
+		await expect(
+			h.resultTool.execute(
+				"read",
+				{ reportId: "fixture", section: "action" },
+				new AbortController().signal,
+				undefined,
+				h.ctx,
+			),
+		).rejects.toThrow("Unknown or expired");
+	},
+);
 
 it("withholds fixes when source changes while snapshot cleanup is pending", async () => {
 	const h = harness();

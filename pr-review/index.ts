@@ -278,7 +278,9 @@ export default function prReview(pi: ExtensionAPI): void {
 				}
 			});
 			const captured = snapshot!;
-			current.disposeSnapshot = async () => { await captured.dispose?.(); };
+			current.disposeSnapshot = async () => {
+				await captured.dispose?.();
+			};
 			try {
 				const report = await review({
 					ctx,
@@ -579,7 +581,9 @@ export default function prReview(pi: ExtensionAPI): void {
 					await current.disposeSnapshot?.();
 					await current.permissions?.close();
 				} else {
-					void current.permissions?.close().catch((error) => ctx.ui.notify(`PR cleanup failed: ${String(error)}`, "warning"));
+					void current.permissions
+						?.close()
+						.catch((error) => ctx.ui.notify(`PR cleanup failed: ${String(error)}`, "warning"));
 				}
 			} finally {
 				current.phaseUI?.dispose();

@@ -15,8 +15,15 @@ export async function authorizeBuildInputs(options: {
   const definitionDirectory = await realpath(dirname(options.definitionPath));
   const privateStorage = await canonicalPath(options.privateStorage);
   const protectedAuthorityFileNames = new Set([
-    "session.json", "owner.lock", "config.json", "host-commands.json", "auth.json",
-    "tools.json", "environment.json", "project-environment.json", "definition-approval.json",
+    "session.json",
+    "owner.lock",
+    "config.json",
+    "host-commands.json",
+    "auth.json",
+    "tools.json",
+    "environment.json",
+    "project-environment.json",
+    "definition-approval.json",
   ]);
   const definitionIsPrivate = isPathInside(privateStorage, options.definitionPath);
   const assertNoPrivateAuthority = (path: string) => {
@@ -24,7 +31,10 @@ export async function authorizeBuildInputs(options: {
     const isOwnedRecipe = definitionIsPrivate && isPathInside(definitionDirectory, path);
     const containsPrivateStorage = isPathInside(path, privateStorage);
     const isProtectedAuthorityFile = protectedAuthorityFileNames.has(basename(path));
-    if (containsPrivateStorage || (isInsidePrivateStorage && (!isOwnedRecipe || isProtectedAuthorityFile))) {
+    if (
+      containsPrivateStorage ||
+      (isInsidePrivateStorage && (!isOwnedRecipe || isProtectedAuthorityFile))
+    ) {
       throw new Error(`Build input exposes private sandbox authority: ${path}`);
     }
   };
@@ -57,7 +67,9 @@ export async function authorizeBuildInputs(options: {
     const isOwnedRecipe = definitionIsPrivate && isPathInside(definitionDirectory, path);
     const insideApprovedSource = isPathInside(projectRoot, path) || isOwnedRecipe;
     if (!insideApprovedSource) {
-      const approved = await options.confirm?.(`Read external host build input?\n${path}\nBuild inputs can be copied into the image. Runtime mounts do not authorize these reads.`);
+      const approved = await options.confirm?.(
+        `Read external host build input?\n${path}\nBuild inputs can be copied into the image. Runtime mounts do not authorize these reads.`,
+      );
       if (!approved) {
         throw new Error(`External host build input is not authorized: ${path}`);
       }
@@ -65,7 +77,11 @@ export async function authorizeBuildInputs(options: {
     await inspectBuildInput(path);
     options.signal?.throwIfAborted();
     const current = await lstat(path, { bigint: true });
-    if ((await realpath(input)) !== path || current.dev !== identity.dev || current.ino !== identity.ino) {
+    if (
+      (await realpath(input)) !== path ||
+      current.dev !== identity.dev ||
+      current.ino !== identity.ino
+    ) {
       throw new Error(`Build input changed during approval: ${path}`);
     }
   }

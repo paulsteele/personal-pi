@@ -13,7 +13,6 @@ import {
 } from "./host-command-plan.ts";
 import type { SandboxSession } from "./session.ts";
 import { runGuestProcess } from "./process.ts";
-import type { SafetyContext } from "../auto/safety-policy.ts";
 
 const terminateGuestShell = `import os
 import pathlib
@@ -35,7 +34,6 @@ export interface ShellExecutionOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   onData?: (data: Buffer) => void;
-  confirmNative?: (context: SafetyContext, category: string, reason: string) => Promise<boolean>;
 }
 export interface ShellExecutionResult {
   output: Buffer;
@@ -180,7 +178,6 @@ export async function runHostRoutedShell(options: {
     mounts: [...options.session.mounts],
     canonicalGuestPath: (path) => options.session.filesystem.canonical(path, options.signal),
     signal: options.signal,
-    ...(options.options.confirmNative ? { confirm: options.options.confirmNative } : {}),
     send,
   });
   let termination: Promise<void> | undefined;

@@ -47,7 +47,9 @@ export class SandboxLspClient {
 	}
 	async start(): Promise<void> {
 		this.ownerSignal?.throwIfAborted();
-		const abort = () => { void this.client.stop(); };
+		const abort = () => {
+			void this.client.stop();
+		};
 		this.ownerSignal?.addEventListener("abort", abort, { once: true });
 		try {
 			await this.client.start();
@@ -59,9 +61,11 @@ export class SandboxLspClient {
 					return;
 				}
 				this.polling = true;
-				void this.refreshOpenDocuments(this.ownerSignal).catch(() => this.refresh()).finally(() => {
-					this.polling = false;
-				});
+				void this.refreshOpenDocuments(this.ownerSignal)
+					.catch(() => this.refresh())
+					.finally(() => {
+						this.polling = false;
+					});
 			}, 1000);
 			this.workspacePoll.unref();
 		} finally {
@@ -69,32 +73,34 @@ export class SandboxLspClient {
 		}
 	}
 	private refreshOpenDocuments(signal?: AbortSignal): Promise<void> {
-		this.synchronization = this.synchronization.catch(() => {}).then(async () => {
-			if (this.retiring) {
-				return;
-			}
-			for (const [openPath, document] of this.documents) {
-				let current: string;
-				try {
-					current = (await this.sandbox.session.filesystem.read(openPath, signal)).toString();
-				} catch (error) {
-					if (!String(error).includes("FileNotFoundError")) {
-						throw error;
+		this.synchronization = this.synchronization
+			.catch(() => {})
+			.then(async () => {
+				if (this.retiring) {
+					return;
+				}
+				for (const [openPath, document] of this.documents) {
+					let current: string;
+					try {
+						current = (await this.sandbox.session.filesystem.read(openPath, signal)).toString();
+					} catch (error) {
+						if (!String(error).includes("FileNotFoundError")) {
+							throw error;
+						}
+						this.workspaceRevision++;
+						await this.client.fileChanged(openPath, 3);
+						this.documents.delete(openPath);
+						this.refresh();
+						continue;
 					}
-					this.workspaceRevision++;
-					await this.client.fileChanged(openPath, 3);
-					this.documents.delete(openPath);
-					this.refresh();
-					continue;
+					if (current !== document.text) {
+						this.workspaceRevision++;
+						await this.client.fileChanged(openPath, 2);
+						this.documents.set(openPath, { ...document, text: current });
+						this.refresh();
+					}
 				}
-				if (current !== document.text) {
-					this.workspaceRevision++;
-					await this.client.fileChanged(openPath, 2);
-					this.documents.set(openPath, { ...document, text: current });
-					this.refresh();
-				}
-			}
-		});
+			});
 		return this.synchronization;
 	}
 
@@ -147,11 +153,13 @@ if process_record.exists():
 			if (this.sandbox.session.terminateProcessGroup) {
 				await this.sandbox.session.terminateProcessGroup(this.processRecord).catch(() => {});
 			} else {
-				await this.sandbox.session.execute({
-					command: ["python3", "-c", killProcessGroupScript, this.processRecord],
-					timeoutMs: 5000,
-					signal: AbortSignal.timeout(5000),
-				}).catch(() => {});
+				await this.sandbox.session
+					.execute({
+						command: ["python3", "-c", killProcessGroupScript, this.processRecord],
+						timeoutMs: 5000,
+						signal: AbortSignal.timeout(5000),
+					})
+					.catch(() => {});
 			}
 		} finally {
 			await this.client.stop();

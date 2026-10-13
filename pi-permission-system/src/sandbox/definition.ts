@@ -179,7 +179,10 @@ export async function discoverLocalDefinitions(projectRoot: string): Promise<str
   return choices;
 }
 
-export async function resolveSandboxProject(cwd: string, agentDir: string): Promise<ProjectLocation> {
+export async function resolveSandboxProject(
+  cwd: string,
+  agentDir: string,
+): Promise<ProjectLocation> {
   return resolveProjectLocation(cwd, {
     hasProfile: async (candidate) => {
       const paths = [

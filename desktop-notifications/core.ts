@@ -45,7 +45,6 @@ const QUALITY_DECISION_NOTICES = {
 	arbitration: { subtitle: "Quality decision needed", body: "Choose the current code, proposed corrections, or another review cycle." },
 	coverage: { subtitle: "Quality coverage needs approval", body: "Authorize this file's review or waive its quality check." },
 	failure: { subtitle: "Quality review needs attention", body: "Retry the review, select a reviewer, or waive the quality check." },
-	scope: { subtitle: "Quality scope needs approval", body: "Approve or decline the requested correction scope expansion." },
 	model: { subtitle: "Quality reviewer selection needed", body: "Select the model for quality review." },
 	waiver: { subtitle: "Quality waiver needs confirmation", body: "Confirm or decline waiving the pending quality gate." },
 	lsp_setup: { subtitle: "Language server setup needs attention", body: "Configure, validate, or approve a language server installation." },
