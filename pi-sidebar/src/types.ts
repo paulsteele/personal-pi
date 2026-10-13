@@ -90,6 +90,5 @@ export interface FooterState extends SidebarState {
 	branchEntryCount?: number;
 	panelSummaries?: readonly FooterPanelSummary[];
 	plannotatorStatus?: string;
-	sandboxStatus?: string;
 	autoModeStatus?: string;
 }

@@ -6,22 +6,25 @@ Fullscreen Sidebar and native status footer for Pi. The root package loads `pi-s
 
 The sidebar uses a 44-column preferred width, shrinks to 28 columns, and hides when the terminal is too narrow (below 92 columns). The status/quality headers and turn/performance indicator are pinned at the top. Click the tab selectors beneath them to choose:
 
-- **Tools** — live tool calls, durations, permission provenance, and inline quality badges. This is the default tab.
-- **Summary** — Progress Observer status and model, with spaced Now, Next, Blockers, Goal, and Done sections and wrapped, indented values.
-- **Sandbox** — colored state and separate Runtime, Configuration, Bind Mounts, Network, and Attention sections. Writable/read-only mounts have distinct colors; long paths wrap without hiding their details.
-- **Settings** — one clickable root per plugin that opens its centered PR-style menu. Accepted field edits save immediately, with no Apply button. Tab selectors wrap at narrow pane widths.
+The selectors use Nerd Font icons rather than text; configure a Nerd Font in your terminal.
 
-Each tab has independent scrolling. The native footer remains visible separately. Unknown layouts fail closed rather than replacing the transcript with an overlay. Selecting a tab or hiding Sidebar never changes sandbox authority.
+- **Logs** (`󰋚`) — live tool calls, durations, permission provenance, and inline quality badges. This is the default tab. Click a tool row or its continuation lines to scroll the main transcript to that tool's output, without changing the session branch or editor focus. Nested calls navigate to their enclosing transcript tool; calls no longer rendered in the transcript leave its scroll position unchanged.
+- **Summary** (`󰨸`) — Progress Observer status and model, with spaced Now, Next, Blockers, Goal, and Done sections and wrapped, indented values.
+- **Tasks** (`󰄬`) — Plannotator's active plan, completed/total count, and scrollable checklist. Browser-approved plans use the approved snapshot; matching file checkmarks, `[DONE:n]` messages, and successful `plannotator_mark_done` results update completion on the current branch.
+- **Sandbox** (`󰆧`) — colored state and separate Runtime, Configuration, Bind Mounts, Network, and Attention sections. Writable/read-only mounts have distinct colors; long paths wrap without hiding their details.
+- **Settings** (`󰒓`) — one clickable root per plugin that opens its centered PR-style menu. Accepted field edits save immediately, with no Apply button. Tab selectors wrap at narrow pane widths.
+
+Each tab has independent scrolling. The native footer remains visible separately, without a devcontainer label or lock indicator; sandbox state stays in the sidebar. Unknown layouts fail closed rather than replacing the transcript with an overlay. Selecting a tab or hiding Sidebar never changes sandbox authority.
 
 ## Commands
 
 ```text
 /sidebar on|off|toggle
-/sidebar tools|summary|sandbox|settings
+/sidebar logs|tools|summary|tasks|sandbox|settings
 /plugin-settings [section-id]
 ```
 
-The pane starts visible in fullscreen TUI mode unless its private startup preferences say otherwise. Commands provide a keyboard-accessible tab switch without taking editor or transcript focus. Mouse selection stays local to the active pane.
+The pane starts visible in fullscreen TUI mode unless its private startup preferences say otherwise. Commands provide a keyboard-accessible tab switch without taking editor or transcript focus. `tools` remains an alias for Logs, including in saved startup preferences; `tasks` is also a valid startup tab. Mouse selection stays local to the active pane.
 
 ## Plugin settings
 

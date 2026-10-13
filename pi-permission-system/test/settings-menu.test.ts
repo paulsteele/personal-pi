@@ -230,12 +230,26 @@ it("omits the retired model-assisted setup toggle from general settings", async 
   ]);
 });
 
-it("contributes manual settings without model-generation actions", async () => {
+it("offers tool generation alongside manual settings without starting a sandbox", async () => {
   const setup = await fixture("unavailable");
-  for (const section of setup.sections) {
-    expect(section.actions?.map((action) => action.id) ?? []).toEqual(
-      section.id === "sandbox" ? ["rebuild"] : [],
-    );
+  const actionsBySection = Object.fromEntries(
+    setup.sections.map((section) => [
+      section.id,
+      section.actions?.map((action) => action.id) ?? [],
+    ]),
+  );
+  expect(actionsBySection).toEqual({
+    sandbox: ["rebuild"],
+    "host-commands": [],
+    "sandbox-base-global": [],
+    "sandbox-tools-global": ["add-tool"],
+    "sandbox-base-project": [],
+    "sandbox-tools-project": ["add-tool"],
+    "sandbox-environment": [],
+  });
+  for (const id of ["sandbox-tools-global", "sandbox-tools-project"]) {
+    const section = setup.sections.find((section) => section.id === id)!;
+    expect(section.fields.map((field) => field.path)).toEqual(["tools", "exclude"]);
   }
   expect(setup.getSession).not.toHaveBeenCalled();
 });

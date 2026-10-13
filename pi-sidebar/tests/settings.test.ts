@@ -242,7 +242,8 @@ it("Settings stays reachable at narrow sidebar widths and lists clickable sectio
 	});
 	for (const width of [28, 44]) {
 		const rows = component.render(width);
-		expect(rows.join("\n")).toContain("[settings]");
+		expect(rows.join("\n")).toContain("󰒓");
+		expect(rows.join("\n")).not.toContain("━");
 		expect(rows.join("\n")).toContain("› Code Quality");
 		for (const row of rows) {
 			expect(visibleWidth(row)).toBeLessThanOrEqual(width);

@@ -15,6 +15,7 @@ import {
   resolveToolProfiles,
 } from "./tool-profile.ts";
 import { parseProjectEnvironment, projectEnvironmentPath } from "./project-environment.ts";
+import { addSandboxToolFromSettings } from "./tool-generation.ts";
 import {
   hostCommandProfilePath,
   hostCommandProfileSchema,
@@ -277,6 +278,17 @@ export function registerSandboxSettings(
           kind: "json",
         },
         { path: "exclude", label: "Excluded optional tools", kind: "json" },
+      ],
+      actions: [
+        {
+          id: "add-tool",
+          label: "Add tool by name",
+          description:
+            "Generate a pinned recipe, approve it, and rebuild now (requires a ready sandbox)",
+          async run(ctx, signal) {
+            await addSandboxToolFromSettings(ctx, agentDir, getSession, scope, signal);
+          },
+        },
       ],
       async load(ctx) {
         const path =

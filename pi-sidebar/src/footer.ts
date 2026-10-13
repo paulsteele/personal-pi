@@ -24,7 +24,6 @@ export interface ThemeLike {
 }
 
 type FooterItemId =
-	| "sandbox"
 	| "auto"
 	| "plannotator"
 	| "thinking"
@@ -150,17 +149,6 @@ function buildItems(state: FooterState, theme: ThemeLike, colorEnabled: boolean)
 		if (!items.some((candidate) => candidate.id === item.id)) items.push(item);
 	};
 
-	const sandbox = state.sandboxStatus ? sanitize(stripTerminalSequences(state.sandboxStatus)) : "";
-	if (sandbox) {
-		const rendered = palette.paint("ready", sandbox);
-		add({
-			id: "sandbox",
-			full: rendered,
-			compact: rendered,
-			dropRank: Number.POSITIVE_INFINITY,
-			required: true,
-		});
-	}
 	const autoMode = state.autoModeStatus ? sanitize(stripTerminalSequences(state.autoModeStatus)) : "";
 	if (autoMode) {
 		const rendered = palette.paint(autoMode.includes("⏵⏵") ? "permissionAuto" : "muted", autoMode);

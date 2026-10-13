@@ -109,6 +109,50 @@ export function applyDoneMarkers(text: string, items: ProgressItem[]): void {
 	}
 }
 
+function executionChecklist(
+	planPath: string,
+	approvedPlan: unknown,
+	readPlan: (path: string) => string,
+): ProgressItem[] {
+	if (typeof approvedPlan !== "string") {
+		try {
+			return parseChecklist(readPlan(planPath));
+		} catch {
+			return [];
+		}
+	}
+	const items = parseChecklist(approvedPlan);
+	try {
+		const fileItems = parseChecklist(readPlan(planPath));
+		const matchesApprovedSteps =
+			fileItems.length === items.length && fileItems.every((item, index) => item.text === items[index]?.text);
+		if (matchesApprovedSteps) {
+			for (const item of items) {
+				item.completed ||= fileItems[item.step - 1]?.completed === true;
+			}
+		}
+	} catch {
+		return items;
+	}
+	return items;
+}
+
+function applyCompletedStepResult(message: unknown, items: ProgressItem[]): void {
+	const result = record(message);
+	const details = record(result?.details);
+	if (
+		result?.role !== "toolResult" ||
+		result.toolName !== "plannotator_mark_done" ||
+		details?.completed !== true
+	) {
+		return;
+	}
+	const item = items.find((candidate) => candidate.step === details.step);
+	if (item) {
+		item.completed = true;
+	}
+}
+
 /** Reconstruct Plannotator's active phase from the current branch only. */
 export function reconstructPlannotator(
 	cwd: string,
@@ -132,14 +176,6 @@ export function reconstructPlannotator(
 
 	const planPath = resolvePlanPath(cwd, state.lastSubmittedPath);
 	if (!planPath) return undefined;
-	let items: ProgressItem[];
-	try {
-		items = parseChecklist(readPlan(planPath));
-	} catch {
-		return undefined;
-	}
-	if (items.length === 0) return undefined;
-
 	let executeIndex = -1;
 	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index];
@@ -148,9 +184,17 @@ export function reconstructPlannotator(
 			break;
 		}
 	}
+	const execution = record(entries[executeIndex]?.data);
+	const items = executionChecklist(planPath, execution?.approvedPlan, readPlan);
+	if (items.length === 0) {
+		return undefined;
+	}
 	for (let index = executeIndex + 1; index < entries.length; index++) {
 		const entry = entries[index];
-		if (entry?.type === "message") applyDoneMarkers(assistantText(entry.message), items);
+		if (entry?.type === "message") {
+			applyDoneMarkers(assistantText(entry.message), items);
+			applyCompletedStepResult(entry.message, items);
+		}
 	}
 	const completed = items.filter((item) => item.completed).length;
 	return {

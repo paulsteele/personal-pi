@@ -15,6 +15,7 @@ import {
 	createPlannotatorIntegration,
 	PLANNOTATOR_PANEL_ID,
 	type PlannotatorIntegration,
+	type PlannotatorSnapshot,
 	plannotatorPanel,
 } from "../src/plannotator.js";
 import {
@@ -26,6 +27,9 @@ import {
 import {
 	buildSidebarSnapshot,
 	createSidebarController,
+	isSidebarTab,
+	SIDEBAR_TABS,
+	type SidebarTab,
 	type SidebarController,
 	type SidebarSnapshot,
 } from "../src/sidebar.js";
@@ -95,6 +99,7 @@ interface ActiveSession {
 	persisted: boolean;
 	branchEntryCount: number;
 	panelSummaries: readonly FooterPanelSummary[];
+	plannotatorSnapshot: PlannotatorSnapshot | undefined;
 	progressObserver: ProgressObserverSnapshot | undefined;
 	sandbox: SidebarSandboxState | undefined;
 	qualityHeader: QualityHeader | undefined;
@@ -163,8 +168,12 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 	function syncPlannotatorPanel(targetSession: ActiveSession): void {
 		if (activeSession !== targetSession || targetSession.retired) return;
 		const snapshot = targetSession.plannotator.getSnapshot(targetSession.ctx);
-		if (snapshot) targetSession.panelRegistry.register(plannotatorPanel(snapshot), "plannotator");
-		else targetSession.panelRegistry.unregister(PLANNOTATOR_PANEL_ID, "plannotator");
+		targetSession.plannotatorSnapshot = snapshot;
+		if (snapshot) {
+			targetSession.panelRegistry.register(plannotatorPanel(snapshot), "plannotator");
+		} else {
+			targetSession.panelRegistry.unregister(PLANNOTATOR_PANEL_ID, "plannotator");
+		}
 	}
 
 	function refreshPlannotator(targetSession: ActiveSession): void {
@@ -306,6 +315,7 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 			extensionStatuses: targetSession.extensionStatuses,
 			runActivity: runActivity.getSnapshot(),
 			...(targetSession.sandbox ? { sandbox: targetSession.sandbox } : {}),
+			...(targetSession.plannotatorSnapshot ? { plannotator: targetSession.plannotatorSnapshot } : {}),
 			...(targetSession.progressObserver ? { progressObserver: targetSession.progressObserver } : {}),
 			...(targetSession.qualityHeader ? { qualityHeader: targetSession.qualityHeader } : {}),
 			sidebarPanels: [],
@@ -410,9 +420,6 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 					const branch = footerData.getGitBranch();
 					const statuses = footerData.getExtensionStatuses();
 					const plannotatorStatus = statuses.get("plannotator");
-					const sandboxStatus = statuses.get("sandbox");
-					// Both are promoted to dedicated required items, so filter them out of
-					// the ordinary Statuses segment to avoid rendering them twice.
 					updateExtensionStatuses(
 						currentSession,
 						Array.from(statuses.entries())
@@ -430,7 +437,6 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 						branchEntryCount: currentSession.branchEntryCount,
 						panelSummaries: currentSession.panelSummaries,
 						...(plannotatorStatus ? { plannotatorStatus } : {}),
-						...(sandboxStatus ? { sandboxStatus } : {}),
 						extensionStatuses: currentSession.extensionStatuses,
 					};
 				},
@@ -464,7 +470,7 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 				path: "tab",
 				label: "Startup tab",
 				kind: "string",
-				choices: ["tools", "summary", "sandbox", "settings"],
+				choices: [...SIDEBAR_TABS],
 			},
 		],
 		async load(ctx) {
@@ -475,8 +481,7 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 				(value) => {
 					if (
 						(value.visible !== undefined && typeof value.visible !== "boolean") ||
-						(value.tab !== undefined &&
-							!["tools", "summary", "sandbox", "settings"].includes(String(value.tab)))
+						(value.tab !== undefined && !isSidebarTab(value.tab))
 					) {
 						throw new Error("Choose a sidebar visibility and valid startup tab");
 					}
@@ -492,7 +497,7 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 						return;
 					}
 					const isVisibleOnStartup = value.visible !== false;
-					const startupTab = (value.tab ?? "tools") as "tools" | "summary" | "sandbox" | "settings";
+					const startupTab = (value.tab ?? "tools") as SidebarTab;
 					if (isVisibleOnStartup) {
 						owner.sidebar.show();
 					} else {
@@ -505,7 +510,7 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("sidebar", {
-		description: "Sidebar visibility and Tools/Summary/Sandbox/Settings tabs",
+		description: "Sidebar visibility and Logs/Summary/Tasks/Sandbox/Settings tabs",
 		handler: async (args, ctx) => {
 			if (ctx.mode !== "tui") {
 				ctx.ui.notify("Sidebar requires TUI mode", "warning");
@@ -516,10 +521,9 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify("Sidebar is not active in this session", "warning");
 				return;
 			}
-			const action = args.trim().toLowerCase();
-			const isTabAction =
-				action === "tools" || action === "summary" || action === "sandbox" || action === "settings";
-			if (isTabAction) {
+			const requestedAction = args.trim().toLowerCase();
+			const action = requestedAction === "logs" ? "tools" : requestedAction;
+			if (isSidebarTab(action)) {
 				current.sidebar.setTab(action);
 			} else if (action === "" || action === "toggle") {
 				current.sidebar.toggle();
@@ -528,7 +532,7 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 			} else if (action === "off") {
 				current.sidebar.hide();
 			} else {
-				ctx.ui.notify("Usage: /sidebar [on|off|toggle|tools|summary|sandbox|settings]", "warning");
+				ctx.ui.notify("Usage: /sidebar [on|off|toggle|logs|tools|summary|tasks|sandbox|settings]", "warning");
 			}
 		},
 	});
@@ -646,6 +650,7 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 				persisted: Boolean(initializationContext.sessionManager.getSessionFile()),
 				branchEntryCount: initializationContext.sessionManager.getBranch().length,
 				panelSummaries: [],
+				plannotatorSnapshot: undefined,
 				progressObserver: undefined,
 				sandbox: undefined,
 				qualityHeader: undefined,
@@ -729,8 +734,8 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 					return;
 				}
 				const startupTab = preferences.value.tab;
-				if (["tools", "summary", "sandbox", "settings"].includes(String(startupTab))) {
-					nextSession.sidebar.setTab(startupTab as "tools" | "summary" | "sandbox" | "settings");
+				if (isSidebarTab(startupTab)) {
+					nextSession.sidebar.setTab(startupTab);
 				}
 				if (preferences.value.visible !== false) {
 					nextSession.sidebar.show();
@@ -816,8 +821,15 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 		getActiveSession(ctx)?.runActivity.updateResponseEstimate(estimatedOutputTokens);
 	});
 	pi.on("message_end", (event, ctx) => {
-		if (event.message.role !== "assistant") return;
-		getActiveSession(ctx)?.runActivity.finishResponse(event.message.usage.output);
+		if (event.message.role !== "assistant") {
+			return;
+		}
+		const current = getActiveSession(ctx);
+		if (!current) {
+			return;
+		}
+		current.runActivity.finishResponse(event.message.usage.output);
+		schedulePlannotatorRefresh(current);
 	});
 	pi.on("tool_execution_start", (event, ctx) => {
 		const current = getActiveSession(ctx);

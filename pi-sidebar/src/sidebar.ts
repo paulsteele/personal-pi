@@ -24,13 +24,27 @@ import {
 	type ToolActivity,
 } from "./run-activity.js";
 import type { SidebarPanelData } from "./sidebar-panels.js";
+import type { PlannotatorSnapshot } from "./plannotator.js";
 import type { SidebarSandboxState } from "./sandbox-state.js";
 import type { QualityActivity, QualityHeader, QualityReviewCounts } from "./quality-activity.js";
 import { createSplitPaneController, type SplitPaneController } from "./split-pane.js";
 import { type AtelierState, type ProgressObserverSnapshot, type WorkspacePulseState } from "./types.js";
 import type { WorkspacePulseData } from "./workspace-pulse.js";
 
-export type SidebarTab = "tools" | "summary" | "sandbox" | "settings";
+export const SIDEBAR_TAB_ICONS = {
+	tools: "󰋚",
+	summary: "󰨸",
+	tasks: "󰄬",
+	sandbox: "󰆧",
+	settings: "󰒓",
+} as const;
+
+export type SidebarTab = keyof typeof SIDEBAR_TAB_ICONS;
+export const SIDEBAR_TABS = Object.keys(SIDEBAR_TAB_ICONS) as SidebarTab[];
+
+export function isSidebarTab(value: unknown): value is SidebarTab {
+	return typeof value === "string" && Object.hasOwn(SIDEBAR_TAB_ICONS, value);
+}
 
 export interface SidebarSettingsEntry {
 	id: string;
@@ -39,6 +53,7 @@ export interface SidebarSettingsEntry {
 }
 
 export interface SidebarSnapshotInput {
+	plannotator?: PlannotatorSnapshot;
 	sandbox?: SidebarSandboxState;
 	state: AtelierState;
 	cwd: string;
@@ -60,6 +75,7 @@ export interface SidebarSnapshotInput {
 }
 
 export interface SidebarSnapshot extends AtelierState {
+	plannotator?: PlannotatorSnapshot;
 	sandbox?: SidebarSandboxState;
 	projectName: string;
 	cwd: string;
@@ -90,6 +106,7 @@ export function buildSidebarSnapshot(input: SidebarSnapshotInput): SidebarSnapsh
 	return {
 		...input.state,
 		...(input.sandbox ? { sandbox: input.sandbox } : {}),
+		...(input.plannotator ? { plannotator: input.plannotator } : {}),
 		projectName,
 		cwd: input.cwd,
 		...(input.sessionName ? { sessionName: input.sessionName } : {}),
@@ -754,6 +771,44 @@ function activityBandRows(
 	return rows;
 }
 
+export function renderTasksContent(
+	snapshot: PlannotatorSnapshot | undefined,
+	theme: ThemeLike,
+	width: number,
+	colorEnabled = true,
+): string[] {
+	if (width <= 0) {
+		return [];
+	}
+	const palette = createPalette(theme, colorEnabled);
+	const rows = ["", sidebarSectionHeading("PLANNOTATOR TASKS", width, palette), ""];
+	if (!snapshot) {
+		rows.push(palette.paint("muted", "No active Plannotator plan"));
+	} else if (snapshot.phase === "planning") {
+		rows.push(palette.paint("warning", "Planning · awaiting approval"));
+		if (snapshot.planPath) {
+			rows.push(...sidebarDetail("Plan", snapshot.planPath, width, palette));
+		}
+	} else {
+		rows.push(
+			palette.paint("accent", `${snapshot.completed}/${snapshot.total} complete`),
+			...sidebarDetail("Plan", snapshot.planPath, width, palette),
+			"",
+		);
+		for (const item of snapshot.items) {
+			const prefix = `${item.completed ? "󰄬" : "󰄱"} ${item.step}. `;
+			const itemWidth = Math.max(1, width - visibleWidth(prefix));
+			const role = item.completed ? "dim" : "primary";
+			const wrapped = wrapTextWithAnsi(palette.paint(role, sanitize(item.text)), itemWidth);
+			rows.push(
+				...wrapped.map((row, index) => `${index === 0 ? prefix : " ".repeat(visibleWidth(prefix))}${row}`),
+				"",
+			);
+		}
+	}
+	return rows.map((row) => truncateToWidth(row, width, ""));
+}
+
 function sidebarSectionHeading(title: string, width: number, palette: AtelierPalette): string {
 	const label = truncateToWidth(`─ ${title} `, width, "…");
 	return (
@@ -1031,6 +1086,7 @@ export interface SidebarComponentOptions {
 	setTab?(tab: SidebarTab): void;
 	getSettingsSections?(): SidebarSettingsEntry[];
 	openSettings?(id: string): void;
+	navigateToTool?(toolCallId: string): void;
 	requestRender?(): void;
 }
 
@@ -1089,15 +1145,59 @@ export function createSidebarComponent(options: SidebarComponentOptions): Compon
 			};
 		},
 	} as Component;
+	let logToolIds: Array<string | undefined> = [];
+	const logsBody = new MouseRegion(
+		{
+			render(width) {
+				const activity = options.getSnapshot().runActivity;
+				const activeIds = new Set(activity.activeTools.map((tool) => tool.id));
+				const tools = [
+					...activity.activeTools
+						.map((tool, index) => ({ tool, index }))
+						.sort((left, right) => left.tool.startedAt - right.tool.startedAt || left.index - right.index)
+						.map(({ tool }) => tool),
+					...activity.recentTools.filter((tool) => !activeIds.has(tool.id)),
+				];
+				logToolIds = [];
+				const rows: string[] = [];
+				for (const tool of tools) {
+					const toolRows = toolActivityRows(tool, width, palette(), Date.now());
+					rows.push(...toolRows);
+					logToolIds.push(...toolRows.map(() => tool.id));
+				}
+				for (const permission of activity.standalonePermissions ?? []) {
+					const permissionRows = standalonePermissionRows(permission, width, palette());
+					rows.push(...permissionRows);
+					logToolIds.push(...permissionRows.map(() => permission.toolCallId ?? undefined));
+				}
+				return rows;
+			},
+			invalidate() {},
+		},
+		(event) => {
+			if (event.type !== "press" || event.button !== "left") {
+				return;
+			}
+			const toolCallId = logToolIds[event.y];
+			if (!toolCallId) {
+				return;
+			}
+			options.navigateToTool?.(toolCallId);
+			return { handled: true };
+		},
+	);
 	const tabContent = (tab: SidebarTab): Component => {
 		if (tab === "settings") {
 			return settingsBody;
 		}
+		if (tab === "tools") {
+			return logsBody;
+		}
 		return {
 			render(width) {
 				const snapshot = options.getSnapshot();
-				if (tab === "tools") {
-					return activityBandRows(snapshot, width, width, palette(), options.theme, Date.now(), "tools");
+				if (tab === "tasks") {
+					return renderTasksContent(snapshot.plannotator, options.theme, width, options.colorEnabled ?? true);
 				}
 				if (tab === "summary") {
 					return renderSummaryContent(snapshot, options.theme, width, options.colorEnabled ?? true);
@@ -1108,44 +1208,49 @@ export function createSidebarComponent(options: SidebarComponentOptions): Compon
 		};
 	};
 	const scrollViews = Object.fromEntries(
-		(["tools", "summary", "sandbox", "settings"] as const).map((tab) => [
+		SIDEBAR_TABS.map((tab) => [
 			tab,
 			new ScrollView(tabContent(tab), { primary: false, overscroll: "contain", scrollbar: "auto" }),
 		]),
 	) as Record<SidebarTab, ScrollView>;
-	const tabs: SidebarTab[] = ["tools", "summary", "sandbox", "settings"];
 	let selectorWidth = 42;
-	const selectorEntries = () => {
+	const selectorIconColumns = Math.max(2, ...Object.values(SIDEBAR_TAB_ICONS).map(visibleWidth));
+	const selectorCellWidth = selectorIconColumns + 2;
+	const selectorRows = () => {
+		const rows: Array<Array<{ tab: SidebarTab; label: string; start: number; end: number }>> = [[]];
 		let nextColumn = 0;
-		let row = 0;
-		return tabs.map((tab) => {
-			const label = tab === selectedTab() ? `[${tab}]` : ` ${tab} `;
-			if (nextColumn && nextColumn + visibleWidth(label) > selectorWidth) {
-				row++;
+		for (const tab of SIDEBAR_TABS) {
+			const label = ` ${padToWidth(SIDEBAR_TAB_ICONS[tab], selectorIconColumns)} `;
+			if (nextColumn > 0 && nextColumn + selectorCellWidth > selectorWidth) {
+				rows.push([]);
 				nextColumn = 0;
 			}
 			const start = nextColumn;
-			const end = start + visibleWidth(label);
+			const end = start + selectorCellWidth;
+			rows[rows.length - 1]!.push({ tab, label, start, end });
 			nextColumn = end + 1;
-			return { tab, label, start, end, row };
+		}
+		return rows.map((entries) => {
+			const rowWidth = entries.at(-1)?.end ?? 0;
+			const leftPadding = Math.max(0, Math.floor((selectorWidth - rowWidth) / 2));
+			return entries.map((entry) => ({
+				...entry,
+				start: entry.start + leftPadding,
+				end: entry.end + leftPadding,
+			}));
 		});
 	};
 	const selectors = new MouseRegion(
 		{
 			render(width) {
 				selectorWidth = width;
-				const entries = selectorEntries();
-				return Array.from({ length: (entries.at(-1)?.row ?? 0) + 1 }, (_, row) =>
-					truncateToWidth(
-						entries
-							.filter((entry) => entry.row === row)
-							.map((entry) =>
-								entry.tab === selectedTab() ? palette().paint("accent", entry.label) : entry.label,
-							)
-							.join(" "),
-						width,
-					),
-				);
+				return selectorRows().map((entries) => {
+					const labels = entries.map((entry) =>
+						palette().paint(entry.tab === selectedTab() ? "accent" : "muted", entry.label),
+					);
+					const leftPadding = " ".repeat(entries[0]?.start ?? 0);
+					return truncateToWidth(`${leftPadding}${labels.join(" ")}`, width, "");
+				});
 			},
 			invalidate() {},
 		},
@@ -1153,8 +1258,8 @@ export function createSidebarComponent(options: SidebarComponentOptions): Compon
 			if (event.button !== "left" || event.type !== "press") {
 				return;
 			}
-			const selectedSelector = selectorEntries().find(
-				({ start, end, row }) => event.y === row && event.x >= start && event.x < end,
+			const selectedSelector = selectorRows()[event.y]?.find(
+				({ start, end }) => event.x >= start && event.x < end,
 			);
 			if (!selectedSelector) {
 				return;
@@ -1397,6 +1502,11 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 						openSettings: (id) => {
 							if (!disposed) {
 								options.openSettings?.(id);
+							}
+						},
+						navigateToTool: (toolCallId) => {
+							if (!disposed) {
+								safely(() => split.scrollToTool(toolCallId));
 							}
 						},
 						getTab: () => selectedTab,

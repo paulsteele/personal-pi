@@ -485,7 +485,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
             mounts: [...candidate.mounts],
             ports: devcontainerPorts(resolved.definition.forwardPorts ?? []),
           });
-          ctx.ui.setStatus("sandbox", "🔒 devcontainer");
+          ctx.ui.setStatus("sandbox", undefined);
         },
         startupController.signal,
       );

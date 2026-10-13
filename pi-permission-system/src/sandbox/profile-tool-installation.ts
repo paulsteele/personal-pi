@@ -4,6 +4,7 @@ import type { SandboxSession } from "./session.ts";
 import type { ImageToolInstallation } from "./image-tool-recipe.ts";
 import { buildContentKey } from "./tool-cache.ts";
 import {
+  globalToolProfilePath,
   loadToolProfile,
   parseToolProfile,
   projectToolProfilePath,
@@ -17,6 +18,7 @@ export async function planProfileToolInstallation(
   session: SandboxSession,
   installations: ImageToolInstallation[],
   signal: AbortSignal,
+  scope: "global" | "project" = "project",
 ): Promise<{ preview: string; apply(signal: AbortSignal): Promise<void> } | undefined> {
   signal.throwIfAborted();
   const resolved = session.options.resolved;
@@ -25,7 +27,10 @@ export async function planProfileToolInstallation(
     throw new Error("Tool profile installation requires a layered environment");
   }
   await validateEnvironmentSources(layers);
-  const path = projectToolProfilePath(session.options.agentDir, resolved.project);
+  const path =
+    scope === "global"
+      ? globalToolProfilePath(session.options.agentDir)
+      : projectToolProfilePath(session.options.agentDir, resolved.project);
   const previous = await readPrivateText(path);
   const stored = await loadToolProfile(path);
   const profile = stored?.profile ?? parseToolProfile({ version: 1, tools: {}, exclude: [] });
@@ -43,12 +48,30 @@ export async function planProfileToolInstallation(
   if (!changed) {
     return undefined;
   }
-  resolveToolProfiles(layers.globalTools.profile, profile);
+  const globalProfile = scope === "global" ? profile : layers.globalTools.profile;
+  const projectProfile = scope === "project" ? profile : layers.projectTools?.profile;
+  const candidateTools = resolveToolProfiles(globalProfile, projectProfile);
+  if (scope === "global") {
+    for (const installation of installations) {
+      const isInstalledFromGlobalProfile =
+        candidateTools.find((tool) => tool.id === installation.id)?.source === "global";
+      if (!isInstalledFromGlobalProfile) {
+        throw new Error(
+          `Project tools override or exclude ${installation.id}; edit the project profile before installing it globally in this session`,
+        );
+      }
+    }
+  }
   const nextText = `${JSON.stringify(profile, null, 2)}\n`;
   const authorityRevision = session.revision;
   return {
     preview: [
-      `Save private project tools: ${path}`,
+      `Save private ${scope} tools: ${path}`,
+      ...(scope === "global"
+        ? [
+            "This global profile also affects future builds in other projects. Running sessions are unchanged.",
+          ]
+        : []),
       `Base definition stays unchanged: ${resolved.path}`,
       "Shared global artifacts remain cached. Rebuild discards container-local changes and preserves approved host binds.",
       nextText,
@@ -86,10 +109,12 @@ export async function planProfileToolInstallation(
         if (current.revision !== resolved.revision) {
           throw new Error("Base or environment sources changed since the installation preview");
         }
+        const candidateProfile = { path, revision: sha256Hex(nextText), profile };
         const candidateLayers = {
           ...layers,
-          tools: resolveToolProfiles(layers.globalTools.profile, profile),
-          projectTools: { path, revision: sha256Hex(nextText), profile },
+          tools: candidateTools,
+          globalTools: scope === "global" ? candidateProfile : layers.globalTools,
+          projectTools: scope === "project" ? candidateProfile : layers.projectTools,
           revision: buildContentKey([layers.revision, sha256Hex(nextText)]),
         };
         const replacement = {

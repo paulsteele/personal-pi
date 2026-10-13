@@ -1,5 +1,6 @@
 import type { Component, OverlayOptions, TUI } from "@earendil-works/pi-tui";
 import { compositeTuiLine, HStack } from "@earendil-works/pi-tui";
+import { scrollTranscriptToTool } from "./transcript-navigation.js";
 
 const PI_084_FULLSCREEN_LAYOUT_ADAPTER = Symbol.for("pi-sidebar.fullscreen-layout-adapter");
 
@@ -34,6 +35,7 @@ export interface SplitPaneController {
 	isPresented(): boolean;
 	overlayOptions(): OverlayOptions;
 	requestRender(): void;
+	scrollToTool(toolCallId: string): boolean;
 	dispose(): void;
 }
 
@@ -218,6 +220,20 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 		isPresented: presented,
 		overlayOptions: () => overlayLayout,
 		requestRender,
+		scrollToTool(toolCallId) {
+			const state = ownedState();
+			if (!state || !presented() || !tui) {
+				return false;
+			}
+			const terminalWidth = tui.terminal.columns;
+			const sidebarWidth = Math.min(SIDEBAR_WIDTH, terminalWidth - MIN_MAIN_WIDTH);
+			const mainWidth = terminalWidth - sidebarWidth;
+			const navigated = scrollTranscriptToTool(state.originalRoot, mainWidth, toolCallId);
+			if (navigated) {
+				requestRender();
+			}
+			return navigated;
+		},
 		dispose() {
 			if (disposed) return;
 			disposed = true;

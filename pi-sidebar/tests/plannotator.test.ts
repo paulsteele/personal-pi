@@ -71,6 +71,44 @@ describe("Plannotator integration", () => {
 		]);
 	});
 
+	it("shows approved steps rather than unreviewed edits and replays mark-done results", async () => {
+		const cwd = await fixture();
+		const snapshot = reconstructPlannotator(cwd, [
+			{
+				type: "custom",
+				customType: "plannotator-execute",
+				data: { approvedPlan: "- [ ] Approved first\n- [ ] Approved second\n" },
+			},
+			state("executing"),
+			{
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolName: "plannotator_mark_done",
+					details: { completed: true, step: 2 },
+				},
+			},
+		]);
+		expect(snapshot).toMatchObject({
+			phase: "executing",
+			completed: 1,
+			total: 2,
+			items: [
+				{ step: 1, text: "Approved first", completed: false },
+				{ step: 2, text: "Approved second", completed: true },
+			],
+		});
+	});
+
+	it("retains approved tasks when the plan file is missing", async () => {
+		const cwd = await fixture();
+		const snapshot = reconstructPlannotator(cwd, [
+			{ type: "custom", customType: "plannotator-execute", data: { approvedPlan: "- [ ] Approved task\n" } },
+			state("executing", "missing.md"),
+		]);
+		expect(snapshot).toMatchObject({ phase: "executing", completed: 0, total: 1 });
+	});
+
 	it("retains checklist parser and marker behavior", () => {
 		const items = parseChecklist("- [ ] one\n* [x] two\n");
 		applyDoneMarkers("done [DONE:1] ignored [DONE:9]", items);

@@ -72,6 +72,7 @@ async function installationFixture() {
     resolved,
     installation,
     path: projectToolProfilePath(agentDir, project),
+    globalPath,
     directory,
   };
 }
@@ -107,6 +108,124 @@ it("leaves no project tool file after a candidate build failure", async () => {
     "Candidate image failed",
   );
   expect(await readPrivateText(fixture.path)).toBeUndefined();
+});
+
+it.each(["global", "project"] as const)(
+  "builds a %s tool recipe before publishing only that profile",
+  async (scope) => {
+    const fixture = await installationFixture();
+    const signal = new AbortController().signal;
+    const targetPath = scope === "global" ? fixture.globalPath : fixture.path;
+    const otherPath = scope === "global" ? fixture.path : fixture.globalPath;
+    const previousTarget = await readPrivateText(targetPath);
+    const previousOther = await readPrivateText(otherPath);
+    fixture.rebuild.mockImplementation(async (replacement, rebuildSignal, publication) => {
+      expect(rebuildSignal).toBe(signal);
+      expect(await readPrivateText(targetPath)).toEqual(previousTarget);
+      expect(await readPrivateText(otherPath)).toEqual(previousOther);
+      expect(replacement.path).toBe(fixture.resolved.path);
+      expect(replacement.definition).toEqual(fixture.resolved.definition);
+      expect(replacement.layers!.tools.find((tool) => tool.id === "custom")).toMatchObject({
+        source: scope,
+        entry: { kind: "recipe", command: ["install-custom", "1"] },
+      });
+      const candidateProfile =
+        scope === "global" ? replacement.layers!.globalTools : replacement.layers!.projectTools;
+      expect(candidateProfile!.path).toBe(targetPath);
+      await publication!.commit();
+    });
+    const proposal = await planProfileToolInstallation(
+      fixture.session,
+      [fixture.installation],
+      signal,
+      scope,
+    );
+    expect(proposal!.preview).toContain(`Save private ${scope} tools: ${targetPath}`);
+    if (scope === "global") {
+      expect(proposal!.preview).toContain("future builds in other projects");
+    }
+    await proposal!.apply(signal);
+    expect(JSON.parse((await readPrivateText(targetPath))!.text).tools.custom).toMatchObject({
+      kind: "recipe",
+      version: "1",
+      command: ["install-custom", "1"],
+    });
+    expect(await readPrivateText(otherPath)).toEqual(previousOther);
+  },
+);
+
+it.each(["build", "session persistence"])(
+  "retains the global tool profile after a %s failure",
+  async (failureStage) => {
+    const fixture = await installationFixture();
+    const previous = await readPrivateText(fixture.globalPath);
+    fixture.rebuild.mockImplementation(async (_replacement, _signal, publication) => {
+      if (failureStage === "session persistence") {
+        await publication!.commit();
+        await publication!.rollback();
+      }
+      throw new Error(`${failureStage} failed`);
+    });
+    const signal = new AbortController().signal;
+    const proposal = await planProfileToolInstallation(
+      fixture.session,
+      [fixture.installation],
+      signal,
+      "global",
+    );
+    await expect(proposal!.apply(signal)).rejects.toThrow(`${failureStage} failed`);
+    expect(await readPrivateText(fixture.globalPath)).toEqual(previous);
+    expect(await readPrivateText(fixture.path)).toBeUndefined();
+    expect(
+      await readPrivateText(join(fixture.directory, "tool-profile-transaction.json")),
+    ).toBeUndefined();
+  },
+);
+
+it("rejects global installation when a project recipe would override it", async () => {
+  const fixture = await installationFixture();
+  await mkdir(dirname(fixture.path), { recursive: true });
+  await writeFile(
+    fixture.path,
+    JSON.stringify({
+      version: 1,
+      tools: {
+        custom: { kind: "recipe", ...fixture.installation, id: undefined, version: "2" },
+      },
+      exclude: [],
+    }),
+  );
+  fixture.resolved.layers = await resolveEnvironmentLayers(
+    fixture.session.options.agentDir,
+    fixture.resolved.project,
+  );
+  const previous = await readPrivateText(fixture.globalPath);
+  await expect(
+    planProfileToolInstallation(
+      fixture.session,
+      [fixture.installation],
+      new AbortController().signal,
+      "global",
+    ),
+  ).rejects.toThrow("Project tools override or exclude custom");
+  expect(fixture.rebuild).not.toHaveBeenCalled();
+  expect(await readPrivateText(fixture.globalPath)).toEqual(previous);
+});
+
+it("rejects publication if the global profile changes after its preview", async () => {
+  const fixture = await installationFixture();
+  const signal = new AbortController().signal;
+  const proposal = await planProfileToolInstallation(
+    fixture.session,
+    [fixture.installation],
+    signal,
+    "global",
+  );
+  const concurrentProfile = `${JSON.stringify(defaultToolProfile(), null, 2)}\n`;
+  await writeFile(fixture.globalPath, concurrentProfile);
+  await expect(proposal!.apply(signal)).rejects.toThrow("Environment source changed");
+  expect(fixture.rebuild).not.toHaveBeenCalled();
+  expect((await readPrivateText(fixture.globalPath))!.text).toBe(concurrentProfile);
 });
 
 it("removes its own newly published file when session persistence fails", async () => {

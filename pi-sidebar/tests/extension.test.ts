@@ -272,7 +272,7 @@ it("applies an empty Sidebar draft with default visibility and the Tools tab", a
 	const draft = await section.load(h.ctx as never);
 	await draft.apply({});
 	expect(JSON.parse(await readFile(path, "utf8"))).toEqual({});
-	expect(renderOverlayText(h)).toContain("[tools]");
+	expect(renderOverlayText(h)).toContain("\u001b[38;2;177;140;255m 󰋚  \u001b[39m");
 	await h.handlers.get("session_shutdown")?.({}, h.ctx);
 });
 
@@ -304,7 +304,7 @@ it("does not change replacement Sidebar presentation after a deferred old-sessio
 	await start(h, replacement);
 	publicationWait.resolve();
 	await pending;
-	expect(renderOverlayText(h, h.overlays.length - 1)).toContain("[tools]");
+	expect(renderOverlayText(h, h.overlays.length - 1)).toContain("\u001b[38;2;177;140;255m 󰋚  \u001b[39m");
 	await h.handlers.get("session_shutdown")?.({}, replacement);
 });
 
@@ -338,7 +338,7 @@ it("forwards cancellation through a deferred Sidebar preferences publication", a
 	publicationWait.resolve();
 	await rejected;
 	await expect(readFile(join(agentDir, "extensions/pi-sidebar/config.json"), "utf8")).rejects.toThrow();
-	expect(renderOverlayText(h)).toContain("[tools]");
+	expect(renderOverlayText(h)).toContain("\u001b[38;2;177;140;255m 󰋚  \u001b[39m");
 	await h.handlers.get("session_shutdown")?.({}, h.ctx);
 });
 
@@ -479,15 +479,16 @@ describe("extension registration", () => {
 		expect(footer.render(240).join("\n")).toContain("queued 2");
 	});
 
-	it("renders Plannotator planning as a native panel and clears only its duplicate widget", async () => {
+	it("renders Plannotator planning in Tasks and clears only its duplicate widget", async () => {
 		const h = harness();
 		h.ctx.sessionManager.getBranch.mockReturnValue([
 			{ type: "custom", customType: "plannotator", data: { phase: "planning", lastSubmittedPath: null } },
 		]);
 		await start(h);
+		await command(h, "tasks");
+		await vi.waitFor(() => expect(renderOverlayText(h)).toContain("awaiting approval"));
 		const rendered = renderOverlayText(h);
-		expect(rendered).not.toContain("PLAN");
-		expect(rendered).not.toContain("Planning");
+		expect(rendered).toContain("PLANNOTATOR TASKS");
 		const footer = renderFooter(
 			h.setFooter.mock.calls[0]?.[0],
 			vi.fn(),
@@ -495,6 +496,26 @@ describe("extension registration", () => {
 		);
 		expect(footer.render(160).join("\n")).toContain("⏸ plan");
 		await vi.waitFor(() => expect(h.setWidget).toHaveBeenCalledWith("plannotator-progress", undefined));
+	});
+
+	it("hides sandbox footer status but preserves other extension statuses", async () => {
+		const h = harness();
+		await start(h);
+		const footer = renderFooter(
+			h.setFooter.mock.calls[0]?.[0],
+			vi.fn(),
+			() =>
+				new Map([
+					["sandbox", "🔒 devcontainer"],
+					["sync", "sync warning"],
+				]),
+		);
+		const rendered = footer.render(200).join("\n");
+		expect(rendered).not.toContain("devcontainer");
+		expect(rendered).not.toContain("🔒");
+		expect(rendered).toContain("sync warning");
+		await command(h, "logs");
+		expect(renderOverlayText(h)).toContain("\u001b[38;2;177;140;255m 󰋚  \u001b[39m");
 	});
 
 	it("registers the command, no shortcuts, and one footer in TUI mode", async () => {

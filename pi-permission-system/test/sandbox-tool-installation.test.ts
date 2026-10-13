@@ -5,10 +5,13 @@ import {
 } from "../src/sandbox/tool-installation.ts";
 import type { SandboxSession } from "../src/sandbox/session.ts";
 import type { SandboxStartupDisplay } from "../src/sandbox/startup-ui.ts";
+import * as profileInstallation from "../src/sandbox/profile-tool-installation.ts";
+import { globalToolProfilePath, projectToolProfilePath } from "../src/sandbox/tool-profile.ts";
 
 const planner = vi.hoisted(() => vi.fn());
 vi.mock("../src/sandbox/image-tools.ts", () => ({ planImageTools: planner }));
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.resetAllMocks();
 });
 
@@ -97,6 +100,65 @@ it("previews a missing Bun installation before building and returns its guest ex
     containerGeneration: 2,
   });
 });
+
+it.each(["global", "project"] as const)(
+  "uses the selected %s profile while retaining installation approval and runtime verification",
+  async (scope) => {
+    const fixture = installationFixture();
+    const project = { kind: "projects" as const, id: "a".repeat(64), root: "/project" };
+    Object.assign(fixture.session.options, {
+      agentDir: "/agent",
+      resolved: { ...fixture.session.options.resolved, project, layers: {} },
+    });
+    const planProfile = vi
+      .spyOn(profileInstallation, "planProfileToolInstallation")
+      .mockResolvedValue({
+        preview: `Save private ${scope} tools`,
+        apply: fixture.apply,
+      });
+    const result = await requestSandboxTool(
+      fixture.session,
+      bunRequest,
+      fixture.signal,
+      undefined,
+      undefined,
+      scope,
+    );
+    expect(planProfile).toHaveBeenCalledExactlyOnceWith(
+      fixture.session,
+      [
+        {
+          id: "bun",
+          version: "1.3.0",
+          command: ["npm", "install", "--global", "bun@1.3.0"],
+          executable: "bun",
+          prerequisites: ["npm"],
+          environment: {},
+        },
+      ],
+      fixture.signal,
+      scope,
+    );
+    expect(planner).not.toHaveBeenCalled();
+    expect(fixture.confirm).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining(`Save private ${scope} tools`),
+      fixture.signal,
+      undefined,
+    );
+    expect(fixture.apply).toHaveBeenCalledExactlyOnceWith(fixture.signal);
+    expect(fixture.execute).toHaveBeenCalledExactlyOnceWith({
+      command: ["sh", "-c", 'command -v "$1"', "sh", "bun"],
+      signal: fixture.signal,
+      timeoutMs: 10_000,
+    });
+    expect(result.toolScope).toBe(scope);
+    expect(result.toolProfilePath).toBe(
+      scope === "global"
+        ? globalToolProfilePath("/agent")
+        : projectToolProfilePath("/agent", project),
+    );
+  },
+);
 
 it("does not build or probe when the operator denies installation", async () => {
   const fixture = installationFixture();
