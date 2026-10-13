@@ -220,6 +220,7 @@ function serverInstallCommands(tool: CatalogTool, platform: ToolPlatform): strin
     const rid = dotnetRuntimeIdentifier(platform);
     const packageName = `roslyn-language-server.${rid}`;
     const dotnet = catalogTool("dotnet-runtime", "10.0.102");
+    const nativeServer = `${prefix}/Microsoft.CodeAnalysis.LanguageServer`;
     return [
       ...downloadCommands(
         {
@@ -232,6 +233,7 @@ function serverInstallCommands(tool: CatalogTool, platform: ToolPlatform): strin
       "unzip -q /tmp/roslyn.zip -d /tmp/roslyn-package",
       `mkdir -p ${shellQuote(prefix)}`,
       `cp -a /tmp/roslyn-package/tools/net10.0/${rid}/. ${shellQuote(`${prefix}/`)}`,
+      `chmod 755 ${shellQuote(nativeServer)}`,
       ...launcherCommands(
         tool.executable,
         [dotnet.executable, `${prefix}/roslyn-language-server.dll`],

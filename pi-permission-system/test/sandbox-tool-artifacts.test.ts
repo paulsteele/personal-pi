@@ -1,5 +1,9 @@
 import { expect, it } from "vitest";
-import { STANDARD_TOOL_CATALOG } from "../src/sandbox/tool-catalog.ts";
+import {
+  catalogTool,
+  catalogToolPrefix,
+  STANDARD_TOOL_CATALOG,
+} from "../src/sandbox/tool-catalog.ts";
 import { toolArtifactRecipe } from "../src/sandbox/tool-artifacts.ts";
 import { toolBuilderReference } from "../src/sandbox/tool-builders.ts";
 import { toolRuntimeDownload } from "../src/sandbox/tool-downloads.ts";
@@ -74,6 +78,25 @@ it("exports only the selected server prefix from its independent build stage", (
   expect(recipe.files["install.sh"]).toContain("sha512sum --check");
   expect(recipe.files["install.sh"]).toContain(node.executable);
   expect(recipe.files["install.sh"]).not.toContain("npm install");
+});
+
+it.each([
+  { architecture: "amd64", distribution: "debian", release: "12", libc: "glibc" },
+  { architecture: "arm64", distribution: "debian", release: "12", libc: "glibc" },
+  { architecture: "amd64", distribution: "alpine", release: "3.23", libc: "musl" },
+  { architecture: "arm64", distribution: "alpine", release: "3.23", libc: "musl" },
+])("marks Roslyn's native child executable on $libc $architecture", (input) => {
+  const tool = catalogTool("roslyn", "5.12.0-1.26426.8");
+  const dotnet = catalogTool("dotnet-runtime", "10.0.102");
+  const recipe = toolArtifactRecipe({
+    tool,
+    platform: resolveToolPlatform({ os: "linux", ...input }),
+    builderImageId: `sha256:${"a".repeat(64)}`,
+    dependencies: [{ tool: dotnet, imageId: `sha256:${"b".repeat(64)}` }],
+  });
+  const nativeServer = `${catalogToolPrefix(tool)}/Microsoft.CodeAnalysis.LanguageServer`;
+  expect(recipe.files["install.sh"]).toContain(`chmod 755 '${nativeServer}'\n`);
+  expect(recipe.files["install.sh"]).toContain(`chmod 755 '${tool.executable}'\n`);
 });
 
 it("builds Node against musl rather than copying a glibc archive", () => {
