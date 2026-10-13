@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.0 — 2026-10-13
 
 - Save every accepted Settings edit immediately without Apply/Done buttons; General Settings edits also migrate legacy policy without a separate setup command. Manual settings edits retain separate mount, initialization, and rebuild authorization.
 - Remove `/sandbox host-commands`; authorize native rules through direct private-file edits or Project Host Commands in Settings. Saving the file or accepting a Settings edit is the only authorization step.
