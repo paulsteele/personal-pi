@@ -27,6 +27,7 @@ import {
   devcontainerDefinitionSchema,
   globalDefinitionPath,
   projectDefinitionPath,
+  resolveSandboxProject,
 } from "./definition.ts";
 
 async function editHostRules(
@@ -54,23 +55,16 @@ async function editHostRules(
           label: "Add host executable",
           description: "Any arguments; optional absolute binary path",
         },
-        {
-          id: "done",
-          label: "Use these draft rules",
-          description: "Nothing is authorized until you Apply the section",
-        },
+        { id: "back", label: "Back", description: "Accepted rule edits save immediately" },
       ],
       signal,
     );
-    if (!choice) {
+    if (!choice || choice === "back") {
       return undefined;
-    }
-    if (choice === "done") {
-      return { value: rules };
     }
     if (choice.startsWith("remove:")) {
       rules.splice(Number(choice.slice("remove:".length)), 1);
-      continue;
+      return { value: rules };
     }
     const name = await inputPanel(
       ctx,
@@ -101,7 +95,7 @@ async function editHostRules(
       rule = { executable: trimmedName, ...(trimmedPath ? { path: trimmedPath } : {}) };
     }
     const validated = hostCommandProfileSchema.parse({ hostCommands: [...rules, rule] });
-    rules.splice(0, rules.length, ...validated.hostCommands);
+    return { value: validated.hostCommands };
   }
 }
 
@@ -122,23 +116,20 @@ export function registerSandboxSettings(
   registerSandboxSettingsSection(pi, {
     id: "sandbox",
     title: "General Settings",
-    description: "Permission rules, setup assistance, and timeouts",
+    description: "Permission rules, host environment imports, and timeouts",
     effect:
-      "Permission rules apply on the next action; startup/build settings apply on next sandbox startup.",
+      "Edits save immediately. Permission rules apply on the next action; startup/build settings apply on next sandbox startup.",
     fields: [
       { path: "permission", label: "Explicit permission rules", kind: "json" },
-      { path: "sandbox.modelAssistedSetup", label: "Model-assisted setup", kind: "boolean" },
       { path: "sandbox.hostEnvironment", label: "Imported host environment names", kind: "json" },
       { path: "sandbox.startupTimeoutMs", label: "Startup timeout (ms)", kind: "number" },
       { path: "sandbox.buildTimeoutMs", label: "Build timeout (ms)", kind: "number" },
     ],
     async load() {
       const loaded = await loadSandboxSettings(agentDir);
-      if (loaded.needsMigration) {
-        throw new Error("Migrate legacy settings with /sandbox setup before editing");
-      }
       return {
         value: loaded.settings,
+        needsInitialPublication: loaded.needsMigration || loaded.revision === undefined,
         async apply(value, signal) {
           const settings = parseSandboxSettings(value);
           signal?.throwIfAborted();
@@ -165,18 +156,19 @@ export function registerSandboxSettings(
     title: "Project Host Commands",
     description: "Authorize native executables and exact project scripts",
     effect:
-      "Your Apply authorizes these native commands with any arguments. Rules apply to subsequent Bash calls.",
+      "Accepted edits authorize native commands with any arguments. Rules apply to subsequent Bash calls.",
     fields: [
       {
         path: "hostCommands",
         label: "Host rules",
         kind: "json",
         edit: editHostRules,
-        description: "Add/remove native scripts and executables. Apply is your authorization.",
+        description:
+          "Add/remove native scripts and executables. Each accepted edit saves and authorizes the rule.",
       },
     ],
-    async load() {
-      const project = getSession().options.resolved.project;
+    async load(ctx) {
+      const project = await resolveSandboxProject(ctx.cwd, agentDir);
       const profile = await loadHostCommandProfile(agentDir, project);
       return {
         value: { hostCommands: profile.rules },
@@ -218,11 +210,11 @@ export function registerSandboxSettings(
         { path: "remoteEnv", label: "Remote environment", kind: "json", secret: true },
         { path: "buildArgs", label: "Build arguments", kind: "json", secret: true },
       ],
-      async load() {
+      async load(ctx) {
         const path =
           scope === "global"
             ? globalDefinitionPath(agentDir)
-            : projectDefinitionPath(agentDir, getSession().options.resolved.project);
+            : projectDefinitionPath(agentDir, await resolveSandboxProject(ctx.cwd, agentDir));
         const stored = await readPrivateText(path);
         const definition = stored
           ? JSON.parse(stored.text)
@@ -286,11 +278,11 @@ export function registerSandboxSettings(
         },
         { path: "exclude", label: "Excluded optional tools", kind: "json" },
       ],
-      async load() {
+      async load(ctx) {
         const path =
           scope === "global"
             ? globalToolProfilePath(agentDir)
-            : projectToolProfilePath(agentDir, getSession().options.resolved.project);
+            : projectToolProfilePath(agentDir, await resolveSandboxProject(ctx.cwd, agentDir));
         const stored = await loadToolProfile(path);
         const value =
           stored?.profile ??
@@ -339,8 +331,9 @@ export function registerSandboxSettings(
       { path: "postStartCommand", label: "Post-start command", kind: "json" },
       { path: "postAttachCommand", label: "Post-attach command", kind: "json" },
     ],
-    async load() {
-      const path = projectEnvironmentPath(agentDir, getSession().options.resolved.project);
+    async load(ctx) {
+      const project = await resolveSandboxProject(ctx.cwd, agentDir);
+      const path = projectEnvironmentPath(agentDir, project);
       const stored = await readPrivateText(path);
       const value = parseProjectEnvironment(stored ? JSON.parse(stored.text) : { version: 1 });
       return {

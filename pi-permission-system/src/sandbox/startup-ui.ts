@@ -1,5 +1,6 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { awaitSandboxWork } from "./cancellation.ts";
+import { SandboxStartupLog } from "./startup-log.ts";
 import {
   matchesKey,
   stripTerminalSequences,
@@ -12,6 +13,7 @@ import {
 export interface SandboxStartupProgress {
   stage(text: string): void;
   output(text: string): void;
+  diagnostic?(text: string): void;
 }
 
 export interface SandboxStartupDisplay {
@@ -260,10 +262,67 @@ export class SandboxStartupConsole implements Component, SandboxStartupProgress 
 export class SandboxStartupUI implements SandboxStartupDisplay {
   private presentationOwner?: AbortController;
   private active?: { console: SandboxStartupConsole; finish: () => void };
+  private activeProgress?: SandboxStartupProgress;
+  latestLogPath?: string;
 
-  constructor(private readonly context: () => ExtensionContext | undefined) {}
+  constructor(
+    private readonly context: () => ExtensionContext | undefined,
+    private readonly logDirectory?: () => string,
+  ) {}
 
   async run<T>(
+    title: string,
+    operation: (progress: SandboxStartupProgress) => Promise<T>,
+    cancellationSignal?: AbortSignal,
+  ): Promise<T> {
+    cancellationSignal?.throwIfAborted();
+    if (this.activeProgress) {
+      return operation(this.activeProgress);
+    }
+    const warning = (message: string) => this.context()?.ui.notify(message, "warning");
+    const log = this.logDirectory
+      ? await SandboxStartupLog.create(this.logDirectory(), warning)
+      : undefined;
+    this.latestLogPath = log?.path;
+    log?.record("start", title);
+    try {
+      return await this.present(
+        title,
+        async (display) => {
+          const progress: SandboxStartupProgress = {
+            stage: (text) => {
+              log?.record("stage", text);
+              display.stage(text);
+            },
+            output: (text) => {
+              log?.record("output", text);
+              display.output(text);
+            },
+            diagnostic: (text) => log?.record("diagnostic", text),
+          };
+          this.activeProgress = progress;
+          if (log) {
+            display.output(`Diagnostic log: ${log.path}\n`);
+          }
+          try {
+            const result = await operation(progress);
+            log?.record("success", title);
+            return result;
+          } finally {
+            this.activeProgress = undefined;
+          }
+        },
+        cancellationSignal,
+      );
+    } catch (error) {
+      log?.record("failure", String(error));
+      throw error;
+    } finally {
+      log?.close();
+    }
+  }
+
+  private async present<T>(
     title: string,
     operation: (progress: SandboxStartupProgress) => Promise<T>,
     cancellationSignal?: AbortSignal,

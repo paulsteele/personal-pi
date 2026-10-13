@@ -329,6 +329,8 @@ export class SandboxSession {
         generation: 1,
         signal: startupSignal,
         progress: (text) => progress.output(text),
+        stage: (text) => progress.stage(text),
+        diagnostic: (text) => progress.diagnostic?.(text),
         confirmHostInitialization: (preview) => this.options.confirm(preview, startupSignal),
       });
       this.record = {
@@ -356,7 +358,9 @@ export class SandboxSession {
       }
     }
     startupSignal.throwIfAborted();
-    progress.stage("Starting approved port forwarders…");
+    progress.stage(
+      declaredPorts.length ? "Starting approved port forwarders…" : "Saving ready devcontainer…",
+    );
     this.record = {
       ...this.record!,
       approvedPorts: declaredPorts,
@@ -447,6 +451,8 @@ export class SandboxSession {
         checkpointImage,
         generation,
         progress: (text) => progress.output(text),
+        stage: (text) => progress.stage(text),
+        diagnostic: (text) => progress.diagnostic?.(text),
         confirmHostInitialization: (preview) => this.options.confirm(preview, signal),
       });
       return {
@@ -647,6 +653,8 @@ if record.exists():
         checkpointImage: checkpoint.trim(),
         signal: operationSignal,
         progress: (text) => progress.output(text),
+        stage: (text) => progress.stage(text),
+        diagnostic: (text) => progress.diagnostic?.(text),
         confirmHostInitialization: (preview) =>
           this.options.confirm(preview, operationSignal, toolCallId),
       });
@@ -785,6 +793,8 @@ if record.exists():
         generation,
         signal: operationSignal,
         progress: (text) => progress.output(text),
+        stage: (text) => progress.stage(text),
+        diagnostic: (text) => progress.diagnostic?.(text),
         confirmHostInitialization: (preview) => this.options.confirm(preview, operationSignal),
       });
       replacementContainer = environment.container;

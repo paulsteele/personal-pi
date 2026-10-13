@@ -17,10 +17,17 @@ import {
 import { LSP_PRESETS, presetById, presetRoute } from "./lsp-presets.js";
 import type { LspSetupPorts } from "./lsp-setup.js";
 import type { QualitySandbox, QualitySandboxExecuteOptions } from "./sandbox.js";
+import { openConfigFile } from "@paulsteele/pi-shared-ui";
+
+vi.mock("@paulsteele/pi-shared-ui", async (original) => ({
+	...(await original<typeof import("@paulsteele/pi-shared-ui")>()),
+	openConfigFile: vi.fn(async () => {}),
+}));
 
 const directories: string[] = [];
 afterEach(async () => {
 	vi.restoreAllMocks();
+	vi.clearAllMocks();
 	for (const directory of directories.splice(0)) {
 		await rm(directory, { recursive: true, force: true });
 	}
@@ -144,6 +151,29 @@ async function setupFixture(files: string[], confirmations: boolean[] = []) {
 	};
 	return { ...options, options, guestRoot, hostRoot, sandbox, execute, planImageTools, applyImageTools };
 }
+
+it("opens a container LSP override draft without activating it or running guest discovery", async () => {
+	const fixture = await setupFixture([]);
+	await setupSandboxLsp({ ...fixture.options, mode: "edit" });
+	expect(openConfigFile).toHaveBeenCalledExactlyOnceWith(
+		fixture.ctx,
+		expect.stringContaining("lsp-profile-draft.json"),
+		fixture.signal,
+	);
+	expect(await loadLspDraft(fixture.agentDir, fixture.project)).toBeDefined();
+	expect(await loadLspProfile(fixture.agentDir, fixture.project)).toBeUndefined();
+	expect(fixture.execute).not.toHaveBeenCalled();
+	expect(fixture.ports.validate).not.toHaveBeenCalled();
+});
+
+it("the Settings wizard saves an empty language selection without a second confirmation", async () => {
+	const fixture = await setupFixture(["app.ts"]);
+	fixture.ports.selectLanguages = vi.fn(async () => ({ action: "continue" as const, selected: [] }));
+	const result = await setupSandboxLsp({ ...fixture.options, activation: "editor-save" });
+	expect(result?.profile.enabled).toBe(false);
+	expect((await loadLspProfile(fixture.agentDir, fixture.project))?.profile.enabled).toBe(false);
+	expect(fixture.ctx.ui.confirm).not.toHaveBeenCalled();
+});
 
 it("detects supported languages only from the guest workspace and preselects them on first setup", async () => {
 	const fixture = await setupFixture([

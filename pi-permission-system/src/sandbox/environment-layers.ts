@@ -79,6 +79,14 @@ export async function resolveEnvironmentLayers(
   };
 }
 
+export function configuredEnvironmentSourcePaths(
+  layers: EnvironmentLayers | undefined,
+): string[] | undefined {
+  return layers?.sources
+    .filter((source) => source.revision !== undefined)
+    .map((source) => source.path);
+}
+
 export async function validateEnvironmentSources(layers: EnvironmentLayers): Promise<void> {
   for (const source of layers.sources) {
     if ((await readPrivateText(source.path))?.revision !== source.revision) {

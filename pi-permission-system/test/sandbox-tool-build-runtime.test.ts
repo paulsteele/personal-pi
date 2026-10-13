@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -77,12 +78,42 @@ it("verifies a named tool under its actual remote PATH and working directory", a
       "container",
       "sh",
       "-c",
-      'command -v "$1" >/dev/null',
+      expect.stringContaining('for executable do\n  if ! command -v "$executable"'),
       "sh",
       "custom-tool",
     ],
     undefined,
   );
+});
+
+it("checks all provisioned executables in one guest process and reports a missing name", async () => {
+  const run = vi.fn(async (_args: string[]) => "");
+  await verifyRuntimeInventory({
+    run,
+    container: "container",
+    user: "developer",
+    inventory: {
+      version: 1,
+      revision: "tools",
+      platform: "fixture",
+      tools: ["sh", "definitely-missing-pi-tool"].map((executable) => ({
+        id: executable,
+        version: "1",
+        executable,
+        source: "project" as const,
+        imageId: "image",
+      })),
+    },
+  });
+  expect(run).toHaveBeenCalledOnce();
+  const args = run.mock.calls[0]![0];
+  expect(args.slice(-3)).toEqual(["sh", "sh", "definitely-missing-pi-tool"]);
+  const script = args[args.indexOf("-c") + 1]!;
+  const result = spawnSync("sh", ["-c", script, "sh", "sh", "definitely-missing-pi-tool"], {
+    encoding: "utf8",
+  });
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("Provisioned executable unavailable: definitely-missing-pi-tool");
 });
 
 it("retains approved image metadata mounts while keeping the platform probe mount-free", async () => {

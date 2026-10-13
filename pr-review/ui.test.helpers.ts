@@ -47,7 +47,7 @@ export function uiHarness() {
 				try {
 					creating = true;
 					const component = factory(
-						{ requestRender: render },
+						{ requestRender: render, stop() {}, start() {}, terminal: { write() {} } },
 						{ fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text },
 						{
 							getKeys: () => ["escape"],

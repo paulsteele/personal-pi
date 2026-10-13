@@ -1,14 +1,15 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-  Editor,
   Input,
   SelectList,
-  matchesKey,
   truncateToWidth,
   visibleWidth,
   type Component,
   type OverlayHandle,
 } from "@earendil-works/pi-tui";
+
+import { editConfigDraft } from "./external-editor.js";
+export { editConfigDraft, openConfigFile } from "./external-editor.js";
 
 export interface PanelTheme {
   fg(
@@ -271,61 +272,7 @@ export async function editorPanel(
   value: string,
   signal: AbortSignal,
 ): Promise<string | undefined> {
-  const panel = presentPanel<string | undefined>(
-    ctx,
-    (tui, theme, keys, done) => {
-      const editor = new Editor(tui, {
-        borderColor: (text) => theme.fg("borderAccent", text),
-        selectList: {
-          selectedPrefix: (text) => theme.fg("accent", text),
-          selectedText: (text) => theme.fg("text", text),
-          description: (text) => theme.fg("muted", text),
-          scrollInfo: (text) => theme.fg("muted", text),
-          noMatch: (text) => theme.fg("warning", text),
-        },
-      });
-      editor.setText(value);
-      editor.disableSubmit = true;
-      return {
-        get focused() {
-          return editor.focused;
-        },
-        set focused(value: boolean) {
-          editor.focused = value;
-        },
-        render(width: number) {
-          const frame = createPanelFrame(theme, width);
-          const rows = editor
-            .render(frame.contentWidth)
-            .slice(0, Math.max(1, tui.terminal.rows - 8));
-          return [
-            frame.rule("╭", "╮", `─ ${title} `),
-            ...rows.map((row) => frame.line(row)),
-            frame.rule("├", "┤"),
-            frame.line("Ctrl+S accept field · Esc discard field"),
-            frame.rule("╰", "╯"),
-          ];
-        },
-        invalidate() {
-          editor.invalidate();
-        },
-        handleInput(data: string) {
-          if (matchesKey(data, "ctrl+s")) {
-            done(editor.getExpandedText());
-            return;
-          }
-          if (keys.matches(data, "tui.select.cancel")) {
-            done(undefined);
-            return;
-          }
-          editor.handleInput(data);
-          tui.requestRender();
-        },
-      };
-    },
-    { signal },
-  );
-  return panel.result;
+  return editConfigDraft(ctx, title, value, signal);
 }
 
 export function settingsFlowContext(ctx: ExtensionContext, signal: AbortSignal): ExtensionContext {
@@ -597,20 +544,19 @@ export async function openSettingsSection(
     return;
   }
   let loaded = await section.load(ctx);
-  let draft = structuredClone(loaded.value);
-  let error: string | undefined;
   for (;;) {
     signal.throwIfAborted();
-    const dirty = JSON.stringify(draft) !== JSON.stringify(loaded.value);
     const fields = section.fields
       .filter((field) => !field.group)
       .map((field) => {
-        const value = fieldValue(draft, field.path);
+        const value = fieldValue(loaded.value, field.path);
         let display: string;
         if (field.secret) {
           display = value === undefined ? "not set" : "configured (hidden)";
         } else if (value === undefined) {
           display = "default";
+        } else if (field.kind === "json") {
+          display = "configured — open in $EDITOR";
         } else {
           display = JSON.stringify(value);
         }
@@ -625,7 +571,7 @@ export async function openSettingsSection(
     ];
     const choice = await chooseMenu(
       ctx,
-      `${section.title}${dirty ? " *" : ""}`,
+      section.title,
       [
         ...fields,
         ...groups.map((group) => ({ id: `group:${group}`, label: `› ${group}` })),
@@ -634,45 +580,15 @@ export async function openSettingsSection(
           label,
           description,
         })),
-        { id: "apply", label: "Apply changes", description: error ?? section.effect },
-        { id: "back", label: "Back" },
+        { id: "back", label: "Back", description: section.effect },
       ],
       signal,
     );
     if (choice === undefined || choice === "back") {
-      if (
-        !dirty ||
-        (await chooseMenu(
-          ctx,
-          "Discard unsaved changes?",
-          [
-            { id: "discard", label: "Discard" },
-            { id: "keep", label: "Keep editing" },
-          ],
-          signal,
-        )) === "discard"
-      ) {
-        return;
-      }
-      continue;
+      return;
     }
     try {
-      if (choice === "apply") {
-        if (dirty || loaded.needsInitialPublication) {
-          signal.throwIfAborted();
-          if (!ctx.isIdle()) {
-            throw new Error("Wait for the agent to finish before applying settings");
-          }
-          await loaded.apply(draft, signal);
-          signal.throwIfAborted();
-          ctx.ui.notify(section.effect, "info");
-          loaded = await section.load(ctx);
-          draft = structuredClone(loaded.value);
-        }
-      } else if (choice.startsWith("action:")) {
-        if (dirty) {
-          throw new Error("Apply or discard changes before opening a setup flow");
-        }
+      if (choice.startsWith("action:")) {
         if (!ctx.isIdle()) {
           throw new Error("Wait for the agent to finish before starting a setup flow");
         }
@@ -687,7 +603,6 @@ export async function openSettingsSection(
         }
         signal.throwIfAborted();
         loaded = await section.load(ctx);
-        draft = structuredClone(loaded.value);
       } else {
         let selectedFieldPath = choice.slice("field:".length);
         if (choice.startsWith("group:")) {
@@ -710,16 +625,29 @@ export async function openSettingsSection(
         }
         const field = section.fields.find((field) => field.path === selectedFieldPath);
         if (field) {
-          const result = await editField(ctx, field, fieldValue(draft, field.path), signal);
-          if (result) {
-            assignField(draft, field.path, result.value);
+          const result = await editField(ctx, field, fieldValue(loaded.value, field.path), signal);
+          signal.throwIfAborted();
+          if (!result) {
+            continue;
           }
+          const edited = structuredClone(loaded.value);
+          assignField(edited, field.path, result.value);
+          const hasChanged = JSON.stringify(edited) !== JSON.stringify(loaded.value);
+          if (!hasChanged && !loaded.needsInitialPublication) {
+            continue;
+          }
+          if (!ctx.isIdle()) {
+            throw new Error("Wait for the agent to finish before saving settings");
+          }
+          await loaded.apply(edited, signal);
+          signal.throwIfAborted();
+          loaded = await section.load(ctx);
+          ctx.ui.notify(section.effect, "info");
         }
       }
-      error = undefined;
     } catch (failure) {
       signal.throwIfAborted();
-      error = failure instanceof Error ? failure.message : String(failure);
+      const error = failure instanceof Error ? failure.message : String(failure);
       ctx.ui.notify(error, "error");
     }
   }

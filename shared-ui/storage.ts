@@ -56,13 +56,13 @@ export async function fileSettingsDraft(
       const lockPath = `${path}.lock`;
       const lock = await open(lockPath, "wx", 0o600).catch(() => {
         throw new Error(
-          "Settings publication is already active; reopen the section before applying",
+          "Settings publication is already active; reopen the section before editing",
         );
       });
       const temporary = `${path}.${randomUUID()}.tmp`;
       try {
         if (contentHash(await readConfig(path)) !== expectedContentHash) {
-          throw new Error("Settings changed outside this menu; reopen the section before applying");
+          throw new Error("Settings changed outside this menu; reopen the section before editing");
         }
         signal?.throwIfAborted();
         await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, {
@@ -70,7 +70,7 @@ export async function fileSettingsDraft(
           flag: "wx",
         });
         if (contentHash(await readConfig(path)) !== expectedContentHash) {
-          throw new Error("Settings changed outside this menu; reopen the section before applying");
+          throw new Error("Settings changed outside this menu; reopen the section before editing");
         }
         signal?.throwIfAborted();
         await rename(temporary, path);

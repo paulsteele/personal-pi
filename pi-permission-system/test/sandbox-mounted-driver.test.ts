@@ -100,7 +100,12 @@ async function mountedDriverFixture() {
       }
     }
     callback(null, stdout, "");
-    return { stdout: { on() {} }, stderr: { on() {} } };
+    return {
+      stdout: {
+        on: (_event: string, listener: (chunk: Buffer) => void) => listener(Buffer.from(stdout)),
+      },
+      stderr: { on() {} },
+    };
   });
   let injectedMounts: unknown;
   mocks.adapter.mockImplementation(async ({ authority }) => ({
@@ -166,6 +171,27 @@ it("restores saved artifact mounts before devcontainer lifecycle execution witho
   expect(destinationProbe).not.toContain("--mount");
   const runtimeChecks = fixture.engineCalls.filter((args) => args[0] === "exec");
   expect(runtimeChecks.some((args) => args.join(" ").includes("/proc/self/mountinfo"))).toBe(true);
+});
+
+it("reports real startup stages while keeping inspection JSON in diagnostics only", async () => {
+  const fixture = await mountedDriverFixture();
+  const progress = vi.fn();
+  const stage = vi.fn();
+  const diagnostic = vi.fn();
+  await createDevcontainer({ ...fixture.options, progress, stage, diagnostic });
+  expect(stage.mock.calls.map(([text]) => text)).toEqual([
+    "Preparing devcontainer configuration…",
+    "Validating development image…",
+    "Validating tool artifact mounts and destinations…",
+    "Starting devcontainer and running lifecycle hooks…",
+    "Loading container environment…",
+    "Verifying provisioned runtime executables…",
+  ]);
+  expect(progress).not.toHaveBeenCalled();
+  expect(diagnostic).toHaveBeenCalledWith(
+    expect.stringContaining('podman inspect stdout: [{"Id":'),
+  );
+  expect(fixture.engineCalls.filter((args) => args[0] === "inspect").length).toBeGreaterThan(0);
 });
 
 it("reports a missing saved artifact without starting a replacement container", async () => {

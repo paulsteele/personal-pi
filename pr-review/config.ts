@@ -1,6 +1,14 @@
 import { join } from "node:path";
 import { publish, readStored } from "./storage.js";
-import { ConfigSchema, RuntimeConfigSchema, validate, type Config, type RuntimeConfig } from "./types.js";
+import {
+	ConfigSchema,
+	RuntimeConfigSchema,
+	ReviewPreferencesSchema,
+	validate,
+	type Config,
+	type RuntimeConfig,
+	type ReviewPreferences,
+} from "./types.js";
 
 export const BUDGETS = Object.freeze({
 	concurrency: 4,
@@ -29,15 +37,38 @@ export function normalizeConfig(config: Config): RuntimeConfig {
 		historyLimit: config.historyLimit,
 	};
 }
+export function validateReviewPreferences(value: unknown): ReviewPreferences {
+	const preferences = validate(ReviewPreferencesSchema, value);
+	if ((preferences.provider === undefined) !== (preferences.model === undefined)) {
+		throw new Error("Select both PR reviewer provider and model");
+	}
+	return preferences;
+}
+
+export async function loadReviewPreferences(
+	root: string,
+	notice?: (message: string) => void,
+): Promise<ReviewPreferences | undefined> {
+	const stored = await readStored(root, join(root, "config.json"));
+	if (!stored) {
+		return undefined;
+	}
+	if ((stored.value as { schemaVersion?: unknown }).schemaVersion === 1) {
+		notice?.(LEGACY_NOTICE);
+		return normalizeConfig(validate(ConfigSchema, stored.value));
+	}
+	return validateReviewPreferences(stored.value);
+}
+
 export async function loadConfig(
 	root: string,
 	notice?: (message: string) => void,
 ): Promise<RuntimeConfig | undefined> {
-	const stored = await readStored(root, join(root, "config.json"));
-	if (!stored) return undefined;
-	const config = validate(ConfigSchema, stored.value);
-	if (config.schemaVersion === 1) notice?.(LEGACY_NOTICE);
-	return normalizeConfig(config);
+	const preferences = await loadReviewPreferences(root, notice);
+	if (!preferences?.provider || !preferences.model) {
+		return undefined;
+	}
+	return validate(RuntimeConfigSchema, preferences);
 }
 export async function saveModel(
 	root: string,
@@ -48,9 +79,7 @@ export async function saveModel(
 ): Promise<Config> {
 	const path = join(root, "config.json");
 	const stored = await readStored(root, path);
-	const current = stored
-		? normalizeConfig(validate(ConfigSchema, stored.value))
-		: { schemaVersion: 2 as const, ...DEFAULT_CONFIG };
+	const current = (await loadReviewPreferences(root)) ?? { schemaVersion: 2 as const, ...DEFAULT_CONFIG };
 	const next = validate(RuntimeConfigSchema, { ...current, provider, model, thinking });
 	await publish(root, path, next, stored?.revision, signal);
 	return next;

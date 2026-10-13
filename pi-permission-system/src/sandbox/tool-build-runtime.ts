@@ -220,11 +220,23 @@ done
       options.signal,
     );
   }
-  for (const tool of options.inventory.tools) {
+  const executables = options.inventory.tools.map((tool) => tool.executable);
+  if (executables.length) {
+    const verifyExecutablesScript = [
+      "set -eu",
+      "for executable do",
+      '  if ! command -v "$executable" >/dev/null; then',
+      '    printf "Provisioned executable unavailable: %s\\n" "$executable" >&2',
+      "    exit 1",
+      "  fi",
+      "done",
+    ].join("\n");
     await options.run(
-      [...execContextArguments, "sh", "-c", 'command -v "$1" >/dev/null', "sh", tool.executable],
+      [...execContextArguments, "sh", "-c", verifyExecutablesScript, "sh", ...executables],
       options.signal,
     );
+  }
+  for (const tool of options.inventory.tools) {
     const isRuntimeTool = tool.id.endsWith("-runtime");
     if (isRuntimeTool) {
       const versionArgument = tool.id === "go-runtime" ? "version" : "--version";

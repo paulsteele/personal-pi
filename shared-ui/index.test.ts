@@ -18,9 +18,11 @@ import {
   type SettingsSection,
 } from "./index.js";
 import { fileSettingsDraft } from "./storage.js";
+import * as configEditors from "./external-editor.js";
 
 const directories: string[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
   );
@@ -87,21 +89,71 @@ function sectionFixture() {
   return { section, apply, saved: () => saved };
 }
 
-it("saves a section draft only after explicit Apply", async () => {
+it("saves an accepted field edit immediately without an Apply button", async () => {
   const fixture = sectionFixture();
-  const ui = menuHarness(["field:enabled", "value:false", "apply", "back"]);
+  const ui = menuHarness(["field:enabled", "value:false", "back"]);
   await openSettingsSection(ui.ctx, fixture.section, new AbortController().signal);
   expect(fixture.apply).toHaveBeenCalledTimes(1);
   expect(fixture.saved()).toEqual({ enabled: false, limit: 10, untouched: "preserve" });
-  expect(ui.frames.some((frame) => frame.includes("Fixture *"))).toBe(true);
+  expect(ui.frames.join("\n")).not.toContain("Apply changes");
+  expect(ui.frames.join("\n")).not.toContain("Discard unsaved changes");
 });
 
-it("discarding an edited section does not save", async () => {
+it("saves JSON configuration when the external editor returns without rendering its contents", async () => {
   const fixture = sectionFixture();
-  const ui = menuHarness(["field:enabled", "value:false", "back", "discard"]);
+  fixture.section.fields = [{ path: "rules", label: "Rules", kind: "json" }];
+  const rules = { included: ["private-pattern"] };
+  fixture.section.load = async () => ({ value: { rules }, apply: fixture.apply });
+  const editor = vi.spyOn(configEditors, "editConfigDraft").mockResolvedValue('{"included":[]}');
+  const ui = menuHarness(["field:rules", "back"]);
+  await openSettingsSection(ui.ctx, fixture.section, new AbortController().signal);
+  const formattedRules = `{
+  "included": [
+    "private-pattern"
+  ]
+}`;
+  expect(editor).toHaveBeenCalledWith(ui.ctx, "Rules", formattedRules, expect.any(AbortSignal));
+  expect(ui.frames.join("\n")).not.toContain("private-pattern");
+  expect(ui.frames.join("\n")).toContain("open in $EDITOR");
+  expect(fixture.apply).toHaveBeenCalledExactlyOnceWith(
+    { rules: { included: [] } },
+    expect.any(AbortSignal),
+  );
+});
+
+it("opening and leaving a section does not save defaults", async () => {
+  const fixture = sectionFixture();
+  const ui = menuHarness(["back"]);
   await openSettingsSection(ui.ctx, fixture.section, new AbortController().signal);
   expect(fixture.apply).not.toHaveBeenCalled();
   expect(fixture.saved().enabled).toBe(true);
+});
+
+it("later edits use the reloaded saved settings", async () => {
+  const fixture = sectionFixture();
+  fixture.section.fields.push({ path: "limit", label: "Limit", kind: "number" });
+  const ui = menuHarness(["field:enabled", "value:false", "field:limit", "20", "back"]);
+  await openSettingsSection(ui.ctx, fixture.section, new AbortController().signal);
+  expect(fixture.apply).toHaveBeenNthCalledWith(
+    1,
+    { enabled: false, limit: 10, untouched: "preserve" },
+    expect.any(AbortSignal),
+  );
+  expect(fixture.apply).toHaveBeenNthCalledWith(
+    2,
+    { enabled: false, limit: 20, untouched: "preserve" },
+    expect.any(AbortSignal),
+  );
+});
+
+it("runs setup actions without an Apply step", async () => {
+  const fixture = sectionFixture();
+  const run = vi.fn(async () => {});
+  fixture.section.actions = [{ id: "setup", label: "Setup", run }];
+  const ui = menuHarness(["action:setup", "back"]);
+  await openSettingsSection(ui.ctx, fixture.section, new AbortController().signal);
+  expect(run).toHaveBeenCalledOnce();
+  expect(fixture.apply).not.toHaveBeenCalled();
 });
 
 it("cancelled fields leave their section unchanged", async () => {
@@ -111,13 +163,14 @@ it("cancelled fields leave their section unchanged", async () => {
   expect(fixture.apply).not.toHaveBeenCalled();
 });
 
-it("keeps a rejected draft available for correction without claiming Apply succeeded", async () => {
+it("a rejected edit preserves the saved value and allows another edit", async () => {
   const fixture = sectionFixture();
   fixture.apply.mockRejectedValueOnce(new Error("invalid settings"));
-  const ui = menuHarness(["field:enabled", "value:false", "apply", "back", "discard"]);
+  const ui = menuHarness(["field:enabled", "value:false", "field:enabled", "value:false", "back"]);
   await openSettingsSection(ui.ctx, fixture.section, new AbortController().signal);
   expect(ui.ctx.ui.notify).toHaveBeenCalledWith("invalid settings", "error");
-  expect(fixture.saved().enabled).toBe(true);
+  expect(fixture.apply).toHaveBeenCalledTimes(2);
+  expect(fixture.saved().enabled).toBe(false);
 });
 
 it("never renders the existing credential value in the settings menu or replacement editor", async () => {
@@ -127,9 +180,16 @@ it("never renders the existing credential value in the settings menu or replacem
     { path: "credential", label: "Credential", kind: "string", secret: true },
   ];
   fixture.section.load = async () => ({ value: { credential: secret }, apply: fixture.apply });
-  const ui = menuHarness(["field:credential", "replace", undefined, "back"]);
+  const editor = vi.spyOn(configEditors, "editConfigDraft").mockResolvedValue(undefined);
+  const ui = menuHarness(["field:credential", "replace", "back"]);
   await openSettingsSection(ui.ctx, fixture.section, new AbortController().signal);
   expect(ui.frames.join("\n")).not.toContain(secret);
+  expect(editor).toHaveBeenCalledWith(
+    ui.ctx,
+    "Credential — replacement",
+    "",
+    expect.any(AbortSignal),
+  );
   expect(fixture.apply).not.toHaveBeenCalled();
 });
 
@@ -280,13 +340,13 @@ it("closes a framed dialog when its nested workflow aborts without cancelling th
   expect(settings.signal.aborted).toBe(false);
 });
 
-it("publishes displayed defaults when Apply adopts a missing settings file", async () => {
+it("accepting a displayed default publishes a missing settings file", async () => {
   const directory = await mkdtemp(join(tmpdir(), "settings-defaults-"));
   directories.push(directory);
   const path = join(directory, "config.json");
   const fixture = sectionFixture();
   fixture.section.load = () => fileSettingsDraft(path, () => {}, { enabled: true });
-  const ui = menuHarness(["apply", "back"]);
+  const ui = menuHarness(["field:enabled", "value:true", "back"]);
   await openSettingsSection(ui.ctx, fixture.section, new AbortController().signal);
   expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ enabled: true });
 });
@@ -307,10 +367,10 @@ it("only one of two concurrent settings drafts can publish the same revision", a
   expect(JSON.parse(await readFile(path, "utf8")).credential).toBe("preserve");
 });
 
-it("edits a grouped field without applying the section prematurely", async () => {
+it("saves a grouped field as soon as its edit is accepted", async () => {
   const fixture = sectionFixture();
   fixture.section.fields[0]!.group = "Advanced";
-  const ui = menuHarness(["group:Advanced", "enabled", "value:false", "apply", "back"]);
+  const ui = menuHarness(["group:Advanced", "enabled", "value:false", "back"]);
   await openSettingsSection(ui.ctx, fixture.section, new AbortController().signal);
   expect(fixture.saved().enabled).toBe(false);
   expect(fixture.apply).toHaveBeenCalledTimes(1);

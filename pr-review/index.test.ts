@@ -1,5 +1,5 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { discoverSettingsSections } from "@paulsteele/pi-shared-ui";
+import { discoverSettingsSections, openConfigFile } from "@paulsteele/pi-shared-ui";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -11,6 +11,10 @@ import { DiscoverySubmission } from "./types.js";
 import { runWorker } from "./worker.js";
 import * as runtimeStorage from "./storage.js";
 vi.mock("./worker.js", () => ({ runWorker: vi.fn() }));
+vi.mock("@paulsteele/pi-shared-ui", async (original) => ({
+	...(await original<typeof import("@paulsteele/pi-shared-ui")>()),
+	openConfigFile: vi.fn(async () => {}),
+}));
 
 const dirs: string[] = [];
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -133,6 +137,23 @@ it("persists PR default values when required settings fields are unset", async (
 	});
 });
 
+it("saves review preferences before a reviewer is selected, then retains them when choosing the model", async () => {
+	const h = await interactive();
+	const section = discoverSettingsSections(h.pi).find((section) => section.id === "pr")!;
+	const settings = await section.load(h.ctx);
+	await settings.apply({ ...settings.value, concurrency: 2 });
+	const path = join(h.agentDir, "extensions/pr-review/config.json");
+	expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({ concurrency: 2 });
+	expect(JSON.parse(await readFile(path, "utf8"))).not.toHaveProperty("provider");
+	const reloaded = await section.load(h.ctx);
+	await reloaded.apply({ ...reloaded.value, modelSelection: "fake/independent" });
+	expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({
+		concurrency: 2,
+		provider: "fake",
+		model: "independent",
+	});
+});
+
 it("preserves PR configuration when the settings interaction is cancelled during publication", async () => {
 	const h = await interactive();
 	const prSettingsSection = discoverSettingsSections(h.pi).find((section) => section.id === "pr")!;
@@ -209,6 +230,11 @@ it("creates a draft with small interview dialogs, then approves it through a mod
 		return { ok: true, value, usage: { input: 0, output: 0, cost: 0 } };
 	}) as typeof runWorker);
 	await h.commands.get("pr")!.handler("setup", h.ctx);
+	expect(openConfigFile).toHaveBeenCalledWith(
+		expect.objectContaining({ cwd: h.ctx.cwd }),
+		expect.stringContaining("profile-draft.json"),
+		expect.any(AbortSignal),
+	);
 	expect(h.state.nativeDialogs).toContain("Independent PR review model");
 	expect(h.state.nativeDialogs).toContain("Fixture convention?");
 	expect(h.state.nativeDialogs).not.toContain("Activate this generated review context?");

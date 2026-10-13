@@ -34,6 +34,7 @@ export interface ToolBuildPorts {
 }
 
 export async function provisionEnvironmentImage(options: {
+  builderImageId?: string;
   baseImageId: string;
   imageUser: string;
   platform: ToolPlatform;
@@ -83,7 +84,8 @@ export async function provisionEnvironmentImage(options: {
     }
     installationIds.add(installation.id);
   }
-  const builderImageId = await options.ports.resolveBuilder(platform, options.signal);
+  const builderImageId =
+    options.builderImageId ?? (await options.ports.resolveBuilder(platform, options.signal));
   const artifacts: ToolArtifactImage[] = [];
   const artifactById = new Map<string, ToolArtifactImage>();
   const inventoryEntries: ToolInventory["tools"] = [];
@@ -138,7 +140,7 @@ export async function provisionEnvironmentImage(options: {
       kind: "artifact",
       key,
       signal: options.signal,
-      report: options.report,
+      report: (text) => options.report?.(`${tool.id}@${tool.version}: ${text}`),
       ports: {
         inspect: options.ports.inspect,
         build: (name, signal) => options.ports.build(recipe, name, signal),

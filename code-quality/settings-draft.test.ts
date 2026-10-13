@@ -18,8 +18,12 @@ import {
 import { digest } from "./proposal.js";
 import { saveConfig } from "./config.js";
 
-const approveSetup = vi.hoisted(() => vi.fn());
-vi.mock("./lsp-sandbox-setup.js", () => ({ setupSandboxLsp: approveSetup }));
+import { validateAndActivateLspDraft } from "./lsp-setup.js";
+vi.mock("./lsp-setup.js", async (original) => ({
+	...(await original<typeof import("./lsp-setup.js")>()),
+	validateAndActivateLspDraft: vi.fn(),
+}));
+const approveSetup = vi.mocked(validateAndActivateLspDraft);
 
 const directories: string[] = [];
 beforeEach(() => {
@@ -164,7 +168,7 @@ it("replaces a rejected startup barrier when the quality recovery flow retries L
 	await fixture.handlers.get("session_shutdown")!({}, fixture.ctx);
 });
 
-it("keeps the editable draft usable after validation fails and a corrected Apply succeeds", async () => {
+it("keeps the editable draft usable after validation fails and a corrected edit succeeds", async () => {
 	const fixture = await settingsFixture();
 	const draft = await fixture.section.load(fixture.ctx);
 	approveSetup.mockRejectedValueOnce(new Error("Diagnostic validation failed"));
@@ -180,7 +184,7 @@ it("keeps the editable draft usable after validation fails and a corrected Apply
 	expect(approveSetup).toHaveBeenCalledTimes(2);
 });
 
-it("refuses another Apply after an external writer changes the draft during failed validation", async () => {
+it("refuses another save after an external writer changes the draft during failed validation", async () => {
 	const fixture = await settingsFixture();
 	const draft = await fixture.section.load(fixture.ctx);
 	approveSetup.mockImplementationOnce(async () => {
@@ -213,7 +217,7 @@ it("preserves the pending draft's null base revision when an active profile appe
 		undefined,
 	);
 	const draft = await fixture.section.load(fixture.ctx);
-	approveSetup.mockResolvedValueOnce(undefined);
+	approveSetup.mockRejectedValueOnce(new Error("Validation cancelled"));
 	await expect(draft.apply({ ...draft.value, mode: "explicit" })).rejects.toThrow("cancelled");
 	const pending = (await loadLspDraft(fixture.agentDir, fixture.project))!;
 	expect(pending.draft.baseRevision).toBeNull();

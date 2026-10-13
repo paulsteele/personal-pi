@@ -20,7 +20,7 @@ export const sandboxSettingsSchema = z.strictObject({
   permission: permissionPolicy.default({}),
   sandbox: z
     .strictObject({
-      modelAssistedSetup: z.boolean().default(false),
+      modelAssistedSetup: z.boolean().optional(),
       hostEnvironment: z
         .array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/))
         .max(64)
@@ -29,11 +29,15 @@ export const sandboxSettingsSchema = z.strictObject({
       buildTimeoutMs: z.number().int().min(1000).max(7_200_000).default(1_800_000),
     })
     .default({
-      modelAssistedSetup: false,
       hostEnvironment: [],
       startupTimeoutMs: 120_000,
       buildTimeoutMs: 1_800_000,
-    }),
+    })
+    .transform((settings) => ({
+      hostEnvironment: settings.hostEnvironment,
+      startupTimeoutMs: settings.startupTimeoutMs,
+      buildTimeoutMs: settings.buildTimeoutMs,
+    })),
 });
 
 export type SandboxSettings = z.output<typeof sandboxSettingsSchema>;

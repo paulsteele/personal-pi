@@ -8,7 +8,7 @@ import { SandboxLspManager } from "./lsp-sandbox-manager.js";
 import type { LspManager } from "./lsp-manager.js";
 import { handleLspCommand } from "./lsp-commands.js";
 import { setupSandboxLsp } from "./lsp-sandbox-setup.js";
-import type { LspSetupPorts } from "./lsp-setup.js";
+import { validateAndActivateLspDraft, type LspSetupPorts } from "./lsp-setup.js";
 import { qualitySandbox, readGuestSnapshot } from "./sandbox.js";
 import { diagnosticLabel } from "./lsp-diagnostics.js";
 import { registerSettingsSection, settingsFlowContext } from "@paulsteele/pi-shared-ui";
@@ -99,6 +99,7 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 				agentDir,
 				project,
 				mode: "setup",
+				activation: "editor-save",
 				signal,
 				ports: {
 					validate: (route, owner, operationSignal) => lsp!.validate(route, owner, operationSignal),
@@ -157,21 +158,17 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 						ownedDraftRevision,
 					);
 					ownedDraftRevision = publication.revision;
-					const approved = await setupSandboxLsp({
-						pi,
-						ctx: settingsFlowContext(ctx, signal),
+					await validateAndActivateLspDraft(
+						ctx,
 						agentDir,
 						project,
-						mode: "approve",
-						signal,
-						ports: {
+						{
 							validate: (route, owner, signal) => lsp!.validate(route, owner, signal),
 							progress: (text) => ctx.ui.setStatus("quality-lsp-setup", text),
 						},
-					});
-					if (!approved) {
-						throw new Error("LSP validation/approval cancelled; active profile unchanged");
-					}
+						signal,
+						publication.revision,
+					);
 					await lsp.stop();
 					lspStartup = lsp.start(ctx.cwd, ctx.isProjectTrusted(), runtime.active);
 					await lspStartup;

@@ -3,6 +3,7 @@ import { lstat, readdir, realpath } from "node:fs/promises";
 import { basename, extname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { openConfigFile } from "@paulsteele/pi-shared-ui";
 import { canonicalPath, inside } from "./capture.js";
 import { installLsp, installationPlan, installedManagedExecutable } from "./lsp-install.js";
 import {
@@ -367,10 +368,31 @@ export async function approveLspSetup(
 	if (options.beforeValidation) {
 		await options.beforeValidation();
 	}
+	return validateAndActivateLspDraft(ctx, agentDir, project, ports, signal, pending.revision);
+}
+
+export async function validateAndActivateLspDraft(
+	ctx: ExtensionContext,
+	agentDir: string,
+	project: LspProject,
+	ports: LspSetupPorts,
+	signal: AbortSignal,
+	expectedDraftRevision: string,
+): Promise<StoredLspProfile> {
+	signal.throwIfAborted();
+	if (!ctx.isProjectTrusted()) {
+		throw new Error("Trust this project before starting its language servers");
+	}
+	const pending = await loadLspDraft(agentDir, project);
+	if (!pending || pending.revision !== expectedDraftRevision) {
+		throw new Error("LSP settings changed before validation");
+	}
 	for (const route of pending.draft.profile.routes) {
 		ports.progress(`Validating ${route.id}`);
 		const validation = await ports.validate(route, project, signal);
-		if (!validation.ready) throw new Error(`${route.id}: ${validation.summary}`);
+		if (!validation.ready) {
+			throw new Error(`${route.id}: ${validation.summary}`);
+		}
 	}
 	signal.throwIfAborted();
 	return approveLspDraft(agentDir, project, pending.revision);
@@ -400,7 +422,11 @@ export async function setupLsp(
 			pending && !pendingIsActive
 				? lspProfilePath(agentDir, project, true)
 				: await saveLspDraft(agentDir, project, profile, baseRevision, pending?.revision ?? null);
-		ctx.ui.notify(`Edit ${path}, then run /quality lsp setup approve.`, "info");
+		await openConfigFile(ctx, path, signal);
+		ctx.ui.notify(
+			`Draft saved at ${path}. Run /quality lsp setup approve to validate and activate it.`,
+			"info",
+		);
 		return undefined;
 	}
 	const discovery = await discoverLspFiles(project.root, signal);
@@ -462,7 +488,11 @@ export async function setupLsp(
 	signal.throwIfAborted();
 	const path = await saveLspDraft(agentDir, project, profile, baseRevision, pending?.revision ?? null);
 	if (advancedSetupAction === "Edit configuration file") {
-		ctx.ui.notify(`Edit ${path}, then run /quality lsp setup approve.`, "info");
+		await openConfigFile(ctx, path, signal);
+		ctx.ui.notify(
+			`Draft saved at ${path}. Run /quality lsp setup approve to validate and activate it.`,
+			"info",
+		);
 		return undefined;
 	}
 	return approveLspSetup(ctx, agentDir, project, ports, signal, {

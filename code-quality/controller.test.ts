@@ -85,44 +85,28 @@ function harness(piSessionId = "session") {
 		path: join(cwd, "a.ts"),
 	};
 }
-it("disabling settings requires confirming the waiver for a pending case", async () => {
+it("a settings edit cannot implicitly waive a pending quality case or open a second confirmation", async () => {
 	const h = harness();
 	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
 	writeFileSync(h.path, "pending");
 	await h.runtime.boundary(h.ctx, "aborted");
-	vi.mocked(h.ctx.ui.confirm).mockResolvedValue(false);
+	vi.mocked(h.ctx.ui.confirm).mockClear();
 	await expect(h.runtime.applySettings(h.ctx, { ...h.runtime.config, enabled: false })).rejects.toThrow(
-		"waiver cancelled",
+		"Resolve the pending quality case",
 	);
 	expect(h.runtime.active).toBe(true);
 	expect(h.runtime.pending).toBe(true);
-	vi.mocked(h.ctx.ui.confirm).mockResolvedValue(true);
-	await h.runtime.applySettings(h.ctx, { ...h.runtime.config, enabled: false });
-	expect(h.runtime.active).toBe(false);
-	expect(h.runtime.state?.resolution).toBe("waived");
+	expect(h.ctx.ui.confirm).not.toHaveBeenCalled();
 });
 
-it("does not waive or save settings after the owning interaction is cancelled", async () => {
+it("does not save settings after the owning interaction is cancelled", async () => {
 	const h = harness();
-	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
-	writeFileSync(h.path, "pending");
-	await h.runtime.boundary(h.ctx, "aborted");
-	let resolveConfirmation!: (value: boolean) => void;
-	vi.mocked(h.ctx.ui.confirm).mockImplementation(
-		() =>
-			new Promise<boolean>((resolve) => {
-				resolveConfirmation = resolve;
-			}),
-	);
 	const controller = new AbortController();
-	const applying = h.runtime.applySettings(h.ctx, { ...h.runtime.config, enabled: false }, controller.signal);
-	const rejected = expect(applying).rejects.toThrow();
-	await vi.waitFor(() => expect(resolveConfirmation).toBeDefined());
 	controller.abort();
-	resolveConfirmation(true);
-	await rejected;
+	await expect(
+		h.runtime.applySettings(h.ctx, { ...h.runtime.config, enabled: false }, controller.signal),
+	).rejects.toThrow();
 	expect(h.runtime.active).toBe(true);
-	expect(h.runtime.pending).toBe(true);
 });
 
 it("rejects a snapshot returned after branch restoration without mutating the replacement case", async () => {

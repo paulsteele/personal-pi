@@ -65,6 +65,16 @@ export const RuntimeConfigSchema = object({
 	requestTimeoutMs: Type.Integer({ minimum: 1000, maximum: 600000 }),
 	historyLimit: Type.Integer({ minimum: 1, maximum: 100 }),
 });
+export const ReviewPreferencesSchema = object({
+	schemaVersion: Type.Literal(2),
+	provider: Type.Optional(text(256)),
+	model: Type.Optional(text(256)),
+	thinking: enumeration(["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
+	concurrency: Type.Integer({ minimum: 1, maximum: 16 }),
+	requestTimeoutMs: Type.Integer({ minimum: 1000, maximum: 600000 }),
+	historyLimit: Type.Integer({ minimum: 1, maximum: 100 }),
+});
+export type ReviewPreferences = Static<typeof ReviewPreferencesSchema>;
 export const ConfigSchema = Type.Union([LegacyConfigSchema, RuntimeConfigSchema]);
 export type RuntimeConfig = Static<typeof RuntimeConfigSchema>;
 export const Evidence = object({

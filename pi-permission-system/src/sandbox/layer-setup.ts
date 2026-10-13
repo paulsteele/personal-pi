@@ -1,4 +1,5 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { editConfigDraft } from "@paulsteele/pi-shared-ui";
 import { resolveSandboxProject } from "./definition.ts";
 import {
   defaultToolProfile,
@@ -32,9 +33,11 @@ export async function setupEnvironmentLayer(options: {
     emptyDraft = parseProjectEnvironment({ version: 1 });
   }
   const stored = await readPrivateText(path);
-  const text = await ctx.ui.editor(
+  const text = await editConfigDraft(
+    ctx,
     `Private environment configuration\n${path}`,
     stored?.text ?? JSON.stringify(emptyDraft, null, 2),
+    ctx.signal,
   );
   if (text === undefined) {
     return;
@@ -58,7 +61,7 @@ export async function setupEnvironmentLayer(options: {
       : "Private to this project and its linked worktrees. The selected base definition is unchanged.";
   const approved = await ctx.ui.confirm(
     "Save environment configuration?",
-    `${path}\n${scope}\n${JSON.stringify(value, null, 2)}\nBuilds run inside container images. Reload/rebuild adopts these settings; running sessions are not restarted automatically. No host access is granted.`,
+    `${path}\n${scope}\nSave the draft from your editor. Builds run inside container images. Reload/rebuild adopts these settings; running sessions are not restarted automatically. No host access is granted.`,
   );
   if (!approved) {
     return;

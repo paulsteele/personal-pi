@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, it, vi } from "vitest";
-import { approveLspSetup, discoverLspFiles, setupLsp, type LspSetupPorts } from "./lsp-setup.js";
+import {
+	approveLspSetup,
+	discoverLspFiles,
+	setupLsp,
+	validateAndActivateLspDraft,
+	type LspSetupPorts,
+} from "./lsp-setup.js";
 import { loadLspDraft, loadLspProfile, resolveLspProject, saveLspDraft } from "./lsp-profile.js";
 import { managedExecutable, managedToolDirectory, presetById, presetRoute } from "./lsp-presets.js";
 import { chooseCsharpProject, nextRouteId, suggestedWorkspaceRoots } from "./lsp-setup-defaults.js";
@@ -11,10 +17,17 @@ import { installationPlan, installationSummary } from "./lsp-install.js";
 import { handleLspCommand, type LspCommandPorts } from "./lsp-commands.js";
 import * as installations from "./lsp-install.js";
 import * as presets from "./lsp-presets.js";
+import { openConfigFile } from "@paulsteele/pi-shared-ui";
+
+vi.mock("@paulsteele/pi-shared-ui", async (original) => ({
+	...(await original<typeof import("@paulsteele/pi-shared-ui")>()),
+	openConfigFile: vi.fn(async () => {}),
+}));
 
 const directories: string[] = [];
 afterEach(async () => {
 	vi.restoreAllMocks();
+	vi.clearAllMocks();
 	for (const path of directories.splice(0)) await rm(path, { recursive: true, force: true });
 });
 
@@ -80,6 +93,23 @@ it("leaves the draft unchanged when the setup picker is cancelled", async () => 
 	expect(await loadLspDraft(fixture.agentDir, fixture.project)).toEqual(initialDraft);
 	expect(fixture.confirm).not.toHaveBeenCalled();
 	expect(fixture.ports.validate).not.toHaveBeenCalled();
+});
+
+it("an accepted settings edit validates and activates its draft without a confirmation", async () => {
+	const fixture = await setupFixture([]);
+	const pending = (await loadLspDraft(fixture.agentDir, fixture.project))!;
+	const signal = new AbortController().signal;
+	const result = await validateAndActivateLspDraft(
+		fixture.ctx,
+		fixture.agentDir,
+		fixture.project,
+		fixture.ports,
+		signal,
+		pending.revision,
+	);
+	expect(fixture.confirm).not.toHaveBeenCalled();
+	expect(fixture.ports.validate).toHaveBeenCalledExactlyOnceWith(fixture.route, fixture.project, signal);
+	expect(result.profile.routes).toEqual([fixture.route]);
 });
 
 it("does not start validation until local execution is approved", async () => {
@@ -514,6 +544,11 @@ it("offers configuration-file editing only through Advanced without validation",
 		"setup",
 		fixture.ports,
 		new AbortController().signal,
+	);
+	expect(openConfigFile).toHaveBeenCalledWith(
+		fixture.ctx,
+		expect.stringContaining("lsp-profile-draft.json"),
+		expect.any(AbortSignal),
 	);
 	expect(fixture.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("setup approve"), "info");
 	expect(fixture.ports.validate).not.toHaveBeenCalled();

@@ -74,6 +74,7 @@ export async function runDevcontainerCli(options: {
   signal?: AbortSignal;
   timeoutMs?: number;
   progress?: (text: string) => void;
+  diagnostic?: (text: string) => void;
 }): Promise<string> {
   options.signal?.throwIfAborted();
   const child = spawn(process.execPath, [devcontainerExecutable(), ...options.args], {
@@ -103,6 +104,7 @@ export async function runDevcontainerCli(options: {
   }, options.timeoutMs ?? 120_000);
   options.signal?.addEventListener("abort", stop, { once: true });
   child.stdout.on("data", (chunk: Buffer) => {
+    options.diagnostic?.(`devcontainer ${options.args[0]} stdout: ${chunk.toString()}`);
     outputBytes += chunk.length;
     if (outputBytes > maxOutputBytes) {
       outputExceeded = true;
@@ -114,6 +116,7 @@ export async function runDevcontainerCli(options: {
   child.stderr.on("data", (chunk: Buffer) => {
     stderr = (stderr + chunk.toString()).slice(-12_000);
     options.progress?.(chunk.toString());
+    options.diagnostic?.(`devcontainer ${options.args[0]} stderr: ${chunk.toString()}`);
   });
   try {
     const code = await new Promise<number | null>((resolve, reject) => {

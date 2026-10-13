@@ -19,7 +19,7 @@ Resolved paths are shown by setup/status and Sidebar's Sandbox tab:
 - Project: `~/.pi/agent/extensions/pi-permission-system/{repos|projects}/<id>/devcontainer/devcontainer.json`
 - Session authority: `~/.pi/agent/extensions/pi-permission-system/sessions/<session-id-hash>/`
 
-The actual agent directory follows `getAgentDir()`/`PI_CODING_AGENT_DIR`. The global definition remains a complete fallback for projects with no base. Definitions can reference images or Containerfiles through standard build fields. Features, Compose, unsafe runtime flags, privileged mode, host namespaces/devices, and engine sockets remain rejected.
+The actual agent directory follows `getAgentDir()`/`PI_CODING_AGENT_DIR`. When neither a private project base nor a repository-local definition exists, the global base is used, including everything baked into its image. Project `tools.json` and `project-environment.json` still extend that global base; they do not require a project `devcontainer.json`. An explicit project or local base replaces the global base rather than merging with it. Definitions can reference images or Containerfiles through standard build fields. Features, Compose, unsafe runtime flags, privileged mode, host namespaces/devices, and engine sockets remain rejected.
 
 Three private configuration files extend the selected base without rewriting it:
 
@@ -52,7 +52,6 @@ The extension's built-in server/runtime installation catalog targets Debian 12/1
 {
   "permission": { "path": { "*.env": "deny" } },
   "sandbox": {
-    "modelAssistedSetup": false,
     "hostEnvironment": [],
     "startupTimeoutMs": 120000,
     "buildTimeoutMs": 1800000
@@ -60,31 +59,41 @@ The extension's built-in server/runtime installation catalog targets Debian 12/1
 }
 ```
 
-Legacy `auto` configuration requires explicit migration through setup; its classifier settings never authorize sandbox operations. Existing explicit denies remain policy restrictions. Operations within granted capabilities do not prompt, including installs, destructive project operations, credential-file access, remote mutations, and unresolved shell expansions. New host access and sandbox provisioning retain separate operator authorization. Delegated PR source disclosure is distinct from guest execution: recognized sensitive sources require fresh parent-owned disclosure approval, and sensitive local scans are refused without prompting. An approved bind alone does not authorize sending credentials to a provider.
+Legacy `auto` configuration requires migration through setup or an accepted General Settings edit; its classifier settings never authorize sandbox operations. Existing explicit denies remain policy restrictions. Operations within granted capabilities do not prompt, including installs, destructive project operations, credential-file access, remote mutations, and unresolved shell expansions. New host access and sandbox provisioning retain separate operator authorization. Delegated PR source disclosure is distinct from guest execution: recognized sensitive sources require fresh parent-owned disclosure approval, and sensitive local scans are refused without prompting. An approved bind alone does not authorize sending credentials to a provider.
 
 ## Setup and controls
 
 ```text
 /sandbox
 /sandbox status
-/sandbox host-commands         Show private project routing file and current rules
+/sandbox logs                  Show the latest diagnostic-log path
 /sandbox setup global          # Complete fallback base
 /sandbox setup global tools    # Shared personal tooling
 /sandbox setup                 # Private project environment supplement
 /sandbox setup tools           # Private project tool entries
 /sandbox setup base            # Explicit private base replacement
 /sandbox setup update
-/sandbox setup model on
-/sandbox setup model off
 ```
 
 The first layered startup asks once to save the global server/runtime catalog when missing. It does not ask which languages to install. Existing base definitions remain bases; private supplements are separate documents. Global tool updates affect future builds, not running sessions. A resumed session with changed tooling offers a rebuild with saved binds.
 
-Explicit model-assisted base setup uses the current session model, never a separately selected classifier. It proposes a standard definition and companion files, including viable tool installations and candidate mounts. The proposal remains in memory until approval; only approval writes private configuration. It does not install tools, run host commands, or grant mounts while generating.
+Settings → Sandbox provides manual editors for Global Container Base, Project Container Base, Project Host Commands, Global Sandbox Tools, Project Sandbox Tools, and Project Environment. They remain available even when the sandbox is unavailable and resolve private configuration paths from the current context's project identity without starting a container. Rebuild still requires a ready sandbox. `/sandbox setup global` and `/sandbox setup base` open the manual base editor directly, including during bootstrap. Reload/rebuild adopts saved changes; settings edits do not restart the running sandbox.
+
+The extension does not generate configuration proposals with a model. Ask the main agent when you want help preparing a base or installation recipe; required development tools can still use the approved `request_sandbox_tool` workflow. Existing `modelAssistedSetup` fields are ignored when loading settings and omitted on the next save; `/sandbox setup model on|off` is unsupported.
 
 In TUI mode, launch, reload/resume, mount recreation, and rebuilds show a full-screen animated progress console with elapsed time and a bounded tail of startup/build output. Usable terminals show a themed frame with current/previous stage, a labeled output pane, and live-follow/scrollback status; tiny terminals use a compact layout. The display reports real stage transitions rather than a guessed completion percentage. Use ↑/↓ or Page Up/Page Down to scroll, End to follow the latest output, and Esc to return to the thread while startup continues. The console steps aside for definition selection and sandbox authorization dialogs, then resumes unless dismissed. It closes automatically on success, failure, or shutdown. RPC and headless modes do not open a custom screen.
 
-Selected devcontainer definitions load without an approval prompt, including in new sessions or after definition changes. Definition validation remains mandatory; loading a definition does not authorize additional host binds or host initialization. Setup proposals still require approval before writing configuration. `initializeCommand` follows the spec's host semantics and needs fresh one-shot operator approval every time it executes. Headless, cancelled, denied, or stale initialization is blocked. Host environment imports must be explicitly allowlisted. Declared ports require approval and are loopback-only.
+Each top-level startup, resume, mount update, or rebuild saves a separate owner-only JSONL diagnostic log under `sessions/<session-id-hash>/startup-logs/` in the private sandbox storage root. `/sandbox logs` and `/sandbox status` show the latest path, including after a failed startup. Nested phases share the same log. Logs record timestamped stages and complete output chunks, including machine-readable CLI/Podman output that is hidden from the console; they are not clipped to terminal width or the display's bounded tail. Build output on screen retains steps, installation output, warnings, and failures while summarizing cache hits and omitting image-tag/hash lists. Logging also runs in RPC and headless modes. Log-storage failures warn without blocking sandbox operations.
+
+Sandbox setup and JSON/multiline Settings fields open private drafts in fullscreen `$EDITOR` rather than rendering configuration blocks in the TUI. Save and quit to return to Pi. Settings fields save immediately without an Apply button, including General Settings and legacy migration. Standalone `/sandbox setup` retains its publication confirmation for edited definitions and companion files. `$VISUAL` and then `vi` are fallbacks when `$EDITOR` is unset. GUI editors require a wait flag.
+
+Diagnostic logs are **not redacted**. They can include secrets from lifecycle output, image metadata, or the captured container environment. Inspect and redact before sharing; copy only the intended log into the checkout rather than mounting private sandbox authority storage. Logs are retained across attempts and require manual cleanup.
+
+A new Pi session gets a new container. Containerfile bases still invoke the reference CLI's cached build path; this is not a fresh install when layers are cached. Shared server/runtime and infrastructure images are reused by build identity. Runtime executable availability checks share one guest process, while runtime version and effective read-only mount checks remain enforced.
+
+Application tools such as Bun belong in the base or project supplement; private language-server installations generally should not be duplicated in the base. Review recipes before removing them because application builds may depend on those tools.
+
+Selected devcontainer definitions load without an approval prompt, including in new sessions or after definition changes. Definition validation remains mandatory; loading a definition does not authorize additional host binds or host initialization. Standalone setup drafts still require approval before writing configuration. `initializeCommand` follows the spec's host semantics and needs fresh one-shot operator approval every time it executes. Headless, cancelled, denied, or stale initialization is blocked. Host environment imports must be explicitly allowlisted. Declared ports require approval and are loopback-only.
 
 ## Missing development tools
 
@@ -98,13 +107,13 @@ Saved private installations apply to future sessions for this project and its wo
 
 ## Project-specific host command routing
 
-Run `/sandbox host-commands` to see this project's private file:
+Manage rules in **Settings → Sandbox → Project Host Commands**, or create/edit this project's private file directly in your editor:
 
 ```text
 ~/.pi/agent/extensions/pi-permission-system/{repos|projects}/<id>/host-commands.json
 ```
 
-Create/edit it manually outside the agent's mounted checkout. Your edit is the authorization: there is no extra approval dialog, generated proposal, or image rebuild. Rules are read on each Bash call and rechecked before every native invocation. Missing files mean no host commands; invalid profiles block shell execution rather than silently weakening routing. Git worktrees share the profile but execute against their own project root and session's approved mappings. Non-Git descendants find the closest private project profile.
+Saving the file or accepting an addition/removal in Settings is the authorization: there is no separate approval command, Done/Apply button, extra approval dialog, generated proposal, or image rebuild. Settings creates the profile on the first accepted edit if needed; keep manually edited profiles outside the agent's mounted checkout. Rules are read on each Bash call and rechecked before every native invocation. Missing files mean no host commands; invalid profiles block shell execution rather than silently weakening routing. Git worktrees share the profile but execute against their own project root and session's approved mappings. Non-Git descendants find the closest private project profile.
 
 ```json
 {

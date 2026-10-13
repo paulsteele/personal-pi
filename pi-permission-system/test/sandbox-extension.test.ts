@@ -1,5 +1,5 @@
 import type { ToolInfo } from "@earendil-works/pi-coding-agent";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import sandboxExtension from "../src/index.ts";
 import { isAuditedHostUiTool, isAuditedSandboxTool } from "../src/sandbox/gate.ts";
 
@@ -31,6 +31,31 @@ it("registers mandatory sandbox tools without auto commands or shortcuts", () =>
     "request_host_mount",
   ];
   expect(tools).toEqual(mandatorySandboxToolNames);
+});
+
+it("the retired host-commands argument does not open an editor or request authorization", async () => {
+  let sandboxCommand!: (args: string, ctx: unknown) => Promise<void>;
+  sandboxExtension({
+    events: { on: () => () => {}, emit() {} },
+    on: () => () => {},
+    registerEntryRenderer() {},
+    registerTool() {},
+    registerCommand(_name: string, command: { handler: typeof sandboxCommand }) {
+      sandboxCommand = command.handler;
+    },
+  } as never);
+  const notify = vi.fn();
+  const custom = vi.fn();
+  const confirm = vi.fn();
+  const waitForIdle = vi.fn();
+  await sandboxCommand("host-commands", { ui: { notify, custom, confirm }, waitForIdle });
+  expect(notify).toHaveBeenCalledWith(
+    expect.stringContaining("Sandbox has not initialized"),
+    "info",
+  );
+  expect(custom).not.toHaveBeenCalled();
+  expect(confirm).not.toHaveBeenCalled();
+  expect(waitForIdle).not.toHaveBeenCalled();
 });
 
 const questionnaireSource = {

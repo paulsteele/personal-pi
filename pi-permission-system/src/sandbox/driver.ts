@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { StartupBuildOutput } from "./build-output.ts";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -42,6 +43,7 @@ export async function podmanOutput(
   signal?: AbortSignal,
   progress?: (text: string) => void,
   timeoutMs = 120_000,
+  diagnostic?: (text: string) => void,
 ): Promise<string> {
   const execution = execute("podman", args, {
     env: cliHostEnvironment(),
@@ -49,10 +51,16 @@ export async function podmanOutput(
     timeout: timeoutMs,
     maxBuffer: 4 * 1024 * 1024,
   });
-  if (progress) {
-    execution.child.stdout?.on("data", (chunk: Buffer) => progress(chunk.toString()));
-    execution.child.stderr?.on("data", (chunk: Buffer) => progress(chunk.toString()));
-  }
+  execution.child.stdout?.on("data", (chunk: Buffer) => {
+    const text = chunk.toString();
+    progress?.(text);
+    diagnostic?.(`podman ${args[0]} stdout: ${text}`);
+  });
+  execution.child.stderr?.on("data", (chunk: Buffer) => {
+    const text = chunk.toString();
+    progress?.(text);
+    diagnostic?.(`podman ${args[0]} stderr: ${text}`);
+  });
   return (await execution).stdout;
 }
 
@@ -104,13 +112,44 @@ export async function createDevcontainer(options: {
   checkpointImage?: string;
   generation?: number;
   progress?: (text: string) => void;
+  stage?: (text: string) => void;
+  diagnostic?: (text: string) => void;
   buildTimeoutMs?: number;
   startupTimeoutMs?: number;
   cacheDirectory?: string;
   checkpointInventory?: ToolInventory;
   checkpointToolImageMounts?: ToolImageMount[];
 }): Promise<PreparedEnvironment> {
-  options.progress?.("Preparing devcontainer configuration…\n");
+  const stage = (text: string) => {
+    if (options.stage) {
+      options.stage(text);
+    } else {
+      options.progress?.(`${text}\n`);
+    }
+  };
+  const toolEngine = async (args: string[], signal?: AbortSignal) => {
+    const isImageBuild = args[0] === "build";
+    const timeoutMs = isImageBuild ? (options.buildTimeoutMs ?? 1_800_000) : 120_000;
+    const isVisibleOperation = isImageBuild || args[0] === "pull";
+    const buildOutput =
+      isImageBuild && options.progress ? new StartupBuildOutput(options.progress) : undefined;
+    try {
+      return await podmanOutput(
+        args,
+        signal,
+        buildOutput
+          ? (text) => buildOutput.write(text)
+          : isVisibleOperation
+            ? options.progress
+            : undefined,
+        timeoutMs,
+        options.diagnostic,
+      );
+    } finally {
+      buildOutput?.finish();
+    }
+  };
+  stage("Preparing devcontainer configuration…");
   await authorizeBuildInputs({
     projectRoot: options.resolved.project.root,
     definitionPath: options.resolved.path,
@@ -227,7 +266,7 @@ export async function createDevcontainer(options: {
       if (!/^[a-f0-9]{12,64}$/.test(id)) {
         throw new Error("Invalid session container ID");
       }
-      const details = JSON.parse(await podmanOutput(["inspect", id], options.signal))[0];
+      const details = JSON.parse(await toolEngine(["inspect", id], options.signal))[0];
       if (details?.Config?.Labels?.["pi.sandbox.session"] !== options.sessionId) {
         throw new Error("Container inspection targets another session");
       }
@@ -235,7 +274,7 @@ export async function createDevcontainer(options: {
     },
     beforeRun: async (image) => {
       const details = imageDetailsSchema.parse(
-        JSON.parse(await podmanOutput(["inspect", "--type", "image", image], options.signal))[0],
+        JSON.parse(await toolEngine(["inspect", "--type", "image", image], options.signal))[0],
       );
       validateHostEnvironmentImports(
         details.Config.Labels?.["devcontainer.metadata"] ?? "",
@@ -256,7 +295,7 @@ export async function createDevcontainer(options: {
       if (args[0] === "build") {
         const image = imageDetailsSchema.parse(
           JSON.parse(
-            await podmanOutput(["inspect", "--type", "image", imageName], options.signal),
+            await toolEngine(["inspect", "--type", "image", imageName], options.signal),
           )[0],
         );
         authority.images.push(image.Id);
@@ -266,7 +305,7 @@ export async function createDevcontainer(options: {
           .trim()
           .split(/\s+/)
           .filter((value) => /^[a-f0-9]{12,64}$/.test(value))) {
-          const details = JSON.parse(await podmanOutput(["inspect", id], options.signal))[0];
+          const details = JSON.parse(await toolEngine(["inspect", id], options.signal))[0];
           if (details?.Config?.Labels?.["pi.sandbox.session"] === options.sessionId) {
             authority.containers.push(id, details.Id);
           }
@@ -301,22 +340,26 @@ export async function createDevcontainer(options: {
     "--user-data-folder",
     join(options.directory, "cli"),
   ];
-  const run = (args: string[]) =>
-    runDevcontainerCli({
-      args,
-      cwd: options.resolved.startupDirectory,
-      env: { ...cliHostEnvironment(options.hostEnvironment), ...adapter.environment },
-      signal: options.signal,
-      progress: options.progress,
-      timeoutMs: args[0] === "build" ? options.buildTimeoutMs : options.startupTimeoutMs,
-    });
+  const run = async (args: string[]) => {
+    const isBuild = args[0] === "build";
+    const buildOutput =
+      isBuild && options.progress ? new StartupBuildOutput(options.progress) : undefined;
+    try {
+      return await runDevcontainerCli({
+        args,
+        cwd: options.resolved.startupDirectory,
+        env: { ...cliHostEnvironment(options.hostEnvironment), ...adapter.environment },
+        signal: options.signal,
+        progress: buildOutput ? (text) => buildOutput.write(text) : options.progress,
+        diagnostic: options.diagnostic,
+        timeoutMs: isBuild ? options.buildTimeoutMs : options.startupTimeoutMs,
+      });
+    } finally {
+      buildOutput?.finish();
+    }
+  };
   let toolInventory = options.checkpointInventory;
   let toolImageMounts = options.checkpointToolImageMounts;
-  const toolEngine = (args: string[], signal?: AbortSignal) => {
-    const isImageBuild = args[0] === "build";
-    const timeoutMs = isImageBuild ? (options.buildTimeoutMs ?? 1_800_000) : 120_000;
-    return podmanOutput(args, signal, options.progress, timeoutMs);
-  };
   let createdContainer: string | undefined;
   try {
     if (toolImageMounts !== undefined) {
@@ -341,7 +384,7 @@ export async function createDevcontainer(options: {
         ? { build: definition.build }
         : { dockerFile: definition.dockerFile, context: definition.context };
       await writeFile(snapshot, JSON.stringify(baseBuildDefinition), { mode: 0o600 });
-      options.progress?.("Building development image…\n");
+      stage("Checking cached development image build…");
       await run([
         "build",
         "--workspace-folder",
@@ -362,20 +405,20 @@ export async function createDevcontainer(options: {
       definition.image = imageName;
       await writeFile(snapshot, JSON.stringify(definition), { mode: 0o600 });
     }
-    options.progress?.("Checking development image…\n");
+    stage("Validating development image…");
     let image;
     try {
       image = imageDetailsSchema.parse(
         JSON.parse(
-          await podmanOutput(["inspect", "--type", "image", definition.image!], options.signal),
+          await toolEngine(["inspect", "--type", "image", definition.image!], options.signal),
         )[0],
       );
     } catch {
-      options.progress?.(`Pulling development image: ${definition.image!}\n`);
-      await podmanOutput(["pull", definition.image!], options.signal, options.progress);
+      stage(`Pulling development image: ${definition.image!}`);
+      await toolEngine(["pull", definition.image!], options.signal);
       image = imageDetailsSchema.parse(
         JSON.parse(
-          await podmanOutput(["inspect", "--type", "image", definition.image!], options.signal),
+          await toolEngine(["inspect", "--type", "image", definition.image!], options.signal),
         )[0],
       );
     }
@@ -388,7 +431,7 @@ export async function createDevcontainer(options: {
       if (!options.cacheDirectory) {
         throw new Error("Layered provisioning requires a private image cache directory");
       }
-      options.progress?.("Resolving shared tooling artifacts and infrastructure image…\n");
+      stage("Resolving shared tooling artifacts and infrastructure image…");
       const approvedMountArguments = options.mounts.map(mountArgument);
       const platform = await inspectToolPlatform({
         run: toolEngine,
@@ -402,6 +445,7 @@ export async function createDevcontainer(options: {
         approvedMountArguments,
       });
       const builderImageId = await ports.resolveBuilder(platform, options.signal);
+      stage("Verifying read-only tool image mount capability…");
       await requireToolImageMountCapability({
         directory: options.cacheDirectory,
         builderImageId,
@@ -410,7 +454,9 @@ export async function createDevcontainer(options: {
         signal: options.signal,
         report: (text) => options.progress?.(`${text}\n`),
       });
+      stage("Resolving cached language servers, runtimes, and infrastructure…");
       const provisioned = await provisionEnvironmentImage({
+        builderImageId,
         baseImageId: image.Id,
         imageUser: image.Config.User || "root",
         platform,
@@ -447,6 +493,7 @@ export async function createDevcontainer(options: {
       for (const mount of toolImageMounts) {
         await verifySavedToolArtifact(mount, toolEngine, options.signal);
       }
+      stage("Validating tool artifact mounts and destinations…");
       await verifyToolMountDestinations({
         run: toolEngine,
         imageId: image.Id,
@@ -460,7 +507,7 @@ export async function createDevcontainer(options: {
     definition.image = image.Id;
     authority.users = [...new Set([...authority.users, image.Config.User || "root"])];
     await writeFile(snapshot, JSON.stringify(definition), { mode: 0o600 });
-    options.progress?.("Starting devcontainer and running lifecycle hooks…\n");
+    stage("Starting devcontainer and running lifecycle hooks…");
     const result = JSON.parse(
       await run([
         "up",
@@ -478,12 +525,12 @@ export async function createDevcontainer(options: {
     }
     createdContainer = result.containerId;
     validateCreatedContainer(
-      JSON.parse(await podmanOutput(["inspect", result.containerId], options.signal))[0],
+      JSON.parse(await toolEngine(["inspect", result.containerId], options.signal))[0],
       options.sessionId,
       options.mounts,
       toolImageMounts,
     );
-    options.progress?.("Loading container environment…\n");
+    stage("Loading container environment…");
     const remoteEnvironmentOutput = await run([
       "exec",
       "--workspace-folder",
@@ -503,7 +550,7 @@ export async function createDevcontainer(options: {
     ]);
     const remoteEnvironment = JSON.parse(remoteEnvironmentOutput) as Record<string, string>;
     if (toolInventory) {
-      options.progress?.("Verifying provisioned runtime executables…\n");
+      stage("Verifying provisioned runtime executables…");
       await verifyRuntimeInventory({
         run: toolEngine,
         container: result.containerId,
@@ -527,7 +574,7 @@ export async function createDevcontainer(options: {
     };
   } catch (error) {
     if (createdContainer && createdContainer !== options.previousContainer) {
-      await podmanOutput(["stop", createdContainer]).catch(() => {});
+      await toolEngine(["stop", createdContainer]).catch(() => {});
     }
     throw error;
   } finally {

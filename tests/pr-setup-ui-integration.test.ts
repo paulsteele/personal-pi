@@ -11,6 +11,7 @@ import { uiHarness } from "../pr-review/ui.test.helpers.ts";
 for (const cancelStage of [undefined, "setup:discovery", "setup:profile"]) {
 	test(`setup entry yields its spinner to real manual permissions (${cancelStage ?? "approve"})`, async () => {
 		const previous = process.env.PI_CODING_AGENT_DIR;
+		const previousEditor = process.env.EDITOR;
 		const agentDir = await mkdtemp(join(tmpdir(), "pr-setup-permission-ui-"));
 		const repo = await fixture();
 		const handlers = new Map<
@@ -153,6 +154,7 @@ for (const cancelStage of [undefined, "setup:discovery", "setup:profile"]) {
 		});
 		try {
 			process.env.PI_CODING_AGENT_DIR = agentDir;
+			process.env.EDITOR = `"${process.execPath}" -e ""`;
 			await put(repo.root, "AGENTS.md", "Repository guidance fixture\n");
 			await put(
 				agentDir,
@@ -201,6 +203,11 @@ for (const cancelStage of [undefined, "setup:discovery", "setup:profile"]) {
 				await handler({}, ctx);
 			if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
 			else process.env.PI_CODING_AGENT_DIR = previous;
+			if (previousEditor === undefined) {
+				delete process.env.EDITOR;
+			} else {
+				process.env.EDITOR = previousEditor;
+			}
 			await rm(repo.root, { recursive: true, force: true });
 			await rm(agentDir, { recursive: true, force: true });
 		}

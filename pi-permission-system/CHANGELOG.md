@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Save every accepted Settings edit immediately without Apply/Done buttons; General Settings edits also migrate legacy policy without a separate setup command. Manual settings edits retain separate mount, initialization, and rebuild authorization.
+- Remove `/sandbox host-commands`; authorize native rules through direct private-file edits or Project Host Commands in Settings. Saving the file or accepting a Settings edit is the only authorization step.
+- Remove built-in model configuration proposals and Container Base generation actions. Base setup opens the manual editor directly; retain standalone setup approval and the main agent's approved tool-installation workflow. Accept and strip the retired `modelAssistedSetup` field when loading/saving existing settings.
+- Show only loaded tooling configuration paths in the Sandbox tab and status while retaining missing-path tracking for provisioning validation.
+
+- Report real startup stages; hide machine-readable inspection output, summarize cached build steps, and label reused artifacts by tool/version.
+- Save owner-only, unredacted per-operation diagnostic logs with full output chunks in TUI, RPC, and headless modes. Expose the latest path with `/sandbox logs` and status, retaining failed-attempt logs.
+- Batch runtime executable availability checks and reuse the already resolved builder image without removing image-isolation, runtime-version, or read-only mount verification.
+
 ## 2.0.0 — 2026-10-12
 
 - Stop session devcontainers with zero graceful-stop delay and a separate 15-second command timeout across rebuilds, mount recreation, rollback cleanup, and shutdown. Retain container-specific Podman failure diagnostics; make mount checkpointing cancellable and report stopping separately from checkpointing.

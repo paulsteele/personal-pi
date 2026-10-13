@@ -12,6 +12,11 @@ const setup = (...args: Parameters<typeof setupSource>) => {
 };
 import { profilePath } from "./storage.js";
 import { runWorker } from "./worker.js";
+import { openConfigFile } from "@paulsteele/pi-shared-ui";
+vi.mock("@paulsteele/pi-shared-ui", async (original) => ({
+	...(await original<typeof import("@paulsteele/pi-shared-ui")>()),
+	openConfigFile: vi.fn(async () => {}),
+}));
 vi.mock("./worker.js", () => ({ runWorker: vi.fn() }));
 const dirs: string[] = [];
 afterEach(async () => {
@@ -87,6 +92,61 @@ it("does not regenerate an approved profile when files change; edit is model-fre
 	await writeFile(h.draftPath, "not json");
 	await expect(approveSetup(h.repo, h.root, h.signal)).rejects.toThrow();
 	expect(await readFile(profilePath(h.root, h.repo.id), "utf8")).toBe(original);
+});
+it("opens a generated profile draft in the fullscreen editor without activating it", async () => {
+	const h = await harness();
+	h.ctx.mode = "tui";
+	h.generate();
+	await setup(h.ctx, h.repo, h.root, h.signal, () => {});
+	expect(openConfigFile).toHaveBeenCalledExactlyOnceWith(h.ctx, h.draftPath, h.signal);
+	await expect(readFile(profilePath(h.root, h.repo.id))).rejects.toMatchObject({ code: "ENOENT" });
+});
+it("reopens an existing pending profile draft without generating another", async () => {
+	const h = await harness();
+	h.generate();
+	await setup(h.ctx, h.repo, h.root, h.signal, () => {});
+	h.ctx.mode = "tui";
+	await setup(h.ctx, h.repo, h.root, h.signal, () => {});
+	expect(openConfigFile).toHaveBeenCalledExactlyOnceWith(h.ctx, h.draftPath, h.signal);
+	await expect(readFile(profilePath(h.root, h.repo.id))).rejects.toMatchObject({ code: "ENOENT" });
+	expect(runWorker).toHaveBeenCalledTimes(2);
+});
+it("opens a copy of the approved profile for editing without replacing the active profile", async () => {
+	const h = await harness();
+	h.generate();
+	await setup(h.ctx, h.repo, h.root, h.signal, () => {});
+	await approveSetup(h.repo, h.root, h.signal);
+	const active = await readFile(profilePath(h.root, h.repo.id), "utf8");
+	h.ctx.mode = "tui";
+	await setup(h.ctx, h.repo, h.root, h.signal, () => {}, undefined, "edit");
+	expect(openConfigFile).toHaveBeenCalledExactlyOnceWith(h.ctx, h.draftPath, h.signal);
+	expect(await readFile(profilePath(h.root, h.repo.id), "utf8")).toBe(active);
+	expect(runWorker).toHaveBeenCalledTimes(2);
+});
+it("activates an editor-saved profile without an approval command", async () => {
+	const h = await harness();
+	h.ctx.mode = "tui";
+	h.generate();
+	vi.mocked(openConfigFile).mockImplementationOnce(async (_ctx, path) => {
+		await writeFile(path, JSON.stringify({ ...h.draft, summary: "Operator-edited profile" }));
+	});
+	await setup(
+		h.ctx,
+		h.repo,
+		h.root,
+		h.signal,
+		() => {},
+		undefined,
+		"normal",
+		undefined,
+		undefined,
+		"editor-save",
+	);
+	expect(openConfigFile).toHaveBeenCalledExactlyOnceWith(h.ctx, h.draftPath, h.signal);
+	expect(JSON.parse(await readFile(profilePath(h.root, h.repo.id), "utf8")).draft.summary).toBe(
+		"Operator-edited profile",
+	);
+	expect(runWorker).toHaveBeenCalledTimes(2);
 });
 it("preserves the active profile during explicit regeneration and reuses pending drafts", async () => {
 	const h = await harness();

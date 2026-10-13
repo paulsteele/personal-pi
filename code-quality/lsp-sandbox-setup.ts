@@ -1,4 +1,5 @@
 import type { ExtensionContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { openConfigFile } from "@paulsteele/pi-shared-ui";
 import { qualitySandbox, guestLspProjectRoot, type QualitySandbox } from "./sandbox.js";
 import {
 	loadLspProfile,
@@ -11,7 +12,7 @@ import {
 	type StoredLspProfile,
 } from "./lsp-profile.js";
 import { LSP_PRESETS, presetRoute, type LspPresetDefinition } from "./lsp-presets.js";
-import { approveLspSetup, type LspSetupPorts } from "./lsp-setup.js";
+import { approveLspSetup, validateAndActivateLspDraft, type LspSetupPorts } from "./lsp-setup.js";
 import { selectLspLanguages } from "./lsp-setup-ui.js";
 import {
 	chooseCsharpProject,
@@ -159,6 +160,7 @@ export async function setupSandboxLsp(options: {
 	mode: "setup" | "edit" | "approve";
 	ports: LspSetupPorts;
 	signal: AbortSignal;
+	activation?: "editor-save" | "confirm";
 }): Promise<StoredLspProfile | undefined> {
 	const { ctx, agentDir, project, mode, ports, signal } = options;
 	if (ctx.mode !== "tui") {
@@ -187,8 +189,13 @@ export async function setupSandboxLsp(options: {
 			pending && !pendingIsActive
 				? lspProfilePath(agentDir, project, true)
 				: await saveLspDraft(agentDir, project, profile, baseRevision, pending?.revision ?? null);
+		await openConfigFile(ctx, path, signal);
+		if (options.activation === "editor-save") {
+			const edited = (await loadLspDraft(agentDir, project))!;
+			return validateAndActivateLspDraft(ctx, agentDir, project, ports, signal, edited.revision);
+		}
 		ctx.ui.notify(
-			`Edit ${path}, then /quality lsp setup approve. Executables must exist inside the devcontainer.`,
+			`Draft saved at ${path}. Run /quality lsp setup approve to validate and activate it. Executables must exist inside the devcontainer.`,
 			"info",
 		);
 		return undefined;
@@ -269,11 +276,20 @@ export async function setupSandboxLsp(options: {
 	signal.throwIfAborted();
 	const path = await saveLspDraft(agentDir, project, profile, baseRevision, pending?.revision ?? null);
 	if (advancedAction === "Edit configuration file") {
+		await openConfigFile(ctx, path, signal);
+		if (options.activation === "editor-save") {
+			const edited = (await loadLspDraft(agentDir, project))!;
+			return validateAndActivateLspDraft(ctx, agentDir, project, ports, signal, edited.revision);
+		}
 		ctx.ui.notify(
-			`Edit ${path}, then /quality lsp setup approve. Executables must exist inside the devcontainer.`,
+			`Draft saved at ${path}. Run /quality lsp setup approve to validate and activate it. Executables must exist inside the devcontainer.`,
 			"info",
 		);
 		return undefined;
+	}
+	if (options.activation === "editor-save") {
+		const edited = (await loadLspDraft(agentDir, project))!;
+		return validateAndActivateLspDraft(ctx, agentDir, project, ports, signal, edited.revision);
 	}
 	return approveContainerLsp(ctx, agentDir, project, ports, signal, selection.action === "advanced");
 }

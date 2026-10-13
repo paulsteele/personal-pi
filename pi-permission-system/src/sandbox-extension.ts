@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { evaluateSafety, type GuardPathFact, type SafetyContext } from "./auto/safety-policy.ts";
 import { guestToHost } from "./sandbox/mounts.ts";
 import {
@@ -8,6 +9,7 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { editConfigDraft } from "@paulsteele/pi-shared-ui";
 import { ApprovalQueue } from "./approval-queue.ts";
 import { awaitSandboxWork } from "./sandbox/cancellation.ts";
 import { createDelegatedReviewService, REVIEW_SERVICE_CHANNEL } from "./delegated-review.ts";
@@ -21,7 +23,12 @@ import { presentPermissionPrompt } from "./prompt/component.ts";
 import { emitUiPrompt, emitDecision } from "./permission-events.ts";
 import { SandboxSession } from "./sandbox/session.ts";
 import { selectDefinition, resolveDefinition } from "./sandbox/definition.ts";
-import { loadSandboxSettings, sandboxDisclosureRevision } from "./sandbox/settings.ts";
+import { configuredEnvironmentSourcePaths } from "./sandbox/environment-layers.ts";
+import {
+  loadSandboxSettings,
+  sandboxDisclosureRevision,
+  sandboxStorageRoot,
+} from "./sandbox/settings.ts";
 import { checkPolicy } from "./policy.ts";
 import { registerSandboxTools } from "./sandbox/tools.ts";
 import { registerSandboxToolRequests } from "./sandbox/tool-installation.ts";
@@ -31,8 +38,13 @@ import { createSandboxPublisher } from "./sandbox/events.ts";
 import { handleSandboxSetup } from "./sandbox/setup-command.ts";
 import { devcontainerPorts } from "./sandbox/ports.ts";
 import { SandboxStartupUI } from "./sandbox/startup-ui.ts";
-import { defaultToolProfile, globalToolProfilePath } from "./sandbox/tool-profile.ts";
-import { publishPrivateText, readPrivateText } from "./sandbox/storage.ts";
+import {
+  defaultToolProfile,
+  globalToolProfilePath,
+  parseToolProfile,
+  resolveToolProfiles,
+} from "./sandbox/tool-profile.ts";
+import { publishPrivateText, readPrivateText, sha256Hex } from "./sandbox/storage.ts";
 import { loadHostCommandProfile } from "./sandbox/host-command-profile.ts";
 import { registerSandboxSettings } from "./sandbox/settings-menu.ts";
 import { ReviewerSandboxes } from "./sandbox/reviewer-sandboxes.ts";
@@ -44,7 +56,15 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
   let startupAbort: AbortController | undefined;
   let pendingStartup: Promise<void> | undefined;
   let context: ExtensionContext | undefined;
-  const startup = new SandboxStartupUI(() => context);
+  const startup = new SandboxStartupUI(
+    () => context,
+    () => {
+      const sessionDirectory = context
+        ? sha256Hex(context.sessionManager.getSessionId())
+        : "pending";
+      return join(sandboxStorageRoot(getAgentDir()), "sessions", sessionDirectory, "startup-logs");
+    },
+  );
   let unavailable = "Sandbox has not initialized";
   let generation = 0;
   let approvals = new ApprovalQueue();
@@ -189,12 +209,27 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
           startupController.signal.throwIfAborted();
           const toolsPath = globalToolProfilePath(getAgentDir());
           if (!(await readPrivateText(toolsPath))) {
-            const profile = defaultToolProfile();
+            let profile = defaultToolProfile();
+            if (ctx.mode === "tui") {
+              const edited = await startup.withoutScreen(() =>
+                editConfigDraft(
+                  ctx,
+                  "Shared development toolset",
+                  JSON.stringify(profile, null, 2),
+                  startupController.signal,
+                ),
+              );
+              if (edited === undefined) {
+                throw new Error("Global tooling configuration cancelled");
+              }
+              profile = parseToolProfile(JSON.parse(edited));
+              resolveToolProfiles(profile);
+            }
             const preview = [
               "Provision the shared development toolset?",
               toolsPath,
-              "All five language servers and isolated supporting runtimes will be available in every supported sandbox. Image builds are cached; project definitions and host access are unchanged.",
-              JSON.stringify(profile, null, 2),
+              "Save the shared tool configuration from your editor. These tools and their supporting runtimes will be available in every supported sandbox. Image builds are cached; project definitions and host access are unchanged.",
+              ...(ctx.mode === "tui" ? [] : [JSON.stringify(profile, null, 2)]),
             ].join("\n\n");
             if (!(await confirm(preview, "", startupController.signal))) {
               throw new Error("Global tooling provisioning was not approved");
@@ -241,8 +276,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
                   sessionId: ctx.sessionManager.getSessionId(),
                   phase: "ready",
                   definitionPath: candidate.options.resolved.path,
-                  toolingSources: candidate.options.resolved.layers?.sources.map(
-                    (source) => source.path,
+                  toolingSources: configuredEnvironmentSourcePaths(
+                    candidate.options.resolved.layers,
                   ),
                   toolingRevision: candidate.environment.toolInventory?.revision,
                   containerId: candidate.environment.container,
@@ -441,7 +476,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
             sessionId: ctx.sessionManager.getSessionId(),
             phase: "ready",
             definitionPath: resolved.path,
-            toolingSources: resolved.layers?.sources.map((source) => source.path),
+            toolingSources: configuredEnvironmentSourcePaths(candidate.options.resolved.layers),
             toolingRevision: candidate.environment.toolInventory?.revision,
             containerId: candidate.environment.container,
             containerName: candidate.containerName,
@@ -558,20 +593,17 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
   pi.registerCommand("sandbox", {
     description: "Mandatory devcontainer status and explicit setup",
     async handler(args, ctx) {
-      if (args.trim() === "host-commands") {
-        const profile = await loadHostCommandProfile(
-          getAgentDir(),
-          getSession().options.resolved.project,
-        );
+      if (args.trim() === "logs") {
         ctx.ui.notify(
-          `${profile.path}\n${JSON.stringify({ hostCommands: profile.rules }, null, 2)}\nEdit this private file manually to authorize native project commands. No approval or image rebuild is needed.`,
+          startup.latestLogPath
+            ? `Latest sandbox diagnostic log:\n${startup.latestLogPath}\nMay contain secrets from lifecycle output or container environment. Inspect and redact before sharing.`
+            : "No sandbox diagnostic log is available for this runtime.",
           "info",
         );
         return;
       }
       if (args.trim().startsWith("setup")) {
-        const currentSetupSandbox = session ? createSandboxService(session) : undefined;
-        await handleSandboxSetup(args.trim().slice(5).trim(), ctx, currentSetupSandbox);
+        await handleSandboxSetup(args.trim().slice(5).trim(), ctx);
         await start(ctx);
         return;
       }
@@ -593,8 +625,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
             ].join("\n");
       ctx.ui.notify(
         session
-          ? `${session.environment.container}\n${toolingStorageStatus}\nBase: ${session.options.resolved.path}\nTooling sources: ${session.options.resolved.layers?.sources.map((source) => source.path).join(", ") ?? "legacy definition"}\nTool inventory: ${session.environment.toolInventory?.revision ?? "unavailable"}\n${session.environment.workspace}\n${JSON.stringify(session.mounts)}`
-          : unavailable,
+          ? `${session.environment.container}\n${toolingStorageStatus}\nBase: ${session.options.resolved.path}\nTooling sources: ${configuredEnvironmentSourcePaths(session.options.resolved.layers)?.join(", ") ?? "legacy definition"}\nTool inventory: ${session.environment.toolInventory?.revision ?? "unavailable"}\n${session.environment.workspace}\n${JSON.stringify(session.mounts)}\nDiagnostic log: ${startup.latestLogPath ?? "unavailable"}`
+          : `${unavailable}\nDiagnostic log: ${startup.latestLogPath ?? "unavailable"}`,
         "info",
       );
     },

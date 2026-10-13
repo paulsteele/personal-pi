@@ -9,7 +9,11 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "modelAssistedSetup": { "type": "boolean", "default": false },
+        "modelAssistedSetup": {
+          "type": "boolean",
+          "deprecated": true,
+          "description": "Retired setting accepted for compatibility and omitted on save. Built-in model configuration generation has been removed."
+        },
         "hostEnvironment": {
           "type": "array",
           "maxItems": 64,

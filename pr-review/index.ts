@@ -7,7 +7,7 @@ import {
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { loadConfig } from "./config.js";
+import { loadConfig, loadReviewPreferences, validateReviewPreferences } from "./config.js";
 import { resolveRepo, parseScope } from "./git.js";
 import { installedPlannotator, present } from "./plannotator.js";
 import { loadProfile } from "./profile.js";
@@ -21,9 +21,8 @@ import { TaskStore, RecoveryGate } from "./tasks.js";
 import { createReviewDashboard, trackPermissionPrompts, type ReviewDashboard } from "./dashboard.js";
 import { createRunJournal } from "./journal.js";
 import { storageRoot, publish, readStored } from "./storage.js";
-import { registerSettingsSection } from "@paulsteele/pi-shared-ui";
+import { isSettingsActionActive, registerSettingsSection } from "@paulsteele/pi-shared-ui";
 import { DEFAULT_CONFIG } from "./config.js";
-import { RuntimeConfigSchema, validate } from "./types.js";
 import type { Report, Repo } from "./types.js";
 import { prepareReport, ResultStore, type RegisteredReport } from "./result-store.js";
 import { openReviewPermissions, isPermissionBlocked, type ReviewPermissions } from "./permissions.js";
@@ -158,6 +157,7 @@ export default function prReview(pi: ExtensionAPI): void {
 					mode === "edit" ? "edit" : mode === "regenerate" ? "regenerate" : "normal",
 					() => getPermissions(repo, "Discover repository context for PR setup"),
 					() => authorizeCaptureSources(repo, signal),
+					isSettingsActionActive(ctx) ? "editor-save" : "explicit-approval",
 				),
 			};
 		}
@@ -631,8 +631,12 @@ export default function prReview(pi: ExtensionAPI): void {
 			const root = await storageRoot(getAgentDir(), repo);
 			const path = join(root, "config.json");
 			const stored = await readStored(root, path);
-			const config = (await loadConfig(root)) ?? { schemaVersion: 2, ...DEFAULT_CONFIG, thinking: "off" };
-			const configuredModel = "provider" in config ? `${config.provider}/${config.model}` : undefined;
+			const config = (await loadReviewPreferences(root)) ?? {
+				schemaVersion: 2,
+				...DEFAULT_CONFIG,
+				thinking: "off",
+			};
+			const configuredModel = config.provider ? `${config.provider}/${config.model}` : undefined;
 			return {
 				value: { ...config, modelSelection: configuredModel },
 				async apply(value, signal) {
@@ -640,15 +644,15 @@ export default function prReview(pi: ExtensionAPI): void {
 					const model = ctx.modelRegistry
 						.getAvailable()
 						.find((model) => `${model.provider}/${model.id}` === modelSelection);
-					if (!model) {
+					if (modelSelection && !model) {
 						throw new Error("Select an available PR reviewer");
 					}
-					const next = validate(RuntimeConfigSchema, {
+					const { provider: _provider, model: _model, ...preferences } = settings;
+					const next = validateReviewPreferences({
 						...DEFAULT_CONFIG,
 						thinking: "off",
-						...settings,
-						provider: model.provider,
-						model: model.id,
+						...preferences,
+						...(model ? { provider: model.provider, model: model.id } : {}),
 					});
 					await publish(root, path, next, stored?.revision, signal);
 				},
@@ -657,11 +661,11 @@ export default function prReview(pi: ExtensionAPI): void {
 		actions: [
 			{ operation: "create", label: "Repository setup create" },
 			{ operation: "edit", label: "Repository setup edit" },
-			{ operation: "approve", label: "Repository setup approve" },
 			{ operation: "regenerate", label: "Repository setup regenerate" },
 		].map(({ operation: setupOperation, label }) => ({
 			id: `setup-${setupOperation}`,
 			label,
+			description: "Saving and quitting the profile editor validates and activates the edited configuration.",
 			async run(ctx: ExtensionContext, signal: AbortSignal) {
 				const setupArguments = setupOperation === "create" ? "setup" : `setup ${setupOperation}`;
 				const controller = new AbortController();

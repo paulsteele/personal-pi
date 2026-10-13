@@ -60,6 +60,23 @@ async function provisioningFixture() {
   return { options, build, agentDir, project };
 }
 
+it("uses the already resolved builder and names tools in cache summaries", async () => {
+  const fixture = await provisioningFixture();
+  const resolveBuilder = vi.spyOn(fixture.options.ports, "resolveBuilder");
+  const report = vi.fn();
+  const options = { ...fixture.options, builderImageId: `sha256:${"b".repeat(64)}`, report };
+  await provisionEnvironmentImage(options);
+  report.mockClear();
+  fixture.build.mockClear();
+  await provisionEnvironmentImage(options);
+  expect(resolveBuilder).not.toHaveBeenCalled();
+  expect(fixture.build).not.toHaveBeenCalled();
+  expect(report).toHaveBeenCalledWith(
+    expect.stringMatching(/^pyright@.*: Reusing artifact image /),
+  );
+  expect(report).toHaveBeenCalledWith(expect.stringMatching(/^Reusing infrastructure image /));
+});
+
 it("reuses all tooling artifacts across two different compatible project bases", async () => {
   const fixture = await provisioningFixture();
   const first = await provisionEnvironmentImage(fixture.options);

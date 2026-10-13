@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { openConfigFile } from "@paulsteele/pi-shared-ui";
 import { loadConfig, saveModel } from "./config.js";
 import { loadProfile, validateDraft, sourcePaths } from "./profile.js";
 import { loadPrompts, systemPrompt } from "./prompts.js";
@@ -55,17 +56,25 @@ interface DraftState {
 	generationModel: string;
 }
 async function saveDraft(
+	ctx: ExtensionContext,
 	root: string,
 	repo: Repo,
 	draft: Draft,
 	state: DraftState,
 	signal: AbortSignal,
+	activation: "editor-save" | "explicit-approval",
 ): Promise<string> {
 	const paths = draftPaths(root, repo);
 	const previous = await readStored(root, paths.draft),
 		metadata = await readStored(root, paths.state);
 	await publish(root, paths.draft, validateDraft(draft), previous?.revision, signal);
 	await publish(root, paths.state, state, metadata?.revision, signal);
+	if (ctx.mode === "tui") {
+		await openConfigFile(ctx, paths.draft, signal);
+		if (activation === "editor-save") {
+			return approveSetup(repo, root, signal);
+		}
+	}
 	return draftMessage(paths.draft);
 }
 /** Activation is a separate explicit command. No model call, giant modal, recapture, or staleness gate. */
@@ -116,19 +125,33 @@ export async function setup(
 	mode: "normal" | "edit" | "regenerate" = "normal",
 	openPermissions?: () => ReviewPermissions,
 	authorizeCapture?: () => Promise<void>,
+	activation: "editor-save" | "explicit-approval" = "explicit-approval",
 ): Promise<string> {
 	const piSessionId = ctx.sessionManager.getSessionId();
 	const prior = await loadProfile(root, repo.id);
 	const paths = draftPaths(root, repo);
 	const pending = await readStored(root, paths.draft),
 		metadata = await readStored(root, paths.state);
-	if (mode !== "regenerate" && pending && metadata && !(metadata.value as { activated?: boolean }).activated)
+	if (
+		mode !== "regenerate" &&
+		pending &&
+		metadata &&
+		!(metadata.value as { activated?: boolean }).activated
+	) {
+		if (ctx.mode === "tui") {
+			await openConfigFile(ctx, paths.draft, signal);
+			if (activation === "editor-save") {
+				return approveSetup(repo, root, signal);
+			}
+		}
 		return draftMessage(paths.draft);
+	}
 	if (mode === "normal" && prior)
 		return `PR review is already configured. Run /pr; setup is not required after repository changes.\nApproved profile: ${profilePath(root, repo.id)}\nUse /pr setup edit to get an editable draft, or /pr setup regenerate only when you explicitly want a newly generated profile.`;
 	if (mode === "edit") {
 		if (!prior) throw new Error("No approved profile to edit. Run /pr setup first.");
 		return saveDraft(
+			ctx,
 			root,
 			repo,
 			prior.profile.draft,
@@ -138,6 +161,7 @@ export async function setup(
 				generationModel: prior.profile.generationModel,
 			},
 			signal,
+			activation,
 		);
 	}
 	if (!openPermissions)
@@ -248,6 +272,7 @@ export async function setup(
 		await profileAccess.beforeDispatch(signal);
 		await profileAccess.close();
 		return saveDraft(
+			ctx,
 			root,
 			repo,
 			validateDraft(generated.value),
@@ -257,6 +282,7 @@ export async function setup(
 				generationModel: `${config.provider}/${config.model}`,
 			},
 			signal,
+			activation,
 		);
 	} finally {
 		await snapshot.dispose?.();

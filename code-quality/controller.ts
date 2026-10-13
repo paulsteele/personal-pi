@@ -1374,15 +1374,7 @@ export class QualityController {
 		assertOwner();
 		const next = parseConfig(value);
 		if (!next.enabled && this.pending) {
-			const confirmed = await this.awaitDecision(ctx, "waiver", () =>
-				ctx.ui.confirm("Disable pending quality gate?", "This explicitly waives the unresolved case.", {
-					signal,
-				}),
-			);
-			assertOwner();
-			if (!confirmed) {
-				throw new Error("Quality waiver cancelled; settings were not applied");
-			}
+			throw new Error("Resolve the pending quality case before disabling the gate in Settings");
 		}
 		assertOwner();
 		const modelChanged = next.provider !== this.config.provider || next.model !== this.config.model;
