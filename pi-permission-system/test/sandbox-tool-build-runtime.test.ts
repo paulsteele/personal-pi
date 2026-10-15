@@ -86,6 +86,35 @@ it("verifies a named tool under its actual remote PATH and working directory", a
   );
 });
 
+it("probes runtime versions outside the workspace so project toolchain pins cannot fail startup", async () => {
+  const run = vi.fn(async (_args: string[]) => "");
+  const dotnetExecutable = "/opt/pi-tools/dotnet-runtime/10.0.109/dotnet";
+  await verifyRuntimeInventory({
+    run,
+    container: "container",
+    user: "root",
+    workspace: "/workspace/project-with-global-json",
+    inventory: {
+      version: 1,
+      revision: "tools",
+      platform: "linux-arm64-debian-12-glibc",
+      tools: [
+        {
+          id: "dotnet-runtime",
+          version: "10.0.109",
+          executable: dotnetExecutable,
+          source: "global",
+          imageId: "image",
+        },
+      ],
+    },
+  });
+  expect(run).toHaveBeenCalledWith(
+    ["exec", "--user", "root", "--workdir", "/", "container", dotnetExecutable, "--version"],
+    undefined,
+  );
+});
+
 it("checks all provisioned executables in one guest process and reports a missing name", async () => {
   const run = vi.fn(async (_args: string[]) => "");
   await verifyRuntimeInventory({

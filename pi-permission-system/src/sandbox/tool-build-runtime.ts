@@ -177,7 +177,7 @@ export async function verifyRuntimeInventory(options: {
   workspace?: string;
   signal?: AbortSignal;
 }): Promise<void> {
-  const execContextArguments = [
+  const execArguments = (workdir: string | undefined) => [
     "exec",
     "--user",
     options.user,
@@ -185,9 +185,13 @@ export async function verifyRuntimeInventory(options: {
       "--env",
       `${name}=${value}`,
     ]),
-    ...(options.workspace ? ["--workdir", options.workspace] : []),
+    ...(workdir ? ["--workdir", workdir] : []),
     options.container,
   ];
+  const execContextArguments = execArguments(options.workspace);
+  // Version probes verify the provisioned binary itself, so they must not resolve
+  // project-pinned toolchains (for example a global.json requesting another .NET SDK).
+  const projectNeutralExecArguments = execArguments("/");
   if (options.toolImageMounts?.length) {
     const readOnlyMountsScript = `
 set -eu
@@ -239,7 +243,7 @@ done
   for (const tool of options.inventory.tools) {
     if (tool.id === "jscpd") {
       const versionOutput = await options.run(
-        [...execContextArguments, tool.executable, "--version"],
+        [...projectNeutralExecArguments, tool.executable, "--version"],
         options.signal,
       );
       const escapedVersion = tool.version.replaceAll(".", "\\.");
@@ -252,7 +256,7 @@ done
     if (isRuntimeTool) {
       const versionArgument = tool.id === "go-runtime" ? "version" : "--version";
       await options.run(
-        [...execContextArguments, tool.executable, versionArgument],
+        [...projectNeutralExecArguments, tool.executable, versionArgument],
         options.signal,
       );
     }

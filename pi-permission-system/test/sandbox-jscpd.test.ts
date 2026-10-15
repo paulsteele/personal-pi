@@ -78,7 +78,7 @@ it("checks the actual jscpd runtime version", async () => {
   });
   await verifyRuntimeInventory({ run, inventory, container: "guest", user: "developer" });
   expect(run).toHaveBeenCalledWith(
-    ["exec", "--user", "developer", "guest", tool.executable, "--version"],
+    ["exec", "--user", "developer", "--workdir", "/", "guest", tool.executable, "--version"],
     undefined,
   );
   run.mockResolvedValue("jscpd 4.0.0\n");
