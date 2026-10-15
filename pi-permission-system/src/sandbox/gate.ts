@@ -1,10 +1,12 @@
 import type { ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
-import { posix } from "node:path";
+import { posix, relative, resolve } from "node:path";
 import { checkPolicy } from "../policy.ts";
-import { BashProgram } from "../access-intent/bash/program.ts";
+import { BashProgram, type BashPathRuleCandidate } from "../access-intent/bash/program.ts";
 import { PathNormalizer } from "../path-normalizer.ts";
+import { canonicalizePath } from "../path/canonicalize-path.ts";
+import { expandHomePath } from "../expand-home.ts";
 import type { SandboxSession } from "./session.ts";
-import { loadSandboxSettings } from "./settings.ts";
+import { loadSandboxSettings, type SandboxSettings } from "./settings.ts";
 import { guestToHost } from "./mounts.ts";
 
 const guestTools = new Set([
@@ -87,6 +89,7 @@ export function isAuditedSandboxTool(tool: ToolInfo): boolean {
 export async function reviewSandboxToolCall(options: {
   tool: ToolInfo | undefined;
   getSession: () => SandboxSession;
+  isHostMode?: () => boolean;
   agentDir: string;
   input: Record<string, unknown>;
   ctx: ExtensionContext;
@@ -103,6 +106,15 @@ export async function reviewSandboxToolCall(options: {
     options.ctx.signal?.throwIfAborted();
     return;
   }
+  if (options.isHostMode?.()) {
+    await reviewHostAction({
+      agentDir: options.agentDir,
+      toolName: tool.name,
+      input: options.input,
+      ctx: options.ctx,
+    });
+    return;
+  }
   await reviewSandboxAction({
     session: options.getSession(),
     agentDir: options.agentDir,
@@ -110,6 +122,58 @@ export async function reviewSandboxToolCall(options: {
     input: options.input,
     ctx: options.ctx,
   });
+}
+
+type PermissionPolicy = SandboxSettings["permission"];
+
+async function loadEnforceablePolicy(
+  agentDir: string,
+): Promise<{ permission: PermissionPolicy; revision?: string }> {
+  const settings = await loadSandboxSettings(agentDir);
+  if (settings.needsMigration) {
+    throw new Error(
+      "Migrate legacy permission settings with /sandbox setup before executing tools",
+    );
+  }
+  return { permission: settings.settings.permission, revision: settings.revision };
+}
+
+async function enforceExplicitDenies(review: {
+  permission: PermissionPolicy;
+  pathAliases: readonly string[];
+  command: string | undefined;
+  program: BashProgram | undefined;
+  shellPathAliases(candidate: BashPathRuleCandidate): Promise<string[]>;
+}): Promise<void> {
+  const isDenied = (surface: string, value: string) =>
+    checkPolicy(review.permission, surface, value).state === "deny";
+  if (review.pathAliases.some((alias) => isDenied("path", alias))) {
+    throw new Error("Path denied by explicit policy");
+  }
+  if (review.command && isDenied("bash", review.command)) {
+    throw new Error("Shell command denied by explicit policy");
+  }
+  for (const unit of review.program?.commands() ?? []) {
+    if (isDenied("bash", unit.text)) {
+      throw new Error("Shell command denied by explicit policy");
+    }
+  }
+  for (const candidate of review.program?.pathRuleCandidates() ?? []) {
+    const aliases = await review.shellPathAliases(candidate);
+    if (aliases.some((alias) => isDenied("path", alias))) {
+      throw new Error("Shell path denied by explicit policy");
+    }
+  }
+}
+
+function assertToolAllowed(permission: PermissionPolicy, toolName: string): void {
+  if (checkPolicy(permission, toolName, toolName).state === "deny") {
+    throw new Error("Tool denied by explicit policy");
+  }
+}
+
+function bashCommandInput(toolName: string, input: Record<string, unknown>): string | undefined {
+  return toolName === "bash" && typeof input.command === "string" ? input.command : undefined;
 }
 
 export async function reviewSandboxAction(options: {
@@ -121,17 +185,8 @@ export async function reviewSandboxAction(options: {
   ctx: ExtensionContext;
 }): Promise<void> {
   const { session, input, toolName } = options;
-  const settings = await loadSandboxSettings(options.agentDir);
-  if (settings.needsMigration) {
-    throw new Error(
-      "Migrate legacy permission settings with /sandbox setup before executing tools",
-    );
-  }
-  const permission = settings.settings.permission;
-  const deniesTool = checkPolicy(permission, toolName, toolName).state === "deny";
-  if (deniesTool) {
-    throw new Error("Tool denied by explicit policy");
-  }
+  const policy = await loadEnforceablePolicy(options.agentDir);
+  assertToolAllowed(policy.permission, toolName);
   const defaultsPathToCurrentDirectory = ["grep", "find", "ls"].includes(toolName);
   if (defaultsPathToCurrentDirectory && input.path === undefined) {
     input.path = ".";
@@ -167,42 +222,30 @@ export async function reviewSandboxAction(options: {
       path = await session.filesystem.canonical(input.path, options.ctx.signal);
     }
   }
-  const pathAliases = path ? pathPolicyAliases(String(input.path), path) : [];
-  for (const alias of pathAliases) {
-    if (checkPolicy(permission, "path", alias).state === "deny") {
-      throw new Error("Path denied by explicit policy");
-    }
-  }
-  const command =
-    toolName === "bash" && typeof input.command === "string" ? input.command : undefined;
+  const command = bashCommandInput(toolName, input);
   const program = command
     ? await BashProgram.parse(command, new PathNormalizer(workspace, "guest", guestHome), {
         probeGuestEntries: (paths) => session.filesystem.entriesExist(paths, options.ctx.signal),
       })
     : undefined;
-  if (command && checkPolicy(permission, "bash", command).state === "deny") {
-    throw new Error("Shell command denied by explicit policy");
-  }
-  for (const unit of program?.commands() ?? []) {
-    if (checkPolicy(permission, "bash", unit.text).state === "deny") {
-      throw new Error("Shell command denied by explicit policy");
-    }
-  }
-  for (const candidate of program?.pathRuleCandidates() ?? []) {
-    const canonical = await session.filesystem.canonical(
-      candidate.path.value(),
-      options.ctx.signal,
-    );
-    const aliases = [
-      ...candidate.path.matchValues(),
-      ...pathPolicyAliases(candidate.path.value(), canonical),
-    ];
-    if (aliases.some((alias) => checkPolicy(permission, "path", alias).state === "deny")) {
-      throw new Error("Shell path denied by explicit policy");
-    }
-  }
+  await enforceExplicitDenies({
+    permission: policy.permission,
+    pathAliases: path ? pathPolicyAliases(String(input.path), path) : [],
+    command,
+    program,
+    shellPathAliases: async (candidate) => {
+      const canonical = await session.filesystem.canonical(
+        candidate.path.value(),
+        options.ctx.signal,
+      );
+      return [
+        ...candidate.path.matchValues(),
+        ...pathPolicyAliases(candidate.path.value(), canonical),
+      ];
+    },
+  });
   if (
-    (await loadSandboxSettings(options.agentDir)).revision !== settings.revision ||
+    (await loadSandboxSettings(options.agentDir)).revision !== policy.revision ||
     session.revision !== reviewedAuthorityRevision
   ) {
     throw new Error(
@@ -213,4 +256,41 @@ export async function reviewSandboxAction(options: {
   if (path) {
     input.path = posix.normalize(path);
   }
+}
+
+/** Enforces explicit denies for built-in tools running natively while the sandbox is off. */
+export async function reviewHostAction(options: {
+  agentDir: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  ctx: ExtensionContext;
+}): Promise<void> {
+  const { input, toolName, ctx } = options;
+  const policy = await loadEnforceablePolicy(options.agentDir);
+  assertToolAllowed(policy.permission, toolName);
+  const hostPathAliases = (inputPath: string): string[] => {
+    const lexicalHostPath = resolve(ctx.cwd, expandHomePath(inputPath));
+    const cwdRelativePath = relative(ctx.cwd, lexicalHostPath);
+    return [
+      ...new Set([inputPath, cwdRelativePath, lexicalHostPath, canonicalizePath(lexicalHostPath)]),
+    ];
+  };
+  const command = bashCommandInput(toolName, input);
+  const program = command
+    ? await BashProgram.parse(command, new PathNormalizer(ctx.cwd, "host"))
+    : undefined;
+  await enforceExplicitDenies({
+    permission: policy.permission,
+    pathAliases: typeof input.path === "string" ? hostPathAliases(input.path) : [],
+    command,
+    program,
+    shellPathAliases: async (candidate) => [
+      ...candidate.path.matchValues(),
+      ...hostPathAliases(candidate.path.value()),
+    ],
+  });
+  if ((await loadSandboxSettings(options.agentDir)).revision !== policy.revision) {
+    throw new Error("Permission policy changed during action review; retry the tool");
+  }
+  ctx.signal?.throwIfAborted();
 }

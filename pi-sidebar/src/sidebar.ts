@@ -1002,6 +1002,19 @@ export function renderSandboxContent(
 			truncateToWidth(row, width, ""),
 		);
 	}
+	if (sandbox.phase === "off") {
+		return [
+			...rows,
+			palette.paint("warning", "○ OFF · host passthrough"),
+			...wrapTextWithAnsi(
+				palette.paint(
+					"muted",
+					"Tools run unsandboxed on the host for this session. /sandbox on restores it.",
+				),
+				width,
+			),
+		].map((row) => truncateToWidth(row, width, ""));
+	}
 	let statusRole: PaletteRole = "working";
 	if (sandbox.phase === "ready") {
 		statusRole = "ready";

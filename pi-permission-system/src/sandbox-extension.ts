@@ -33,6 +33,14 @@ import { checkPolicy } from "./policy.ts";
 import { registerSandboxTools } from "./sandbox/tools.ts";
 import { registerSandboxToolRequests } from "./sandbox/tool-installation.ts";
 import { reviewSandboxAction, reviewSandboxToolCall } from "./sandbox/gate.ts";
+import {
+  HOST_MODE_UNAVAILABLE_REASON,
+  NO_SANDBOX_FLAG,
+  resolveSandboxMode,
+  SANDBOX_MODE_ENTRY,
+  type SandboxMode,
+  type SandboxModeEntry,
+} from "./sandbox/mode.ts";
 import { createSandboxService, SANDBOX_SERVICE_CHANNEL } from "./sandbox/service.ts";
 import { createSandboxPublisher } from "./sandbox/events.ts";
 import { handleSandboxSetup } from "./sandbox/setup-command.ts";
@@ -66,6 +74,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     },
   );
   let unavailable = "Sandbox has not initialized";
+  let mode: SandboxMode = "sandboxed";
+  const isHostMode = () => mode === "host";
   let generation = 0;
   let approvals = new ApprovalQueue();
   const publisher = createSandboxPublisher(pi.events);
@@ -82,7 +92,11 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     return session;
   };
   registerPermissionEntryRenderers(pi);
-  registerSandboxTools(pi, getSession);
+  pi.registerFlag?.(NO_SANDBOX_FLAG, {
+    type: "boolean",
+    description: "Run built-in tools on the host for this session (sandbox escape hatch)",
+  });
+  registerSandboxTools(pi, getSession, isHostMode);
   registerSandboxToolRequests(pi, getSession);
   let unregisterSettings: (() => void) | undefined;
 
@@ -511,8 +525,60 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     }
   }
 
+  function publishHostMode(ctx: ExtensionContext): void {
+    publisher.update({
+      sessionId: ctx.sessionManager.getSessionId(),
+      phase: "off",
+      definitionPath: "host passthrough",
+      cwd: ctx.cwd,
+      mounts: [],
+      ports: [],
+    });
+  }
+
+  async function runOnHost(ctx: ExtensionContext): Promise<void> {
+    await retire();
+    context = ctx;
+    approvals = new ApprovalQueue();
+    mode = "host";
+    unavailable = HOST_MODE_UNAVAILABLE_REASON;
+    publishHostMode(ctx);
+    ctx.ui.setStatus("sandbox", "sandbox: OFF");
+  }
+
+  async function enterHostMode(ctx: ExtensionContext): Promise<void> {
+    await runOnHost(ctx);
+    pi.appendEntry<SandboxModeEntry>(SANDBOX_MODE_ENTRY, { off: true });
+    ctx.ui.notify(
+      "Sandbox is OFF for this session. Built-in tools now run unsandboxed on the host; explicit denies still apply. /sandbox on restores it.",
+      "warning",
+    );
+  }
+
+  async function enterSandboxedMode(ctx: ExtensionContext): Promise<void> {
+    pi.appendEntry<SandboxModeEntry>(SANDBOX_MODE_ENTRY, { off: false });
+    mode = "sandboxed";
+    ctx.ui.setStatus("sandbox", undefined);
+    await start(ctx);
+  }
+
+  const modeControl = {
+    isHostMode,
+    enterHostMode,
+    enterSandboxedMode,
+  };
+
   pi.on("session_start", async (_event, ctx) => {
-    unregisterSettings ??= registerSandboxSettings(pi, getAgentDir(), getSession);
+    unregisterSettings ??= registerSandboxSettings(pi, getAgentDir(), getSession, modeControl);
+    mode = resolveSandboxMode({
+      branch: ctx.sessionManager.getBranch?.() ?? [],
+      noSandboxFlag: pi.getFlag?.(NO_SANDBOX_FLAG) === true,
+      environment: process.env,
+    });
+    if (isHostMode()) {
+      await runOnHost(ctx);
+      return;
+    }
     await start(ctx);
   });
   pi.on("session_shutdown", async () => {
@@ -530,7 +596,15 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     approvals = new ApprovalQueue();
     context = ctx;
   });
-  pi.on("before_agent_start", async (event) => {
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (isHostMode()) {
+      event.systemPromptOptions.sections.sandbox = [
+        `Sandbox is OFF for this session: the operator turned it off, so built-in file tools and Bash run natively on the host in ${ctx.cwd} with the host environment.`,
+        "Explicit tool, path, and shell denies still apply.",
+        "request_host_mount and request_sandbox_tool are unavailable until the operator runs /sandbox on.",
+      ].join(" ");
+      return;
+    }
     const current = getSession();
     const hostCommands = await loadHostCommandProfile(
       getAgentDir(),
@@ -557,6 +631,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
       await reviewSandboxToolCall({
         tool,
         getSession,
+        isHostMode,
         agentDir: getAgentDir(),
         input: event.input,
         ctx,
@@ -593,8 +668,39 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     },
   });
   pi.registerCommand("sandbox", {
-    description: "Mandatory devcontainer status and explicit setup",
+    description: "Devcontainer status, setup, and session-only off/on escape hatch",
     async handler(args, ctx) {
+      const action = args.trim();
+      if (action === "off") {
+        if (isHostMode()) {
+          ctx.ui.notify("Sandbox is already off for this session", "info");
+          return;
+        }
+        await enterHostMode(ctx);
+        return;
+      }
+      if (action === "on") {
+        if (!isHostMode()) {
+          ctx.ui.notify("Sandbox is already on for this session", "info");
+          return;
+        }
+        await ctx.waitForIdle();
+        await enterSandboxedMode(ctx);
+        return;
+      }
+      const needsContainer =
+        action.startsWith("setup") || action === "build" || action === "rebuild";
+      if (needsContainer && isHostMode()) {
+        ctx.ui.notify("Sandbox is off for this session. Run /sandbox on first.", "warning");
+        return;
+      }
+      if (isHostMode() && (action === "" || action === "status")) {
+        ctx.ui.notify(
+          `Sandbox OFF (host passthrough) for this session\nHost cwd: ${ctx.cwd}\nRun /sandbox on to restore the devcontainer.`,
+          "info",
+        );
+        return;
+      }
       if (args.trim() === "logs") {
         ctx.ui.notify(
           startup.latestLogPath

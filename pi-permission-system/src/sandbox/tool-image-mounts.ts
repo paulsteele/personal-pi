@@ -71,6 +71,8 @@ export const inspectedToolMountSchema = z.looseObject({
 });
 export type InspectedToolMount = z.output<typeof inspectedToolMountSchema>;
 
+const readOnlyOverlayFlags = new Set(["userxattr"]);
+
 function isOwnedReadOnlyImageBacking(
   mount: InspectedToolMount,
   containerId: string,
@@ -79,7 +81,8 @@ function isOwnedReadOnlyImageBacking(
   const overlayDirectory = `${staticDir}/overlay/`;
   const overlaySuffix = mount.Source.slice(overlayDirectory.length);
   const lowerDirectory = mount.Source.replace(/\/merge$/, "/lower");
-  const lowerDirectories = mount.Options?.[0]?.replace(/^lowerdir=/, "").split(":");
+  const [lowerDirectoryOption, ...additionalOptions] = mount.Options ?? [];
+  const lowerDirectories = lowerDirectoryOption?.replace(/^lowerdir=/, "").split(":");
   const subpathDirectory = lowerDirectories?.[0];
   const containerRunPath = `/overlay-containers/${containerId}/userdata/subpath`;
   const subpathSuffix = subpathDirectory?.split(containerRunPath);
@@ -88,8 +91,8 @@ function isOwnedReadOnlyImageBacking(
     mount.Propagation === "private" &&
     mount.Source.startsWith(overlayDirectory) &&
     /^\d+\/merge$/.test(overlaySuffix) &&
-    mount.Options?.length === 1 &&
-    mount.Options[0]!.startsWith("lowerdir=") &&
+    lowerDirectoryOption?.startsWith("lowerdir=") === true &&
+    additionalOptions.every((option) => readOnlyOverlayFlags.has(option)) &&
     lowerDirectories?.length === 2 &&
     lowerDirectories[1] === lowerDirectory &&
     subpathSuffix?.length === 2 &&

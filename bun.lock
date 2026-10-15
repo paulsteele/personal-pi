@@ -26,14 +26,14 @@
     },
     "claude-skills": {
       "name": "@paulsteele/pi-claude-skills",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "peerDependencies": {
         "@earendil-works/pi-coding-agent": "*",
       },
     },
     "code-blocks": {
       "name": "@paulsteele/pi-code-blocks",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "peerDependencies": {
         "@earendil-works/pi-coding-agent": "*",
         "@earendil-works/pi-tui": "*",
@@ -41,7 +41,7 @@
     },
     "code-quality": {
       "name": "@paulsteele/pi-code-quality",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "dependencies": {
         "@paulsteele/pi-project-locations": "workspace:*",
         "@paulsteele/pi-shared-ui": "workspace:*",
@@ -68,14 +68,14 @@
     },
     "desktop-notifications": {
       "name": "@paulsteele/pi-desktop-notifications",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "peerDependencies": {
         "@earendil-works/pi-coding-agent": "*",
       },
     },
     "pi-permission-system": {
       "name": "@paulsteele/pi-permission-system",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "dependencies": {
         "@devcontainers/cli": "0.89.0",
         "@paulsteele/pi-project-locations": "workspace:*",
@@ -104,7 +104,7 @@
     },
     "pi-sidebar": {
       "name": "@paulsteele/pi-sidebar",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "dependencies": {
         "@paulsteele/pi-shared-ui": "workspace:*",
       },
@@ -123,7 +123,7 @@
     },
     "pr-review": {
       "name": "@paulsteele/pi-pr-review",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "dependencies": {
         "@paulsteele/pi-project-locations": "workspace:*",
         "@paulsteele/pi-shared-ui": "workspace:*",
@@ -150,7 +150,7 @@
     },
     "progress-observer": {
       "name": "@paulsteele/pi-progress-observer",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "dependencies": {
         "@paulsteele/pi-shared-ui": "workspace:*",
       },
@@ -171,7 +171,7 @@
     },
     "project-locations": {
       "name": "@paulsteele/pi-project-locations",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "devDependencies": {
         "@biomejs/biome": "2.5.4",
         "@types/node": "24.12.4",
@@ -181,7 +181,7 @@
     },
     "shared-ui": {
       "name": "@paulsteele/pi-shared-ui",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "devDependencies": {
         "@biomejs/biome": "2.5.4",
         "@earendil-works/pi-coding-agent": "1.0.0",

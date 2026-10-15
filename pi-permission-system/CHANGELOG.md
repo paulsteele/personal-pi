@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.0 — 2026-10-15
+
+- Add a session-scoped sandbox escape hatch: `/sandbox off|on`, the Settings → Sandbox → General toggle, the `--no-sandbox` launch flag, and `PI_SANDBOX=off`. While off, the devcontainer is retired and built-in file tools, Bash, and `!` user shell run on the host in the session cwd. Explicit tool, path, and shell denies still apply, and mount and tool-installation requests are refused. The choice persists across `/reload` and resume of that session only; new sessions start sandboxed. Sidebar and quality observe the new `off` presentation phase.
+- Pin the private .NET support for Roslyn to SDK 10.0.109 (runtime 10.0.9), which fixes SIGILL crashes (exit code 132) on ARM64 VMs that expose SME without SVE, such as Podman on Apple M4/M5. Existing tool profiles pinned to `dotnet-runtime` 10.0.102 must change that entry to `{"kind":"catalog","version":"10.0.109"}` in Global Sandbox Tools, followed by the normal approved rebuild.
+
 ## 2.3.0 — 2026-10-15
 
 - Add checksum-pinned jscpd 5.4.1 Linux GNU/musl ARM64/x86-64 artifact recipes, a distinct quality-tool role, and a runtime version check.

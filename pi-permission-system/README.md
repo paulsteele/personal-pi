@@ -1,6 +1,6 @@
 # Mandatory devcontainer sandbox
 
-Pi remains on the host, but its built-in file tools, Bash shell, and quality language-server subprocesses execute in a per-session Podman development container. Manually configured project host-command rules can route selected executable invocations to the host. Sandbox failures block guest tool execution; no auto mode, off switch, or automatic host fallback exists. The explicitly authorized web and Plannotator package tools retain their host execution, as described under Integration. The initial writable bind is the canonical directory where the session starts.
+Pi remains on the host, but its built-in file tools, Bash shell, and quality language-server subprocesses execute in a per-session Podman development container. Manually configured project host-command rules can route selected executable invocations to the host. Sandbox failures block guest tool execution; there is no auto mode or automatic host fallback. The only way out is the explicit, session-scoped [escape hatch](#sandbox-off-escape-hatch), which the operator turns on. The explicitly authorized web and Plannotator package tools retain their host execution, as described under Integration. The initial writable bind is the canonical directory where the session starts.
 
 This is tool/process isolation, not whole-Pi isolation. Pi and loaded extensions are trusted host code. Writable binds expose real host files to modification/deletion. Internet access permits uploads. Commands are not screened for sensitive files, external effects, or suspicious shell syntax. The sandbox boundary and explicit policy denies remain enforced, but path/command deny recognition is best-effort rather than secret exclusion from a raw bind.
 
@@ -75,6 +75,8 @@ Legacy `auto` configuration requires migration through setup or an accepted Gene
 /sandbox setup tools           # Private project tool entries
 /sandbox setup base            # Explicit private base replacement
 /sandbox setup update
+/sandbox off                   # Session-only escape hatch: run tools on the host
+/sandbox on                    # Restore the devcontainer for this session
 ```
 
 The first layered startup asks once to save the global server/runtime catalog when missing. It does not ask which languages to install. Existing base definitions remain bases; private supplements are separate documents. Global tool updates affect future builds, not running sessions. A resumed session with changed tooling offers a rebuild with saved binds.
@@ -98,6 +100,25 @@ A new Pi session gets a new container. Containerfile bases still invoke the refe
 Application tools such as Bun belong in the base or project supplement; private language-server installations generally should not be duplicated in the base. Review recipes before removing them because application builds may depend on those tools.
 
 Selected devcontainer definitions load without an approval prompt, including in new sessions or after definition changes. Definition validation remains mandatory; loading a definition does not authorize additional host binds or host initialization. Standalone setup drafts still require approval before writing configuration. `initializeCommand` follows the spec's host semantics and needs fresh one-shot operator approval every time it executes. Headless, cancelled, denied, or stale initialization is blocked. Host environment imports must be explicitly allowlisted. Declared ports require approval and are loopback-only.
+
+## Sandbox-off escape hatch
+
+Use this when the sandbox itself is what you need to fix: Podman failures, wedged startup, or work on this extension or `code-quality`. It is an explicit operator choice and never an automatic fallback.
+
+- `/sandbox off` retires the current container, including an in-progress or hung startup, without waiting for the agent to go idle. `/sandbox on` waits for idle and starts the devcontainer fresh.
+- Settings → Sandbox → General Settings offers the same toggle: **Turn sandbox off for this session** / **Turn sandbox back on**.
+- `pi --no-sandbox` or `PI_SANDBOX=off pi` starts a session with the sandbox off and never touches Podman. Use this when the engine cannot start at all. The launch opt-out takes precedence over a recorded `/sandbox on`.
+
+The choice is **session-scoped**. It is recorded as a `sandbox:mode` session entry, so `/reload` and resuming that session keep it. New sessions start sandboxed.
+
+While off:
+
+- Built-in `read`, `write`, `edit`, `ls`, `find`, `grep`, `bash`, and `!` user shell commands use pi's stock host implementations in the session cwd, with the host environment and full user privileges. Nothing is container-isolated.
+- Explicit permission denies still apply: tool names, paths (raw, cwd-relative, absolute, and canonical host forms), whole Bash commands and units, and Bash path operands. Like the sandboxed gate, deny matching is best-effort, not secret exclusion.
+- `request_host_mount`, `request_sandbox_tool`, `/sandbox setup|build|rebuild`, and the Rebuild action are refused until `/sandbox on`.
+- The system prompt tells the agent it is running natively on the host.
+- The Sidebar Sandbox tab shows `OFF · host passthrough`.
+- `code-quality` suspends its gate for the session, closing any pending case as waived without a prompt. Delegated reviewer sandboxes and `pr_review` source capture remain unavailable.
 
 ## Missing development tools
 

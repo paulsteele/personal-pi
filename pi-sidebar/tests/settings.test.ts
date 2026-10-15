@@ -218,6 +218,31 @@ it("preserves the unavailable phase through multiline engine diagnostics and Sid
 	publisher.dispose();
 });
 
+it("renders a session-scoped sandbox-off state as host passthrough instead of Podman details", () => {
+	const state = parseSandboxState({
+		version: 1,
+		sessionId: "session",
+		revision: 3,
+		phase: "off",
+		definitionPath: "host",
+		mounts: [],
+		ports: [],
+	});
+	expect(state?.phase).toBe("off");
+	const rendered = renderSandboxContent(
+		state,
+		{
+			fg: (_color, text) => text,
+			bold: (text) => text,
+			italic: (text) => text,
+		},
+		100,
+		false,
+	).join("\n");
+	expect(rendered).toContain("OFF · host passthrough");
+	expect(rendered).not.toContain("Podman");
+});
+
 it("Settings stays reachable at narrow sidebar widths and lists clickable sections", () => {
 	const snapshot = buildSidebarSnapshot({
 		cwd: "/project",

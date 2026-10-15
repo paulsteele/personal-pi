@@ -3,6 +3,7 @@ import {
   rustDistributionTarget,
   type ToolPlatform,
 } from "./tool-platform.ts";
+import { DOTNET_SDK_VERSION } from "./tool-catalog.ts";
 
 export interface PinnedDownload {
   url: string;
@@ -20,13 +21,13 @@ const goChecksums = {
 };
 const dotnetChecksums: Record<string, string> = {
   "linux-arm64":
-    "1254141153d29b5b926e0e7b0b172a25f9c096b8ed6a182f54062c5e0b41384b30e10e2bf1ebe86ed0f58f4ff762203acd83bcf23fefb59c07af45332d794700",
+    "b9ef554dc3465214afc61d8ecfb2b2e9c51baf08f07cc386ef3c87aa673f38f86474311e4be1d1b466212f8cc1308b3da01398f8c48003c4bbf380723ba950a4",
   "linux-musl-arm64":
-    "10be1f3f2516fbc1049ad8fcb00bd12bbb16a2d20f708b6cd0177cd8775d01e9dec10ec1fbe4b570d7c82b158cb745d77e8ec66ff0b9f56327778562ba1a77be",
+    "5b746999ff992829ca8bb54e4e0369366a21c694bb3b169ab328301ccf3cf0b91ff71398231fea180d9f563cb7137bce624ffe26e98e3eba59ee2fc84af4aa35",
   "linux-musl-x64":
-    "3586eb8de224d7585bf6cfd20f489e27c0a2a1fc8cb107c7ee2a07bead48b1edb0241f52febcf0e2f9f5fdf3ece3cf2e2f988b149166947445189e7406652ccd",
+    "1bff649dec241f3037f10935c89634156f6bd584ed38f4b9b8cb21a331fec0ce3631e4241afabff9cdd032d13f19f440153313dd21b1c85814fc9fc3df024c7b",
   "linux-x64":
-    "7adf40e8e5547970391cfbe474c3874c6918ce3575ac398f376c78502134e1c8a2fa3da9aca281fdaeda81671f56c851ebe9e74c5b57c5a298bd45deba63565d",
+    "5648e8edbdd8127452828964ca8be631ba19b75aa4020bc3352f3ab861b8b5982d823fd6a3bb3b741ec4e3fdc6c0de9ec8a52e8dcedacccf9e8754250579dc2d",
 };
 const rustChecksums: Record<string, { runtime: string; analyzer: string }> = {
   "x86_64-unknown-linux-gnu": {
@@ -90,7 +91,7 @@ export function toolRuntimeDownload(id: string, platform: ToolPlatform): PinnedD
   if (id === "dotnet-runtime") {
     const rid = dotnetRuntimeIdentifier(platform);
     return {
-      url: `https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.102/dotnet-sdk-10.0.102-${rid}.tar.gz`,
+      url: `https://builds.dotnet.microsoft.com/dotnet/Sdk/${DOTNET_SDK_VERSION}/dotnet-sdk-${DOTNET_SDK_VERSION}-${rid}.tar.gz`,
       algorithm: "sha512",
       checksum: dotnetChecksums[rid],
     };

@@ -7,6 +7,8 @@ export interface CatalogTool {
   distributionPackages: readonly string[];
 }
 
+export const DOTNET_SDK_VERSION = "10.0.109";
+
 export const STANDARD_TOOL_CATALOG: readonly CatalogTool[] = [
   {
     id: "jscpd",
@@ -26,10 +28,10 @@ export const STANDARD_TOOL_CATALOG: readonly CatalogTool[] = [
   },
   {
     id: "dotnet-runtime",
-    version: "10.0.102",
+    version: DOTNET_SDK_VERSION,
     role: "runtime",
     dependencies: [],
-    executable: "/opt/pi-tools/dotnet-runtime/10.0.102/dotnet",
+    executable: `/opt/pi-tools/dotnet-runtime/${DOTNET_SDK_VERSION}/dotnet`,
     distributionPackages: [],
   },
   {

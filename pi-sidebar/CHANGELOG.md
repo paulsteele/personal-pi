@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.4.0 — 2026-10-15
+
+- Accept the sandbox `off` phase and render it in the Sandbox tab as `OFF · host passthrough` instead of Podman runtime details.
+
 ## 2.3.0 — 2026-10-15
 
 - Add a Quality tab and `/sidebar quality` with bounded jscpd, repository scan, coverage, latest-check, and recovery information.

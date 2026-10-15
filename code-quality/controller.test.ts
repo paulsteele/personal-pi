@@ -232,6 +232,47 @@ it("a settings edit cannot implicitly waive a pending quality case or open a sec
 	expect(h.ctx.ui.confirm).not.toHaveBeenCalled();
 });
 
+it("turning the sandbox off waives a pending case without a prompt and suspends the gate for the session", async () => {
+	const h = harness();
+	await h.runtime.beforeTool("write", { path: h.path }, h.ctx);
+	writeFileSync(h.path, "pending");
+	await h.runtime.boundary(h.ctx, "aborted");
+	expect(h.runtime.pending).toBe(true);
+	vi.mocked(h.ctx.ui.confirm).mockClear();
+
+	h.runtime.suspendForSandboxOff(h.ctx);
+
+	expect(h.ctx.ui.confirm).not.toHaveBeenCalled();
+	expect(h.runtime.pending).toBe(false);
+	expect(h.runtime.active).toBe(false);
+	expect(h.runtime.config.enabled).toBe(true);
+	expect(h.pi.appendEntry).toHaveBeenCalledWith(
+		"code-quality:waiver",
+		expect.objectContaining({ reason: "Sandbox turned off for this session", automatic: true }),
+	);
+	expect(h.ctx.ui.setStatus).toHaveBeenLastCalledWith("code-quality", "quality: off (sandbox off)");
+	await expect(h.runtime.beforeTool("write", { path: join(h.cwd, "b.ts") }, h.ctx)).resolves.toBeUndefined();
+	expect(h.runtime.pending).toBe(false);
+
+	h.runtime.resumeAfterSandbox(h.ctx);
+
+	expect(h.runtime.active).toBe(true);
+});
+
+it("a new session starts with quality active even after another session suspended it for sandbox-off", async () => {
+	const h = harness("first-session");
+	h.runtime.suspendForSandboxOff(h.ctx);
+	expect(h.runtime.active).toBe(false);
+	const nextSessionContext = {
+		...h.ctx,
+		sessionManager: { getSessionId: () => "second-session", getBranch: () => [] },
+	} as unknown as ExtensionContext;
+
+	await h.runtime.start(nextSessionContext);
+
+	expect(h.runtime.active).toBe(true);
+});
+
 it("does not save settings after the owning interaction is cancelled", async () => {
 	const h = harness();
 	const controller = new AbortController();

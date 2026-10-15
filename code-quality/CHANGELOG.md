@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.4.0 — 2026-10-15
+
+- Suspend the quality gate for the session while the sandbox escape hatch is active (`sandbox:state:v1` phase `off`). The pending case is waived without a prompt, LSP and DRY stop locally, and the saved `enabled` setting is unchanged. The gate resumes when the sandbox is ready again, and new sessions start active.
+
 ## 2.3.0 — 2026-10-15
 
 - Add container-backed jscpd/lexical DRY retrieval and an isolated finding-only judge using the existing quality model and shared correction/arbitration flow.

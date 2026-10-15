@@ -87,7 +87,7 @@ it.each([
   { architecture: "arm64", distribution: "alpine", release: "3.23", libc: "musl" },
 ])("marks Roslyn's native child executable on $libc $architecture", (input) => {
   const tool = catalogTool("roslyn", "5.12.0-1.26426.8");
-  const dotnet = catalogTool("dotnet-runtime", "10.0.102");
+  const dotnet = catalogTool("dotnet-runtime", "10.0.109");
   const recipe = toolArtifactRecipe({
     tool,
     platform: resolveToolPlatform({ os: "linux", ...input }),
@@ -97,6 +97,24 @@ it.each([
   const nativeServer = `${catalogToolPrefix(tool)}/Microsoft.CodeAnalysis.LanguageServer`;
   expect(recipe.files["install.sh"]).toContain(`chmod 755 '${nativeServer}'\n`);
   expect(recipe.files["install.sh"]).toContain(`chmod 755 '${tool.executable}'\n`);
+});
+
+it("uses the .NET 10.0.9 runtime for the Roslyn artifact", () => {
+  const dotnet = catalogTool("dotnet-runtime", "10.0.109");
+  const recipe = toolArtifactRecipe({
+    tool: catalogTool("roslyn", "5.12.0-1.26426.8"),
+    platform: resolveToolPlatform({
+      os: "linux",
+      architecture: "arm64",
+      distribution: "debian",
+      release: "13",
+      libc: "glibc",
+    }),
+    builderImageId: `sha256:${"a".repeat(64)}`,
+    dependencies: [{ tool: dotnet, imageId: `sha256:${"b".repeat(64)}` }],
+  });
+  expect(recipe.files["install.sh"]).toContain("/opt/pi-tools/dotnet-runtime/10.0.109/dotnet");
+  expect(recipe.files["install.sh"]).not.toContain("10.0.102");
 });
 
 it("builds Node against musl rather than copying a glibc archive", () => {

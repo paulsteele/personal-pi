@@ -41,7 +41,7 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 			return;
 		}
 		dryRestartPending = true;
-		dryStartup = dry.start(ctx.cwd, ctx.isProjectTrusted(), runtime.config);
+		dryStartup = dry.start(ctx.cwd, ctx.isProjectTrusted(), { ...runtime.config, enabled: runtime.active });
 		try {
 			await dryStartup;
 		} finally {
@@ -290,6 +290,7 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 				readGuestSnapshot(qualitySandbox(pi), path, config, authorized, signal),
 		};
 		await runtime.start(ctx);
+		pi.events.emit("sandbox:discover:v1", { version: 1 });
 		if (ctx.mode === "tui") {
 			const updateDryStatus = () => activity?.updateDry?.(dry!.status);
 			dry = ports.createDryManager?.(updateDryStatus) ?? new SandboxDryManager(pi, agentDir, updateDryStatus);
@@ -359,8 +360,33 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 			});
 		}
 	});
+	const suspendForSandboxOff = async (ctx: ExtensionContext): Promise<void> => {
+		runtime.suspendForSandboxOff(ctx);
+		await dry?.stop();
+		await lspStartup.catch(() => {});
+		await lsp?.stop();
+		lspSetupError = undefined;
+	};
+	const resumeAfterSandbox = async (ctx: ExtensionContext): Promise<void> => {
+		runtime.resumeAfterSandbox(ctx);
+		if (!runtime.active) {
+			return;
+		}
+		await restartDry(ctx);
+		lspStartup = lsp?.start(ctx.cwd, ctx.isProjectTrusted(), runtime.active) ?? Promise.resolve();
+		await lspStartup;
+	};
 	const unsubscribeSandboxState = pi.events.on("sandbox:state:v1", (raw) => {
 		const state = raw as { phase?: string; sessionId?: string };
+		const isCurrentSession = Boolean(context && state.sessionId === context.sessionManager.getSessionId());
+		if (isCurrentSession && state.phase === "off") {
+			void suspendForSandboxOff(context!).catch(() => {});
+			return;
+		}
+		if (isCurrentSession && state.phase === "ready" && runtime.sandboxSuspended) {
+			void resumeAfterSandbox(context!).catch(() => {});
+			return;
+		}
 		if (
 			state.phase === "ready" &&
 			context &&

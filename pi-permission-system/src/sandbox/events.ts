@@ -5,7 +5,7 @@ export interface SandboxPresentation {
   version: 1;
   sessionId: string;
   revision: number;
-  phase: "starting" | "ready" | "changing" | "unavailable" | "stopped";
+  phase: "starting" | "ready" | "changing" | "unavailable" | "stopped" | "off";
   definitionPath: string;
   toolingSources?: string[];
   toolingRevision?: string;

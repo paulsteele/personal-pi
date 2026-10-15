@@ -1,4 +1,9 @@
-import { catalogTool, catalogToolPrefix, type CatalogTool } from "./tool-catalog.ts";
+import {
+  catalogTool,
+  catalogToolPrefix,
+  DOTNET_SDK_VERSION,
+  type CatalogTool,
+} from "./tool-catalog.ts";
 import { shellQuote } from "./image-tool-recipe.ts";
 import { jscpdDownload, toolRuntimeDownload, type PinnedDownload } from "./tool-downloads.ts";
 import {
@@ -219,7 +224,7 @@ function serverInstallCommands(tool: CatalogTool, platform: ToolPlatform): strin
   if (tool.id === "roslyn") {
     const rid = dotnetRuntimeIdentifier(platform);
     const packageName = `roslyn-language-server.${rid}`;
-    const dotnet = catalogTool("dotnet-runtime", "10.0.102");
+    const dotnet = catalogTool("dotnet-runtime", DOTNET_SDK_VERSION);
     const nativeServer = `${prefix}/Microsoft.CodeAnalysis.LanguageServer`;
     return [
       ...downloadCommands(

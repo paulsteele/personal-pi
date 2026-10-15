@@ -98,6 +98,7 @@ export class QualityController {
 	private captureChanged = false;
 	private ignoredPaths = new Set<string>();
 	private blockedReason?: string;
+	private suspendedBySandbox = false;
 	private generation = 0;
 	private sessionId = "";
 	private cwd = "";
@@ -257,7 +258,36 @@ export class QualityController {
 		}
 	}
 	get active(): boolean {
-		return this.config.enabled;
+		return this.config.enabled && !this.suspendedBySandbox;
+	}
+	get sandboxSuspended(): boolean {
+		return this.suspendedBySandbox;
+	}
+	suspendForSandboxOff(ctx: ExtensionContext): void {
+		if (this.suspendedBySandbox) {
+			return;
+		}
+		this.suspendedBySandbox = true;
+		if (this.state && this.state.phase !== "closed") {
+			this.pi.appendEntry("code-quality:waiver", {
+				caseId: this.state.id,
+				reason: "Sandbox turned off for this session",
+				automatic: true,
+				reviewed: false,
+			});
+			this.state.phase = "closed";
+			this.state.resolution = "waived";
+			this.persist();
+		}
+		this.blockedReason = undefined;
+		this.status(ctx);
+	}
+	resumeAfterSandbox(ctx: ExtensionContext): void {
+		if (!this.suspendedBySandbox) {
+			return;
+		}
+		this.suspendedBySandbox = false;
+		this.status(ctx);
 	}
 	private signal(ctx: ExtensionContext): AbortSignal {
 		return ctx.signal ? AbortSignal.any([this.lifetime.signal, ctx.signal]) : this.lifetime.signal;
@@ -272,7 +302,7 @@ export class QualityController {
 	private activityPhase(): QualityActivityPhase {
 		if (this.activityOverride) return this.activityOverride;
 		if (this.blockedReason || this.configError) return "paused";
-		if (!this.config.enabled) return "disabled";
+		if (!this.active) return "disabled";
 		if (this.activeCheck?.stages.some((stage) => !stage.outcome)) {
 			return "checking";
 		}
@@ -316,7 +346,7 @@ export class QualityController {
 		this.publishActivity();
 		ctx.ui.setStatus(
 			"code-quality",
-			`quality: ${text ?? (this.blockedReason ? "paused" : !this.config.enabled ? "off" : this.state?.phase === "closed" ? this.state.resolution : (this.state?.phase ?? this.modelKey()))}`,
+			`quality: ${text ?? (this.blockedReason ? "paused" : this.suspendedBySandbox ? "off (sandbox off)" : !this.config.enabled ? "off" : this.state?.phase === "closed" ? this.state.resolution : (this.state?.phase ?? this.modelKey()))}`,
 		);
 	}
 	private receipt(content: string): void {
@@ -352,6 +382,10 @@ export class QualityController {
 		this.dispose();
 		this.lifetime = new AbortController();
 		const generation = this.generation;
+		const sessionChanged = ctx.sessionManager.getSessionId() !== this.sessionId;
+		if (sessionChanged) {
+			this.suspendedBySandbox = false;
+		}
 		this.sessionId = ctx.sessionManager.getSessionId();
 		this.activityContext = ctx;
 		this.activityOverride = undefined;
@@ -376,6 +410,11 @@ export class QualityController {
 		this.configError = loaded.error;
 		if (ctx.mode !== "tui") {
 			this.status(ctx, "inactive outside TUI");
+			return;
+		}
+		if (this.suspendedBySandbox) {
+			this.store = new CaseStore(this.agentDir, this.cwd);
+			this.status(ctx);
 			return;
 		}
 		try {
@@ -417,6 +456,8 @@ export class QualityController {
 	}
 	summary(): string {
 		if (this.blockedReason) return this.blockedReason;
+		if (this.suspendedBySandbox)
+			return "Quality suspended because the sandbox is off for this session; /sandbox on resumes it.";
 		if (!this.state || this.state.phase === "closed")
 			return `Quality ${this.config.enabled ? "enabled" : "disabled"}; reviewer ${this.modelKey()}. Explicit edit/write coverage only; shell/custom mutations are not automatically covered.`;
 		return `Quality case ${this.state.id}; revision ${revision(this.state)}; ${this.state.phase}; rounds ${this.state.attempts}/${this.state.limit}. ${this.state.reason ?? ""}`;
@@ -628,7 +669,7 @@ export class QualityController {
 		ctx: ExtensionContext,
 	): Promise<MutationPreparation> {
 		const generation = this.generation;
-		if (!this.config.enabled) return { result: undefined, phase: "disabled" };
+		if (!this.active) return { result: undefined, phase: "disabled" };
 		let path: string | undefined;
 		const blocked = (reason: string): MutationPreparation => ({
 			path,
@@ -879,7 +920,7 @@ export class QualityController {
 		outcome: string,
 		settling = false,
 	): Promise<BoundaryResult | undefined> {
-		if (ctx.mode !== "tui" || !this.config.enabled || this.operation) return;
+		if (ctx.mode !== "tui" || !this.active || this.operation) return;
 		if (this.blockedReason) {
 			this.pause(ctx, this.blockedReason);
 			return;

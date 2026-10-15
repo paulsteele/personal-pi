@@ -100,10 +100,40 @@ async function editHostRules(
   }
 }
 
+export interface SandboxModeControl {
+  isHostMode(): boolean;
+  enterHostMode(ctx: ExtensionContext): Promise<void>;
+  enterSandboxedMode(ctx: ExtensionContext): Promise<void>;
+}
+
+function sandboxModeToggleAction(modeControl: SandboxModeControl) {
+  return {
+    id: "toggle-mode",
+    get label() {
+      return modeControl.isHostMode()
+        ? "Turn sandbox back on"
+        : "Turn sandbox off for this session";
+    },
+    get description() {
+      return modeControl.isHostMode()
+        ? "Restart the devcontainer; built-in tools return to the sandbox"
+        : "Escape hatch: run built-in tools on the host until /sandbox on or a new session";
+    },
+    async run(ctx: ExtensionContext) {
+      if (modeControl.isHostMode()) {
+        await modeControl.enterSandboxedMode(ctx);
+        return;
+      }
+      await modeControl.enterHostMode(ctx);
+    },
+  };
+}
+
 export function registerSandboxSettings(
   pi: ExtensionAPI,
   agentDir: string,
   getSession: () => SandboxSession,
+  modeControl?: SandboxModeControl,
 ): () => void {
   const unregisterSections: Array<() => void> = [];
   const registerSandboxSettingsSection = (owner: ExtensionAPI, section: SettingsSection) => {
@@ -143,6 +173,7 @@ export function registerSandboxSettings(
       };
     },
     actions: [
+      ...(modeControl ? [sandboxModeToggleAction(modeControl)] : []),
       {
         id: "rebuild",
         label: "Rebuild current sandbox",
@@ -150,6 +181,9 @@ export function registerSandboxSettings(
         async run(ctx, signal) {
           if (!ctx.isIdle()) {
             throw new Error("Wait for the agent to finish before rebuilding");
+          }
+          if (modeControl?.isHostMode()) {
+            throw new Error("Sandbox is off for this session; turn it back on before rebuilding");
           }
           await getSession().rebuild(signal);
         },

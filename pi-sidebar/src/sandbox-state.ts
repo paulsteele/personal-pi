@@ -3,7 +3,7 @@ import { stripTerminalSequences } from "@earendil-works/pi-tui";
 export interface SidebarSandboxState {
 	sessionId: string;
 	revision: number;
-	phase: "starting" | "ready" | "changing" | "unavailable" | "stopped";
+	phase: "starting" | "ready" | "changing" | "unavailable" | "stopped" | "off";
 	definitionPath: string;
 	toolingSources?: string[];
 	toolingRevision?: string;
@@ -34,7 +34,14 @@ export function parseSandboxState(value: unknown): SidebarSandboxState | undefin
 	if (!Number.isSafeInteger(state.revision)) {
 		return;
 	}
-	const phases: SidebarSandboxState["phase"][] = ["starting", "ready", "changing", "unavailable", "stopped"];
+	const phases: SidebarSandboxState["phase"][] = [
+		"starting",
+		"ready",
+		"changing",
+		"unavailable",
+		"stopped",
+		"off",
+	];
 	if (typeof state.phase !== "string" || !phases.includes(state.phase as SidebarSandboxState["phase"])) {
 		return;
 	}
