@@ -36,6 +36,7 @@ export const SIDEBAR_TAB_ICONS = {
 	summary: "󰨸",
 	tasks: "󰄬",
 	sandbox: "󰆧",
+	quality: "󰅴",
 	settings: "󰒓",
 } as const;
 
@@ -516,25 +517,16 @@ function trackRail(
 	return `${prefix}${rail(leftFill)}${safeContent}${rail(remaining - leftFill)}${suffix}`;
 }
 
-function trackCounts(
-	auto: SidebarSnapshot["autoModeState"],
-	quality: QualityReviewCounts | undefined,
-	palette: AtelierPalette,
-): readonly string[] {
-	const badges = [
-		palette.paint("permissionAuto", `${PERMISSION_SOURCE_ICON.auto} ${finiteCount(auto?.allowed ?? 0)}`),
-		palette.paint("permissionHuman", `${PERMISSION_SOURCE_ICON.human} ${finiteCount(auto?.asked ?? 0)}`),
-		`${palette.paint("permissionAuto", `${QUALITY_ICON} ${finiteCount(quality?.checkCount ?? 0)}`)} ${palette.paint(
-			(quality?.rejectionCount ?? 0) > 0 ? "error" : "dim",
-			`${finiteCount(quality?.rejectionCount ?? 0)}✕`,
-		)}`,
-	];
-	return [badges.join(` ${palette.paint("dim", "·")} `), badges.join(" ")];
+function qualityTrackCounts(quality: QualityReviewCounts | undefined, palette: AtelierPalette): string {
+	const rejectionCount = finiteCount(quality?.rejectionCount ?? 0);
+	return `${palette.paint("permissionAuto", `${QUALITY_ICON} ${finiteCount(quality?.checkCount ?? 0)}`)} ${palette.paint(
+		rejectionCount > 0 ? "error" : "dim",
+		`${rejectionCount}✕`,
+	)}`;
 }
 
 function activityTrackRows(
 	activity: RunActivitySnapshot,
-	auto: SidebarSnapshot["autoModeState"],
 	quality: QualityReviewCounts | undefined,
 	palette: AtelierPalette,
 	theme: ThemeLike,
@@ -603,7 +595,7 @@ function activityTrackRows(
 			palette,
 			safeWidth - 4,
 		)}${palette.paint("dim", " │")}`,
-		trackRail("bottom", trackCounts(auto, quality, palette), safeWidth, palette, bottomLeft, bottomRight),
+		trackRail("bottom", qualityTrackCounts(quality, palette), safeWidth, palette, bottomLeft, bottomRight),
 	];
 }
 
@@ -738,6 +730,16 @@ function activityBandRows(
 			const name = server.id === server.name ? server.name : `${server.id} (${server.name})`;
 			return `${name} ${symbol} ${server.queued ? "queued" : server.phase}${sharing}`;
 		});
+		if (quality.dry) {
+			const toolSymbol =
+				quality.dry.toolPhase === "ready" ? "●" : quality.dry.toolPhase === "unavailable" ? "✕" : "⟳";
+			const scanSymbol =
+				quality.dry.scanPhase === "ready" ? "●" : quality.dry.scanPhase === "unavailable" ? "✕" : "⟳";
+			serverLabels.push(
+				`jscpd ${toolSymbol} ${quality.dry.toolPhase}`,
+				`scan ${scanSymbol} ${quality.dry.scanPhase}`,
+			);
+		}
 		let line = header;
 		for (const label of serverLabels) {
 			const candidateLine = `${line} · ${label}`;
@@ -750,17 +752,7 @@ function activityBandRows(
 		}
 		rows.push(centeredTrackContent(palette.paint("accent", line), leadWidth, " "));
 	}
-	rows.push(
-		...activityTrackRows(
-			activity,
-			snapshot.autoModeState,
-			snapshot.qualityHeader,
-			palette,
-			theme,
-			leadWidth,
-			now,
-		),
-	);
+	rows.push(...activityTrackRows(activity, snapshot.qualityHeader, palette, theme, leadWidth, now));
 	if (section === "header") {
 		return rows;
 	}
@@ -769,6 +761,108 @@ function activityBandRows(
 		rows.push(...standalonePermissionRows(permission, continuationWidth, palette));
 	}
 	return rows;
+}
+
+export function renderQualityContent(
+	quality: QualityHeader | undefined,
+	theme: ThemeLike,
+	width: number,
+	colorEnabled = true,
+): string[] {
+	if (width <= 0) {
+		return [];
+	}
+	const palette = createPalette(theme, colorEnabled);
+	const rows = ["", sidebarSectionHeading("QUALITY GATE", width, palette), ""];
+	if (!quality) {
+		return [...rows, palette.paint("muted", "Quality unavailable")];
+	}
+	rows.push(
+		...sidebarDetail("Reviewer", quality.modelId, width, palette),
+		...sidebarDetail(
+			"State",
+			`${quality.phase}${quality.activeStage ? ` · ${quality.activeStage}` : ""}`,
+			width,
+			palette,
+		),
+		...sidebarDetail(
+			"Rounds",
+			`${quality.correctionAttempt ?? 0}/${quality.correctionLimit ?? 5}`,
+			width,
+			palette,
+		),
+	);
+	for (const server of quality.lsp ?? []) {
+		rows.push(...sidebarDetail("LSP", `${server.name} · ${server.phase}`, width, palette));
+	}
+	const dry = quality.dry;
+	if (!dry) {
+		rows.push("", palette.paint("muted", "DRY status unavailable"));
+		return rows;
+	}
+	const jscpdDetails = [
+		...sidebarDetail("Tool", `${dry.version ?? "unavailable"} · ${dry.toolPhase}`, width, palette),
+		...sidebarDetail("Executable", dry.executable ?? "—", width, palette),
+		...sidebarDetail("Detection", "Exact · renamed · gap · AST", width, palette),
+		...sidebarDetail(
+			"Coverage",
+			`${dry.formatCount} token formats · ${dry.astFormatCount} AST formats`,
+			width,
+			palette,
+		),
+		...sidebarDetail(
+			"Clones",
+			`${dry.cloneCounts.exact} exact · ${dry.cloneCounts.renamed} renamed · ${dry.cloneCounts.gap} gap · ${dry.cloneCounts.ast} AST`,
+			width,
+			palette,
+		),
+		...sidebarDetail("AI reporter", "Compact locations only; no judgment", width, palette),
+		...sidebarDetail("Scan", dry.scanPhase, width, palette),
+		...sidebarDetail("Scope", dry.scope ?? "—", width, palette),
+		...sidebarDetail("Revision", dry.revision?.slice(0, 16) ?? "—", width, palette),
+		...sidebarDetail(
+			"Indexed",
+			`${dry.files} files · ${dry.windows} windows · ${dry.excluded} excluded`,
+			width,
+			palette,
+		),
+		...sidebarDetail("Size", `${Math.round(dry.bytes / 1024)} KiB`, width, palette),
+		...sidebarDetail("Checking", "Current snippets against turn-start baseline", width, palette),
+	];
+	rows.push("", sidebarSectionHeading("JSCPD", width, palette), "");
+	rows.push(...jscpdDetails);
+	if (dry.lastScanAt) {
+		rows.push(...sidebarDetail("Last scan", new Date(dry.lastScanAt).toLocaleTimeString(), width, palette));
+	}
+	if (dry.latest) {
+		rows.push(
+			"",
+			sidebarSectionHeading("LATEST DRY CHECK", width, palette),
+			"",
+			...sidebarDetail("Outcome", dry.latest.outcome, width, palette),
+			...sidebarDetail(
+				"Pairs",
+				`${dry.latest.retrieved} retrieved · ${dry.latest.selected} selected`,
+				width,
+				palette,
+			),
+			...sidebarDetail(
+				"Model",
+				`${dry.latest.requests} requests · ${dry.latest.inputTokens}/${dry.latest.outputTokens} input/output tokens`,
+				width,
+				palette,
+			),
+		);
+	}
+	if (dry.reason) {
+		rows.push(
+			"",
+			sidebarSectionHeading("ATTENTION", width, palette),
+			"",
+			...wrapTextWithAnsi(palette.paint("warning", sanitize(dry.reason)), width),
+		);
+	}
+	return rows.map((row) => truncateToWidth(row, width, ""));
 }
 
 export function renderTasksContent(
@@ -1196,6 +1290,14 @@ export function createSidebarComponent(options: SidebarComponentOptions): Compon
 		return {
 			render(width) {
 				const snapshot = options.getSnapshot();
+				if (tab === "quality") {
+					return renderQualityContent(
+						snapshot.qualityHeader,
+						options.theme,
+						width,
+						options.colorEnabled ?? true,
+					);
+				}
 				if (tab === "tasks") {
 					return renderTasksContent(snapshot.plannotator, options.theme, width, options.colorEnabled ?? true);
 				}

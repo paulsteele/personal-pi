@@ -146,8 +146,11 @@ export function resolveToolProfiles(
     for (const [id, entry] of Object.entries(profile.tools)) {
       const catalogEntry =
         entry.kind === "catalog" ? catalogTool(id, entry.version, catalog) : undefined;
-      if (entry.kind === "recipe" && catalog.some((tool) => tool.id === id)) {
-        throw new Error(`Managed tool requires a verified catalog recipe: ${id}`);
+      const managedVersions = catalog.filter((tool) => tool.id === id).map((tool) => tool.version);
+      if (entry.kind === "recipe" && managedVersions.length) {
+        throw new Error(
+          `Managed tool requires a verified catalog recipe: ${id}. Replace its ${profileLayer.source} tools entry with {"kind":"catalog","version":"${managedVersions[0]}"} in Sandbox Tools.`,
+        );
       }
       resolvedToolsById.set(id, {
         id,

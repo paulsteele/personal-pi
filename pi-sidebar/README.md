@@ -12,6 +12,7 @@ The selectors use Nerd Font icons rather than text; configure a Nerd Font in you
 - **Summary** (`󰨸`) — Progress Observer status and model, with spaced Now, Next, Blockers, Goal, and Done sections and wrapped, indented values.
 - **Tasks** (`󰄬`) — Plannotator's active plan, completed/total count, and scrollable checklist. Browser-approved plans use the approved snapshot; matching file checkmarks, `[DONE:n]` messages, and successful `plannotator_mark_done` results update completion on the current branch.
 - **Sandbox** (`󰆧`) — colored state and separate Runtime, Configuration, Bind Mounts, Network, and Attention sections. Writable/read-only mounts have distinct colors; long paths wrap without hiding their details.
+- **Quality** (`󰅴`) — reviewer/gate state, a JSCPD section combining tool details with scan scope/state/coverage, latest DRY check, and recovery information. The pinned header shows tool and scan readiness.
 - **Settings** (`󰒓`) — one clickable root per plugin that opens its centered PR-style menu. Accepted field edits save immediately, with no Apply button. Tab selectors wrap at narrow pane widths.
 
 Each tab has independent scrolling. The native footer remains visible separately, without a devcontainer label or lock indicator; sandbox state stays in the sidebar. Unknown layouts fail closed rather than replacing the transcript with an overlay. Selecting a tab or hiding Sidebar never changes sandbox authority.
@@ -20,7 +21,7 @@ Each tab has independent scrolling. The native footer remains visible separately
 
 ```text
 /sidebar on|off|toggle
-/sidebar logs|tools|summary|tasks|sandbox|settings
+/sidebar logs|tools|summary|tasks|sandbox|quality|settings
 /plugin-settings [section-id]
 ```
 
@@ -28,7 +29,7 @@ The pane starts visible in fullscreen TUI mode unless its private startup prefer
 
 ## Plugin settings
 
-Click a plugin in Settings, or use `/plugin-settings` for keyboard navigation. Sandbox contains General Settings, Project Host Commands, global/project Container Bases and Tools, and Project Environment. Code Quality contains Review Settings and Language Servers. PR Review, Progress Observer, and Sidebar retain their own roots. Loaded third-party npm packages add Web Access, Plannotator (Viewer Settings and Phases), and Questionnaire.
+Click a plugin in Settings, or use `/plugin-settings` for keyboard navigation. Sandbox contains General Settings, Project Host Commands, global/project Container Bases and Tools, and Project Environment. Code Quality contains Review Settings, Language Servers, and DRY Checking. DRY Checking exposes enabled state and typed limits/profile, plus Show status and Run fresh scan actions using the same operations as `/quality dry`. PR Review, Progress Observer, and Sidebar retain their own roots. Loaded third-party npm packages add Web Access, Plannotator (Viewer Settings and Phases), and Questionnaire.
 
 Each child section retains its own loader and validated save operation; entering or leaving a plugin submenu does not load or save every child. Existing direct section IDs such as `/plugin-settings host-commands` remain available.
 

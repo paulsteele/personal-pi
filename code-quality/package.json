@@ -1,6 +1,6 @@
 {
 	"name": "@paulsteele/pi-code-quality",
-	"version": "2.2.0",
+	"version": "2.3.0",
 	"private": true,
 	"description": "Isolated post-edit quality gate with human arbitration",
 	"type": "module",
@@ -15,6 +15,14 @@
 		"lsp-broker-host.mjs",
 		"lsp-process-guard.mjs",
 		"lsp-sandbox-discovery.py",
+		"dry-worker.mjs",
+		"dry-mcp.mjs",
+		"dry-lexical.mjs",
+		"dry-lexical.d.mts",
+		"source-disclosure.mjs",
+		"source-disclosure.d.mts",
+		"dry-policy.md",
+		"dry-examples.md",
 		"policy.md",
 		"examples.md",
 		"README.md",
@@ -24,6 +32,8 @@
 		"!test-fixtures.ts",
 		"!vitest.config.ts",
 		"!calibrate.ts",
+		"!dry-calibrate.ts",
+		"!dry-scenarios.ts",
 		"!lsp-probe.ts"
 	],
 	"pi": {
@@ -39,7 +49,8 @@
 		"format": "biome format --write .",
 		"format:check": "biome format .",
 		"check:pack": "node verify-pack.mjs",
-		"calibrate": "bun calibrate.ts"
+		"calibrate": "bun calibrate.ts",
+		"calibrate:dry": "bun dry-calibrate.ts"
 	},
 	"dependencies": {
 		"@paulsteele/pi-shared-ui": "workspace:*",

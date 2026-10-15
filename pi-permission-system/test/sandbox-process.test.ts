@@ -84,7 +84,7 @@ it("finishes an approved installation with a probe timeout after the build compl
   const apply = vi.fn(async () => {});
   ports.plan.mockResolvedValue({ preview: "Install Bun in the image", apply });
   const session = {
-    options: { confirm: async () => true },
+    options: { confirm: async () => true, resolved: {} },
     execute: (options: { command: string[]; signal: AbortSignal; timeoutMs: number }) =>
       runGuestProcess({ ...fixture.options, ...options }),
   } as unknown as SandboxSession;

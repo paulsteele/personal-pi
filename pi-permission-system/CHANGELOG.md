@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.3.0 — 2026-10-15
+
+- Add checksum-pinned jscpd 5.4.1 Linux GNU/musl ARM64/x86-64 artifact recipes, a distinct quality-tool role, and a runtime version check.
+- Include jscpd in newly created default tool profiles without silently extending existing approved profiles or changing required language-server membership.
+
 ## 2.1.0 — 2026-10-13
 
 - Save every accepted Settings edit immediately without Apply/Done buttons; General Settings edits also migrate legacy policy without a separate setup command. Manual settings edits retain separate mount, initialization, and rebuild authorization.

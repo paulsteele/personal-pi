@@ -8,6 +8,7 @@ import {
 	proposalApplied,
 	recordVerdict,
 	recordLspRejection,
+	recordDryRejection,
 	requestReconsideration,
 	resolveCase,
 	revision,
@@ -18,6 +19,8 @@ import { applyExactEdits, digest, type ValidatedVerdict } from "./proposal.js";
 import { POLICY, review, type ReviewResult } from "./reviewer.js";
 import type { LspManager } from "./lsp-manager.js";
 import { diagnosticLabel } from "./lsp-diagnostics.js";
+import type { DryGate, DryCheckResult } from "./dry-check.js";
+import { DRY_POLICY } from "./dry-reviewer.js";
 import { CaseStore, countRejectedReviews, latestReference, STATE_ENTRY } from "./state.js";
 import type {
 	QualityActivityPhase,
@@ -64,6 +67,8 @@ export interface RuntimePorts {
 			refreshWorkspace?(signal: AbortSignal): Promise<void>;
 		};
 	createLspManager?: (changed: () => void) => LspManager;
+	createDryManager?: (changed: () => void) => import("./dry-sandbox-manager.js").SandboxDryManager;
+	dry?: DryGate;
 	filesystem?: {
 		canonical(path: string, signal?: AbortSignal): Promise<string>;
 		snapshot(
@@ -102,6 +107,8 @@ export class QualityController {
 	private checkCount = 0;
 	private rejectionCount = 0;
 	private activeCheck?: QualityCheckData;
+	private stageStartedMonotonic?: number;
+	private stageTimer?: ReturnType<typeof setInterval>;
 	private readonly checks = new Map<string, QualityCheckData>();
 	private readonly reviewToolPaths = new Map<string, string>();
 	private readonly activityCalls = new Map<
@@ -115,7 +122,21 @@ export class QualityController {
 	) {}
 
 	checkDisplay(checkId: string): QualityCheckData | undefined {
-		return this.checks.get(checkId);
+		const check = this.checks.get(checkId);
+		if (!check || check !== this.activeCheck || this.stageStartedMonotonic === undefined) {
+			return check;
+		}
+		return {
+			...check,
+			stages: check.stages.map((stage) =>
+				stage.outcome ? stage : { ...stage, elapsedMs: performance.now() - this.stageStartedMonotonic! },
+			),
+		};
+	}
+	private stopStageTimer(): void {
+		clearInterval(this.stageTimer);
+		this.stageTimer = undefined;
+		this.stageStartedMonotonic = undefined;
 	}
 	private ensureCheckStageStarted(ctx: ExtensionContext, source: QualityCheckSource): void {
 		const previous = this.activeCheck;
@@ -125,9 +146,19 @@ export class QualityController {
 		const check: QualityCheckData = {
 			checkId: previous?.checkId ?? randomUUID(),
 			caseId: this.state!.id,
-			stages: [...(previous?.stages ?? []), { source }],
+			stages: [...(previous?.stages ?? []), { source, startedAtMs: Date.now() }],
 		};
 		this.activeCheck = check;
+		this.stageStartedMonotonic = performance.now();
+		clearInterval(this.stageTimer);
+		this.stageTimer = setInterval(() => {
+			const liveStage = this.checkDisplay(check.checkId)?.stages.at(-1);
+			if (liveStage && !liveStage.outcome) {
+				ctx.ui.setStatus("code-quality", qualityCheckLabel(liveStage));
+			}
+		}, 250);
+		this.stageTimer.unref();
+		this.ports.activity?.updateStage?.(source);
 		this.checks.set(check.checkId, check);
 		if (!previous) {
 			this.checkCount += 1;
@@ -142,11 +173,15 @@ export class QualityController {
 		if (!active || !currentStage || currentStage.outcome) {
 			return;
 		}
-		const completed = { ...currentStage, outcome };
+		const elapsedMs =
+			this.stageStartedMonotonic === undefined ? undefined : performance.now() - this.stageStartedMonotonic;
+		const completed = { ...currentStage, outcome, elapsedMs };
+		this.stopStageTimer();
 		const check = { ...active, stages: [...active.stages.slice(0, -1), completed] };
 		this.activeCheck = check;
 		this.checks.set(check.checkId, check);
 		this.pi.appendEntry(QUALITY_CHECK_UPDATE_ENTRY, check);
+		this.ports.activity?.updateStage?.(undefined);
 		ctx.ui.setStatus("code-quality", qualityCheckLabel(completed));
 	}
 	private restoreChecks(branch: ReturnType<ExtensionContext["sessionManager"]["getBranch"]>): void {
@@ -189,7 +224,7 @@ export class QualityController {
 			: "unconfigured";
 	}
 	get policy(): string {
-		return `${POLICY}\n\n${PROTOCOL}`;
+		return `${POLICY}\n\n${DRY_POLICY}\n\n${PROTOCOL}`;
 	}
 	get pending(): boolean {
 		return Boolean(this.blockedReason || (this.state && this.state.phase !== "closed"));
@@ -203,6 +238,21 @@ export class QualityController {
 			if (this.state.phase !== "applying") {
 				this.state.phase = "captured";
 			}
+			this.persist();
+		}
+	}
+	waiveDry(): void {
+		if (this.state && this.state.phase !== "closed") {
+			this.state.dryWaived = true;
+			this.state.dry = undefined;
+			this.state.dryRequiredPaths = [];
+			this.state.dryUnavailable = undefined;
+			this.state.phase = "captured";
+			this.pi.appendEntry("code-quality:waiver", {
+				caseId: this.state.id,
+				source: "dry",
+				reason: "Operator disabled pending DRY",
+			});
 			this.persist();
 		}
 	}
@@ -356,6 +406,7 @@ export class QualityController {
 		this.status(ctx, this.configError ? "invalid configuration" : undefined);
 	}
 	dispose(): void {
+		this.stopStageTimer();
 		this.generation++;
 		this.lifetime.abort();
 		this.operation = false;
@@ -414,6 +465,9 @@ export class QualityController {
 				},
 				{ triggerTurn: false, deliverAs: "nextTurn" },
 			);
+		}
+		if (this.config.dryEnabled && !state.dryWaived && !state.dryRequiredPaths?.includes(path)) {
+			state.dryRequiredPaths = [...(state.dryRequiredPaths ?? []), path];
 		}
 		const trackedFile = state.files.some((file) => file.path === path);
 		const unresolvedLsp =
@@ -519,6 +573,8 @@ export class QualityController {
 			if (actual !== file.after) {
 				file.after = actual;
 				this.state.verdict = undefined;
+				this.state.dry = undefined;
+				this.state.responsePass = undefined;
 				this.state.approvedTargets = undefined;
 				this.state.phase = "captured";
 				this.state.correctionPending = false;
@@ -734,6 +790,7 @@ export class QualityController {
 		this.captureChanged ||= changed;
 		if (changed && state.reviewed) {
 			state.correctionPending = true;
+			state.responsePass = undefined;
 			state.reconsiderationPending = false;
 			state.objection = undefined;
 		}
@@ -742,6 +799,9 @@ export class QualityController {
 	}
 	private feedback(): string {
 		const state = this.state!;
+		if (state.activeRejectionSource === "dry" && state.dry?.verdict?.findings.length) {
+			return `${this.summary()}\nDRY quality findings (no exact patch required):\n${JSON.stringify(state.dry.verdict)}\nResolve shared ownership with a bounded correction or quality_response(disagree). The shared five-round budget and operator arbitration apply.`;
+		}
 		if (state.lsp?.findings.length)
 			return `${this.summary()}\nLSP quality findings (all severities must be resolved):\n${state.lsp.findings.map(diagnosticLabel).join("\n")}\nResolve this case before unrelated work. Corrections and disagreements use the shared round budget. quality_response(disagree) reruns LSP diagnostics; only the operator can waive them.`;
 		return `${this.summary()}\n${state.verdict ? JSON.stringify({ verdict: state.verdict.verdict, rationale: state.verdict.rationale, findings: state.verdict.findings, edits: state.verdict.edits }) : (state.reason ?? "Review pending")}\nResolve the case before unrelated work. If you disagree, call quality_response with caseId, revision and rationale so the reviewer can reconsider. Corrections and disagreements share the round budget; do not ask the operator to settle the finding before that budget is exhausted. Do not self-waive.`;
@@ -772,6 +832,21 @@ export class QualityController {
 			return { outcome };
 		}
 		if (state?.phase === "applying") return { outcome: "applying" };
+		if (state?.activeRejectionSource === "dry" && state.dry?.verdict?.findings.length) {
+			const rejectionText = state.dry.verdict.findings
+				.map((finding) => {
+					const findingLocation = `${finding.file}:${finding.line}`;
+					const counterpartLocation = `${finding.counterpartFile}:${finding.counterpartRange.join("–")}`;
+					return [
+						`${findingLocation} / ${counterpartLocation}`,
+						finding.duplicatedKnowledge,
+						finding.sharedOwnershipRationale,
+						`Correction: ${finding.correctionDirection}`,
+					].join("\n");
+				})
+				.join("\n\n");
+			return { outcome: "rejected", rejection: state.attempts + 1, rejectionText };
+		}
 		if (state?.verdict?.verdict === "needs_work" || state?.lsp?.findings.length) {
 			const rejectionText = state.lsp?.findings.length
 				? state.lsp.findings.map(diagnosticLabel).join("\n")
@@ -840,6 +915,11 @@ export class QualityController {
 				if (proposalApplied(state)) {
 					const lspOutcome = await this.checkLsp(ctx, false);
 					if (lspOutcome) return lspOutcome;
+					const dryOutcome = await this.checkDry(ctx, false);
+					if (dryOutcome) return dryOutcome;
+					if (this.shouldStopAfterChecks(state)) {
+						return;
+					}
 					state.phase = "closed";
 					state.resolution = "user_approved";
 					this.persist();
@@ -865,12 +945,17 @@ export class QualityController {
 				if (state.attempts >= state.limit) return await this.arbitrate(ctx);
 			}
 			if (state.phase === "correcting" && !this.captureChanged) return;
-			const responseRound = state.correctionPending || state.reconsiderationPending === true;
+			const responseRound =
+				state.responsePass?.revision === revision(state)
+					? state.responsePass.responseRound
+					: state.correctionPending || state.reconsiderationPending === true;
+			state.responsePass = { revision: revision(state), responseRound };
 			this.captureChanged = false;
 			if (
 				state.files.every((file) => file.before === file.after) &&
 				!state.lspRequired &&
-				!state.lsp?.findings.length
+				!state.lsp?.findings.length &&
+				!state.dryRequiredPaths?.length
 			) {
 				if (state.sizeWaivers?.length) {
 					return this.closeSizeWaivedCase(ctx);
@@ -884,6 +969,11 @@ export class QualityController {
 			const lspOutcome = await this.checkLsp(ctx, responseRound);
 			if (lspOutcome) return lspOutcome;
 			const lspRevision = this.ports.lsp?.revision;
+			const dryOutcome = await this.checkDry(ctx, responseRound);
+			if (dryOutcome) return dryOutcome;
+			if (this.shouldStopAfterChecks(state)) {
+				return;
+			}
 			const previousFindings = state.verdict?.findings ?? [];
 			const { chunks, waivers } = planReviewBatch(state.files, this.config, this.cwd);
 			for (const waiver of waivers) {
@@ -1000,6 +1090,13 @@ export class QualityController {
 				? ` ${state.sizeWaivers.length} oversized file(s) automatically waived, not model-approved.`
 				: "";
 			let approvalDescription = "Style only; correctness not certified.";
+			let dryDescription = "";
+			if (state.dryWaived) {
+				dryDescription = " DRY explicitly waived, not model-approved.";
+			} else if (state.dry) {
+				const dryReviewStatus = state.dry.verdict ? "supplied pairs reviewed" : "no retrieved candidates";
+				dryDescription = ` DRY: ${dryReviewStatus}; bounded retrieval, not exhaustive.`;
+			}
 			if (state.lsp)
 				approvalDescription =
 					"Configured LSP diagnostics clean; readability approved. Not a build/correctness certification.";
@@ -1008,7 +1105,7 @@ export class QualityController {
 					"Readability approved; LSP explicitly waived by the operator. Not a clean LSP verdict.";
 			return this.result(
 				verdict.verdict === "approved"
-					? `Quality approved: ${state.files.length} file(s), snapshot ${revision(state)}. ${approvalDescription}${waiverDescription}`
+					? `Quality approved: ${state.files.length} file(s), snapshot ${revision(state)}. ${approvalDescription}${dryDescription}${waiverDescription}`
 					: this.feedback(),
 				verdict.verdict !== "approved",
 			);
@@ -1041,6 +1138,7 @@ export class QualityController {
 			if (generation === this.generation) {
 				this.finishCurrentCheckStage(ctx, "interrupted");
 				this.activeCheck = undefined;
+				this.stopStageTimer();
 				this.ports.activity?.finishCollection();
 				this.publishActivity();
 				this.operation = false;
@@ -1049,6 +1147,146 @@ export class QualityController {
 				}
 			}
 		}
+	}
+	private shouldStopAfterChecks(state: QualityCase): boolean {
+		const isPaused = state.phase === "paused";
+		const dryReviewNeedsWork =
+			state.activeRejectionSource === "dry" && state.dry?.verdict?.verdict === "needs_work";
+		return isPaused || dryReviewNeedsWork;
+	}
+	private async checkDry(ctx: ExtensionContext, responseRound: boolean): Promise<BoundaryResult | undefined> {
+		const state = this.state!;
+		if (!this.config.dryEnabled || state.dryWaived) {
+			return;
+		}
+		const sourceFiles = state.files.filter(
+			(file) => file.before !== file.after && !/\.(md|mdx|rst|txt)$/i.test(file.path),
+		);
+		if (!sourceFiles.length && !state.dryRequiredPaths?.length) {
+			return;
+		}
+		const generation = this.generation;
+		const expected = revision(state);
+		state.phase = "reviewing";
+		this.ensureCheckStageStarted(ctx, "dry");
+		const missingRequiredPaths = (state.dryRequiredPaths ?? []).filter(
+			(path) => !state.files.some((file) => file.path === path),
+		);
+		if (missingRequiredPaths.length) {
+			return this.handleDryFailure(
+				ctx,
+				state,
+				{
+					kind: "unavailable",
+					reason: `DRY requires recapturing size-waived source: ${missingRequiredPaths.join(", ")}`,
+					metrics: { requests: 0, latencyMs: 0, usages: [] },
+				},
+				generation,
+			);
+		}
+		this.persist();
+		const dry = this.ports.dry;
+		const checked = dry
+			? await dry.check({
+					files: sourceFiles,
+					authorized: state.authorized,
+					config: this.config,
+					registry: ctx.modelRegistry,
+					piSessionId: ctx.sessionManager.getSessionId(),
+					revision: expected,
+					notes: state.notes,
+					objection: state.activeRejectionSource === "dry" ? state.objection : undefined,
+					previousFindings: state.dry?.verdict?.findings,
+					signal: this.signal(ctx),
+					onAttempt: (attempt) => {
+						this.reviewAttempt = attempt;
+						this.publishActivity();
+					},
+				})
+			: {
+					kind: "unavailable" as const,
+					reason:
+						"DRY checking requires the managed sandbox index. Restore provisioning or explicitly waive DRY.",
+					metrics: { requests: 0, latencyMs: 0, usages: [] },
+				};
+		if (!this.valid(ctx, generation) || this.signal(ctx).aborted) {
+			return this.result("DRY check interrupted; review remains pending.", false);
+		}
+		this.pi.appendEntry("code-quality:usage", { caseId: state.id, source: "dry", ...checked.metrics });
+		if (!(await this.checkFresh(ctx)) || revision(state) !== expected || checked.kind === "stale") {
+			this.finishCurrentCheckStage(ctx, "stale");
+			state.phase = "captured";
+			state.dry = undefined;
+			this.persist();
+			return this.result("DRY source snapshot changed; fresh checks are required.", true, {
+				outcome: "stale",
+			});
+		}
+		if (checked.kind !== "checked") {
+			return this.handleDryFailure(ctx, state, checked, generation);
+		}
+		state.dry = checked.assessment;
+		state.dryUnavailable = undefined;
+		state.dryRequiredPaths = [];
+		const rejected = checked.assessment.verdict?.verdict === "needs_work";
+		this.finishCurrentCheckStage(ctx, rejected ? "failed" : "passed");
+		if (!rejected) {
+			this.persist();
+			return;
+		}
+		recordDryRejection(state, checked.assessment, responseRound);
+		this.rejectionCount++;
+		this.persist();
+		this.status(ctx);
+		if (state.attempts >= state.limit) {
+			return this.arbitrate(ctx);
+		}
+		return this.result(this.feedback(), true);
+	}
+	private async handleDryFailure(
+		ctx: ExtensionContext,
+		state: QualityCase,
+		checked: Exclude<DryCheckResult, { kind: "checked" }>,
+		generation: number,
+	): Promise<BoundaryResult | undefined> {
+		state.dryUnavailable = checked.reason;
+		this.finishCurrentCheckStage(ctx, checked.kind === "cancelled" ? "interrupted" : "failed");
+		this.persist();
+		const choice = await this.awaitDecision(ctx, "dry_failure", () =>
+			this.ports.ui.failure(ctx, `DRY unavailable: ${checked.reason}`, this.signal(ctx)),
+		);
+		if (!this.valid(ctx, generation) || this.signal(ctx).aborted) {
+			return;
+		}
+		if (!(await this.checkFresh(ctx))) {
+			return this.result("Source changed during DRY recovery; retry against the current snapshot.", true, {
+				outcome: "stale",
+			});
+		}
+		if (choice === "waive") {
+			state.dryWaived = true;
+			state.dry = undefined;
+			state.dryUnavailable = undefined;
+			state.dryRequiredPaths = [];
+			state.phase = "reviewing";
+			this.pi.appendEntry("code-quality:waiver", { caseId: state.id, source: "dry", reason: checked.reason });
+			this.persist();
+			return;
+		}
+		if (choice === "model") {
+			await this.selectModel(ctx);
+		}
+		if (choice === "retry" || choice === "model") {
+			state.phase = "captured";
+			this.persist();
+			return this.result("DRY retry requested; other applicable stages remain pending.", true, {
+				outcome: "retrying",
+			});
+		}
+		this.pause(ctx, checked.reason);
+		return this.result("DRY recovery paused; use Settings or /quality retry.", false, {
+			outcome: "awaiting_user",
+		});
 	}
 	private async checkLsp(ctx: ExtensionContext, responseRound: boolean): Promise<BoundaryResult | undefined> {
 		const lsp = this.ports.lsp;
@@ -1065,6 +1303,7 @@ export class QualityController {
 		}
 		const generation = this.generation;
 		const expected = revision(state);
+		this.ensureCheckStageStarted(ctx, "lsp");
 		let checked = state.lspCapturePaths?.length
 			? {
 					kind: "unavailable" as const,
@@ -1084,7 +1323,17 @@ export class QualityController {
 				kind: "unavailable",
 				reason: "LSP coverage changed for this pending case; restore configuration or explicitly waive it.",
 			};
-		if (!checked) return;
+		if (!checked) {
+			this.stopStageTimer();
+			const active = this.activeCheck;
+			if (active) {
+				const check = { ...active, stages: active.stages.slice(0, -1) };
+				this.activeCheck = check;
+				this.checks.set(check.checkId, check);
+				this.pi.appendEntry(QUALITY_CHECK_UPDATE_ENTRY, check);
+			}
+			return;
+		}
 		this.ensureCheckStageStarted(ctx, "lsp");
 		state.lspRequired = true;
 		this.persist();
@@ -1173,7 +1422,7 @@ export class QualityController {
 		this.status(ctx);
 		const expected = revision(state);
 		const generation = this.generation;
-		if (!state.verdict?.edits.length && !state.lsp?.findings.length) {
+		if (!state.verdict?.edits.length && !state.lsp?.findings.length && !state.dry?.verdict?.findings.length) {
 			this.pause(ctx, "No current findings to review; use /quality retry");
 			return;
 		}
@@ -1373,6 +1622,9 @@ export class QualityController {
 		const { parseConfig } = await import("./config.js");
 		assertOwner();
 		const next = parseConfig(value);
+		if (!next.dryEnabled && this.config.dryEnabled && this.pending && !state?.dryWaived) {
+			throw new Error("Resolve or explicitly waive pending DRY before disabling it in Settings");
+		}
 		if (!next.enabled && this.pending) {
 			throw new Error("Resolve the pending quality case before disabling the gate in Settings");
 		}
@@ -1452,7 +1704,11 @@ export class QualityController {
 		if (this.state.approvedTargets) {
 			this.state.phase = "applying";
 		} else {
-			const hasReviewFindings = Boolean(this.state.verdict?.edits.length || this.state.lsp?.findings.length);
+			const hasReviewFindings = Boolean(
+				this.state.verdict?.edits.length ||
+					this.state.lsp?.findings.length ||
+					this.state.dry?.verdict?.findings.length,
+			);
 			const isAwaitingHumanReview = action === "resolve" && hasReviewFindings;
 			this.state.phase = isAwaitingHumanReview ? "human" : "captured";
 		}

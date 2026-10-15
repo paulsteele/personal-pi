@@ -361,7 +361,7 @@ describe("extension registration", () => {
 		const renderedText = () => renderOverlayText(h).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 		await start(h);
 		expect(renderedText()).toContain("󰅴 quality · test/reviewer");
-		expect(renderedText()).toContain("󰚩 0 · 󰀄 0 · 󰅴 7 2✕");
+		expect(renderedText()).toMatch(/─ 󰅴 7 2✕ ─/);
 		h.pi.events.emit("code-quality:status", {
 			version: 1,
 			sessionId: "other",
@@ -383,7 +383,7 @@ describe("extension registration", () => {
 		expect(renderOverlayText(h)).toContain("󰅴 quality · test/reviewer");
 		expect(renderOverlayText(h)).not.toContain("test/wrong");
 		expect(renderOverlayText(h)).not.toContain("test/stale");
-		expect(renderedText()).toContain("󰚩 0 · 󰀄 0 · 󰅴 7 2✕");
+		expect(renderedText()).toMatch(/─ 󰅴 7 2✕ ─/);
 		h.pi.events.emit("code-quality:status", {
 			version: 1,
 			sessionId: "session-a",
@@ -393,13 +393,13 @@ describe("extension registration", () => {
 			checkCount: 8,
 			rejectionCount: 3,
 		});
-		expect(renderedText()).toContain("󰚩 0 · 󰀄 0 · 󰅴 8 3✕");
+		expect(renderedText()).toMatch(/─ 󰅴 8 3✕ ─/);
 		await h.handlers.get("agent_start")?.({}, h.ctx);
-		expect(renderedText()).toContain("󰚩 0 · 󰀄 0 · 󰅴 8 3✕");
+		expect(renderedText()).toMatch(/─ 󰅴 8 3✕ ─/);
 		discoveredCount = 2;
 		discoveredRejections = 1;
 		await h.handlers.get("session_tree")?.({}, h.ctx);
-		expect(renderedText()).toContain("󰚩 0 · 󰀄 0 · 󰅴 2 1✕");
+		expect(renderedText()).toMatch(/─ 󰅴 2 1✕ ─/);
 		await h.handlers.get("session_shutdown")?.({}, h.ctx);
 		expect(h.getEventBusHandlerCount("code-quality:status")).toBe(0);
 	});

@@ -47,6 +47,9 @@ export interface QualitySandbox {
 	sessionId: string;
 	revision(): string;
 	guestPath?(hostPath: string): Promise<string | undefined>;
+	hostPath?(guestPath: string): Promise<string | undefined>;
+	authorizeHostSource?(hostPath: string, signal?: AbortSignal): Promise<void>;
+	authorizeHostSources?(hostPaths: readonly string[], signal?: AbortSignal): Promise<string[]>;
 	planImageTools?(
 		tools: QualityImageToolInstallation[],
 		signal: AbortSignal,

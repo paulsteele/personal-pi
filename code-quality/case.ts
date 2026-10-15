@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { SnapshotFile } from "./capture.js";
 import { digest, type ValidatedVerdict } from "./proposal.js";
 import type { LspFinding } from "./lsp-diagnostics.js";
+import type { DryAssessment, QualityStageSource } from "./dry-types.js";
 
 export type Phase = "captured" | "reviewing" | "correcting" | "human" | "paused" | "applying" | "closed";
 export interface LspAssessment {
@@ -33,6 +34,12 @@ export interface QualityCase {
 	lspRequired?: boolean;
 	lspCapturePaths?: string[];
 	lspUnavailable?: string;
+	dry?: DryAssessment;
+	dryRequiredPaths?: string[];
+	dryWaived?: boolean;
+	dryUnavailable?: string;
+	activeRejectionSource?: QualityStageSource;
+	responsePass?: { revision: string; responseRound: boolean };
 	sizeWaivers?: Array<{ path: string; reason: string }>;
 	objection?: string;
 	reason?: string;
@@ -69,6 +76,8 @@ export function recordVerdict(state: QualityCase, verdict: ValidatedVerdict, res
 	state.reconsiderationPending = false;
 	state.reviewed = true;
 	state.verdict = verdict;
+	state.activeRejectionSource = verdict.verdict === "needs_work" ? "readability" : undefined;
+	state.responsePass = undefined;
 	state.reason = undefined;
 	if (verdict.verdict === "approved") {
 		state.phase = "closed";
@@ -85,7 +94,29 @@ export function recordLspRejection(
 	state.correctionPending = false;
 	state.reconsiderationPending = false;
 	state.lsp = assessment;
+	state.activeRejectionSource = "lsp";
+	state.responsePass = undefined;
 	state.verdict = undefined;
+	state.reason = undefined;
+	state.phase = state.attempts >= state.limit ? "human" : "correcting";
+}
+
+export function recordDryRejection(
+	state: QualityCase,
+	assessment: DryAssessment,
+	responseRound: boolean,
+): void {
+	if (responseRound && state.reviewed) {
+		state.attempts++;
+	}
+	state.reviewed = true;
+	state.correctionPending = false;
+	state.reconsiderationPending = false;
+	state.dry = assessment;
+	state.activeRejectionSource = "dry";
+	state.responsePass = undefined;
+	state.verdict = undefined;
+	state.approvedTargets = undefined;
 	state.reason = undefined;
 	state.phase = state.attempts >= state.limit ? "human" : "correcting";
 }

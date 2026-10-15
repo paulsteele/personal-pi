@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.0 — 2026-10-15
+
+- Add a Quality tab and `/sidebar quality` with bounded jscpd, repository scan, coverage, latest-check, and recovery information.
+- Show jscpd tool and scan readiness in the pinned quality header; combine tool and scan details in one JSCPD section without a readiness disclaimer.
+- Preserve independent tab scrolling and wrapped selectors with six tabs.
+
 ## 2.0.0 — 2026-10-12
 
 - Consolidate settings into one root per plugin, with Sandbox, Code Quality, and Plannotator child menus. Preserve section drafts, Apply behavior, and direct section commands.

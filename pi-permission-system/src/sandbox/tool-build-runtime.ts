@@ -237,6 +237,17 @@ done
     );
   }
   for (const tool of options.inventory.tools) {
+    if (tool.id === "jscpd") {
+      const versionOutput = await options.run(
+        [...execContextArguments, tool.executable, "--version"],
+        options.signal,
+      );
+      const escapedVersion = tool.version.replaceAll(".", "\\.");
+      const versionPattern = new RegExp(`(?:^|\\s)${escapedVersion}(?:\\s|$)`);
+      if (!versionPattern.test(versionOutput.trim())) {
+        throw new Error(`Provisioned jscpd version mismatch: expected ${tool.version}`);
+      }
+    }
     const isRuntimeTool = tool.id.endsWith("-runtime");
     if (isRuntimeTool) {
       const versionArgument = tool.id === "go-runtime" ? "version" : "--version";

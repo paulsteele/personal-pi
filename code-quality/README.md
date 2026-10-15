@@ -1,6 +1,6 @@
 # Code Quality
 
-An interactive post-edit quality gate combining automatic LSP diagnostics with isolated human-readability review. The main agent and isolated reviewer receive the same readability preferences as enforced requirements. The reviewer assesses exact changes and returns `approved` or `needs_work`. A rejection must identify the preference violated by the changed content and propose a bounded edit addressing that readability problem. A readability violation does not need to cause a functional defect. The reviewer cannot browse the repository, run commands, or change files.
+An interactive post-edit quality gate combining automatic LSP diagnostics, indexed DRY judgment, and isolated human-readability review. The main agent and isolated reviewer receive the same readability preferences as enforced requirements. The readability reviewer assesses exact changes and returns `approved` or `needs_work`. Its rejection must identify the preference violated by the changed content and propose a bounded edit addressing that readability problem; the separate DRY contract uses citations and a correction direction instead. A readability violation does not need to cause a functional defect. The reviewer cannot browse the repository, run commands, or change files.
 
 ## Configuration
 
@@ -15,7 +15,11 @@ Use `/quality-model` to select an available provider/model, or `/quality-model p
   "maxFileBytes": 262144,
   "maxBatchBytes": 1048576,
   "maxInputChars": 128000,
-  "maxOutputTokens": 16000
+  "maxOutputTokens": 16000,
+  "dryEnabled": true,
+  "dryScanTimeoutMs": 60000,
+  "dryMaxInputChars": 24000,
+  "dryMaxOutputTokens": 1024
 }
 ```
 
@@ -61,7 +65,7 @@ Language servers are trusted local processes, **not a sandbox**. They can read d
 
 ### Diagnostic gate
 
-Successful `edit`/`write` results include a compact diagnostic preview; a diagnostic rejection does not mean the file write failed. At the batch boundary the gate reconciles the final snapshot, runs LSP first, and only invokes the readability model when diagnostics are clear.
+Successful `edit`/`write` results include a compact diagnostic preview; a diagnostic rejection does not mean the file write failed. At the batch boundary the gate reconciles the final snapshot, runs LSP first, then DRY, and only invokes readability after earlier applicable stages are clear or explicitly waived.
 
 **Errors, warnings, information, hints, and unspecified-severity diagnostics all block**, including findings that predate the edit. Their original severity is preserved. Project/server rules and suppressions still determine which diagnostics exist. Findings outside edited files are not added to the case. Unsupported content, unconfigured routes, missing results, and failures are never labeled clean.
 
@@ -70,6 +74,41 @@ LSP findings use the same initial rejection plus five response rounds, disagreem
 Server failures pause for retry, reconfiguration, or waiver without consuming correction rounds. Defaults are 60 seconds for startup and 10 seconds per file diagnostic operation, configurable in the draft. A timeout or empty clearing notification is not a pass. File hashes, observed workspace changes, provider registration, and server generations invalidate stale results; these checks are not an atomic filesystem lock.
 
 Scope is macOS/Linux/WSL TUI sessions. The current real-server validation was on macOS arm64; Linux/WSL and larger real-world solutions still need field validation. See [lsp-compatibility.md](lsp-compatibility.md) for pinned versions, protocol quirks, reproducible probes, and measured tiny-fixture latencies. Clean LSP diagnostics are not a full build, test, or correctness certification.
+
+## Indexed DRY checking
+
+DRY is enabled by default in trusted interactive sessions and uses the **same configured quality provider/model** as readability. It searches the guest-visible owned repository using jscpd 5.4.1 exact/renamed/gap/AST clone results plus identifier, call-shaped API, and distinctive-literal retrieval. The judge receives only selected original pairs and bounded neighboring code, not the repository or main conversation. Similarity nominates evidence; it is never itself a blocking verdict. Documentation examples, explicit test inputs/assertions, independent policies, and externally prescribed fields are protected by [dry-policy.md](dry-policy.md).
+
+DRY findings cite changed lines and counterparts, identify shared knowledge/ownership, and give a correction direction; they **do not require an exact diff**. They share the existing initial rejection plus five correction/disagreement rounds and arbitration with other stages. Finding-only arbitration offers Accept current or another five cycles. Readability retains its exact-patch contract. A case-only DRY waiver does not waive LSP/readability, and a readability size waiver does not dismiss a required DRY check.
+
+jscpd is a pinned, checksum-verified `quality-tool` mounted read-only at `/opt/pi-tools/jscpd/5.4.1/bin/jscpd`; the packaged guest worker uses the provisioned private Node runtime. New default Sandbox Tools profiles include it. Existing profiles are never silently rewritten: add the verified jscpd catalog entry in **Settings → Sandbox → Global Sandbox Tools** or `/sandbox setup global tools`, then reload and approve the normal rebuild. DRY never installs software, runs a host binary, or downloads embeddings. The guest worker owns a private jscpd stdio MCP process for baseline/snippet queries; those tools are not registered with Pi or exposed to the main agent. A guest-local socket carries bounded worker requests, with no host port or private-storage mount. jscpd's AI reporter is compact location formatting, not an AI judgment; the adapter consumes validated JSON instead.
+
+Project profiles live outside the checkout:
+
+```text
+getAgentDir()/extensions/code-quality/{repos|projects}/<project-id>/dry-profile.json
+```
+
+Worktrees share configuration, not live analysis state. **Each assistant turn starts one background baseline capture and jscpd scan.** Edit/write batches query current edited code against that turn's token/AST and lexical baseline without rescanning. Checks wait for the in-flight baseline if necessary. New files can be queried even when absent from the baseline. Startup only validates tooling; ordinary writes do not start scans or invalidate the turn baseline. Manual refresh explicitly replaces it; a restored pending check without a turn-start event creates a baseline on first use.
+
+Every selected pair still receives a fresh isolated judgment; judgments and prior case approvals are not reused. Only selected counterpart files are reread before requests and after judgment. Changed, deleted, or undisclosable counterparts are dropped rather than triggering a repository rescan. Edited-source freshness and sandbox ownership checks remain, but there are no whole-corpus validation walks during DRY or readability review.
+
+Source staging and bounded metadata transfer use a session-private guest directory, removed on shutdown/retirement and rebuilt for each turn baseline. Selected evidence remains in the existing private case store for feedback and audit; it is not an approval cache. Old private DRY cache directories are no longer read or written and are not automatically deleted. Existing profiles can retain their retired `maxCacheBytes` field; loading discards it, and saving removes it.
+
+The baseline deliberately lags same-turn edits: newly introduced counterpart code may be missed until the next turn's baseline and a subsequent applicable check. There is no final full-repository scan. Overlapping matches against the edited file's old region are excluded; distinct same-file regions remain candidates, though a modified counterpart file can be discarded by targeted validation. Repository capture is not an atomic snapshot, and source changes during background capture do not force another scan.
+
+The adapter's explicit source-extension map supports many languages and can be extended through the project profile; jscpd's format catalog count is not a claim that every format is indexed. Token/extension coverage is broader than AST support; automatic AST test exclusions and source suppression markers remain visible coverage limits. Short rules can be nominated lexically. Unsupported documents/generated files are labeled, applicable omitted source and truncated discovery pause for recovery, and no-candidate outcomes are not model-approved or exhaustive DRY certification. Larger checks wait visibly; five seconds is not an approval deadline.
+
+Use **Settings → Code Quality → DRY Checking** for enabled state, scan/input/output budgets, project thresholds/exclusions/format mappings, and Show status or Run fresh scan actions. Keyboard equivalents:
+
+```text
+/quality dry status
+/quality dry refresh
+/quality dry on|off
+/sidebar quality
+```
+
+Disabling a pending DRY requirement requires an explicit operator decision. Master quality-off suspends analysis and every gate stage. Tool/scan readiness in the pinned Sidebar header and Quality tab means infrastructure health, never code approval. The tab shows scope, scan state, clone modes/counts, coverage, latest check, and recovery status; presentation events carry no source or finding rationale. `/quality dry refresh` replaces the baseline, not a model review or waiver; subsequent checks query that baseline until the next turn.
 
 ## Review and arbitration
 
@@ -80,7 +119,7 @@ The agent uses `quality_response` to submit a disagreement. A disagreement retur
 At the limit, the terminal panel offers:
 
 - **Accept original:** approve the current agent-written snapshot, not an earlier version.
-- **Accept proposed:** when a validated readability patch exists, approve it for application through ordinary permission-checked tools. Closure requires exact resulting hashes and resolution of any configured LSP diagnostics.
+- **Accept proposed:** when a validated readability patch exists, approve it for application through ordinary permission-checked tools. Closure requires exact resulting hashes and resolution of nonwaived LSP diagnostics and DRY requirements.
 - **Allow another five cycles:** continue with five additional response-and-review rounds, preserving the counter and case notes.
 
 Use ↑/↓ to select a choice, then Enter to resolve it immediately without notes. Press `n` instead to add optional multiline, case-only notes; Enter saves the notes and resolves that choice without another confirmation. Shift+Enter inserts a newline. Escape from either view leaves the case unresolved. The panel shows source-labeled findings, current code, and a scrollable current/proposed diff when a patch exists. Accepting current code is final for that snapshot and records any outstanding or unrun checks; it is not a model or clean-LSP verdict.
@@ -91,7 +130,7 @@ Provider failures have a separate budget: the first four failures wait 2/4/6/8 s
 
 ## Compact review log
 
-Each review pass displays `quality check: lsp` when matching LSP checks run, then `quality check: readability` when model review starts. Each stage's line gains `✓` on success or `✕` on rejection or failure; outdated and interrupted checks are labeled explicitly. Completed stage results survive reloads and follow the active session branch. Retries and file groups within one pass do not add duplicate checking lines or increase the pass count.
+Each review pass displays `quality check: lsp`, `quality check: dry`, and `quality check: readability` as applicable. Unfinished stages carry live elapsed timers (for example `quality check: dry · 2.4s`), and completed stages retain frozen durations. Timers include startup/current-scan waits, batching, retries, and validation, stop before operator recovery, and update without Sidebar. Reload/tree changes restore unfinished entries as interrupted rather than running indefinitely. Each stage's line gains `✓` on successful checking or `✕` on rejection or failure; no-candidate DRY checks remain distinguished in receipts rather than labeled model approvals; outdated and interrupted checks are labeled explicitly. Completed stage results survive reloads and follow the active session branch. Retries and file groups within one pass do not add duplicate checking lines or increase the pass count.
 
 The outcome remains `approved`, `handling rejection N`, or an explicit `waived` rather than claiming approval for a waiver. Rejection numbering starts at 1 for the initial rejection and advances with unresolved response-and-review rounds. Rejections show the reviewer's rationale and file/line findings (or LSP diagnostics) without expansion. Expand feedback to inspect full case IDs, snapshot details, protocol instructions, and proposed edits; the executing agent still receives the full feedback. Checking lines and their completion updates are presentation-only and are not added to model context.
 
@@ -123,7 +162,7 @@ A style approval is not a correctness/security certification. Unapproved code ha
 
 ## Privacy and persistence
 
-The configured provider receives policy/examples, exact changed hunks plus bounded surrounding code, and any case notes. Hunks from the same file are grouped into one request when they fit the input budget, retaining every changed hunk and its original line numbers. Larger files split only at hunk boundaries; each group declares its included and total changed-hunk counts. These remain excerpts, not a claim that the entire file is visible. The reviewer must use all supplied hunks together and not infer missing code from omitted context.
+For readability, the configured provider receives policy/examples, exact changed hunks plus bounded surrounding code, and any case notes. DRY sends its separate policy and selected changed/counterpart pairs; both follow the same case/provider sensitive-content authorization. Hunks from the same file are grouped into one request when they fit the input budget, retaining every changed hunk and its original line numbers. Larger files split only at hunk boundaries; each group declares its included and total changed-hunk counts. These remain excerpts, not a claim that the entire file is visible. The reviewer must use all supplied hunks together and not infer missing code from omitted context.
 
 The reviewer does not receive the requested task or main-agent conversation. A submitted disagreement is a separate, bounded argument (at most 2,000 characters), not hidden reasoning, policy, or operator authority. Each review call uses fresh isolated context, current code, prior findings, and the latest submitted disagreement when applicable. User notes remain distinct and authoritative for the case. Code changes or a stale snapshot clear the old disagreement so it is not applied to a different revision. The reviewer still assesses readability independently of the requested behavior change. Best-effort secret detection cannot guarantee detection of arbitrary sensitive data. Sensitive paths and detected secret shapes require authorization; authorization is scoped to the case/provider.
 
@@ -138,4 +177,4 @@ When the reviewer provider is exactly `litellm`, all quality calls for one Pi se
 Normal tests use fake LSP processes and do not install servers. `bun run --cwd code-quality test:lsp-tui` runs an opt-in two-instance pseudoterminal smoke with the loaded Permission System, Code Quality, and Sidebar entries (requires Python 3 and `pi`). It checks Sidebar tabs, the unavailable-sandbox recovery state, status, reload, and shutdown with Quality disabled and no container definition. It does not certify live language-server diagnostics or shared host servers. Protocol regressions use local synthetic servers and do not require nested Podman or private host-installed language servers. Package tests extract the tarball, load the extension through Pi, and launch the packed broker with existing declared dependencies. See the repository's compatibility notes for the fixture layout and remaining platform limits.
 
 
-Tested with Pi 1.0.0; host-provided packages use `*` peer ranges. The `quality_response` tool is model-only: it remains available to the main model but cannot be called from codemode or other tools. Load after Permission System. Run `bun run --cwd code-quality test` and `typecheck`; root `bun run check` includes packaging and integration tests. Live calibration is opt-in through `bun run --cwd code-quality calibrate` and requires an explicitly configured model; it incurs provider costs. Its scope-regression fixtures include unused imports, formatter-owned layout, readable code with a functional bug, partial assertions, changed UI expectations, and generation-guarded cleanup. Deterministic tests verify grouping, complete hunk coverage, proposal boundaries, and the isolated prompt; they do not measure a model's false-positive rate. Run `/reload` after policy/prompt changes so active sessions use the new instructions.
+Tested with Pi 1.0.0; host-provided packages use `*` peer ranges. The `quality_response` tool is model-only: it remains available to the main model but cannot be called from codemode or other tools. Load after Permission System. Run `bun run --cwd code-quality test` and `typecheck`; root `bun run check` includes packaging and integration tests. Synthetic DRY judgment calibration is opt-in through `bun run --cwd code-quality calibrate:dry --confirm-provider-calls`; it sends only versioned synthetic fixtures, does not benchmark latency, and has not been run automatically. No comparison test installs a separate copy of jscpd. Live readability calibration is opt-in through `bun run --cwd code-quality calibrate` and requires an explicitly configured model; it incurs provider costs. Its scope-regression fixtures include unused imports, formatter-owned layout, readable code with a functional bug, partial assertions, changed UI expectations, and generation-guarded cleanup. Deterministic tests verify grouping, complete hunk coverage, proposal boundaries, and the isolated prompt; they do not measure a model's false-positive rate. Run `/reload` after policy/prompt changes so active sessions use the new instructions.

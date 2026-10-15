@@ -4,6 +4,7 @@ import { planImageTools } from "./image-tools.ts";
 import { planProfileToolInstallation } from "./profile-tool-installation.ts";
 import type { SandboxSession } from "./session.ts";
 import { silentStartupProgress, type SandboxStartupProgress } from "./startup-ui.ts";
+import { managedCatalogTool } from "./tool-catalog.ts";
 import { globalToolProfilePath, projectToolProfilePath } from "./tool-profile.ts";
 
 const installArgument = Type.String({ minLength: 1, maxLength: 4096 });
@@ -29,13 +30,18 @@ export async function requestSandboxTool(
   profileScope?: "global" | "project",
 ) {
   signal.throwIfAborted();
-  report(`Preparing ${request.tool} (${request.version}) image installation…`);
+  const managedTool = session.options.resolved.layers
+    ? managedCatalogTool(request.tool, request.version)
+    : undefined;
+  const version = managedTool?.version ?? request.version;
+  const executable = managedTool?.executable ?? request.executable;
+  report(`Preparing ${request.tool} (${version}) image installation…`);
   const installations = [
     {
       id: request.tool,
-      version: request.version,
+      version,
       command: request.command,
-      executable: request.executable,
+      executable,
       prerequisites: request.prerequisites,
       environment: request.environment ?? {},
     },
@@ -45,10 +51,12 @@ export async function requestSandboxTool(
     : await planImageTools(session, installations, signal);
   if (proposal) {
     const preview = [
-      `Install ${request.tool} (${request.version}) into the devcontainer image?`,
+      `Install ${request.tool} (${version}) into the devcontainer image?`,
       `Reason: ${request.reason}`,
-      `Expected executable: ${request.executable}`,
-      "Installation commands run as root during the image build, not on the host. Container processes and language servers will restart.",
+      `Expected executable: ${executable}`,
+      managedTool
+        ? "Uses the verified, checksum-pinned catalog artifact; the requested installation command is ignored. Container processes and language servers will restart."
+        : "Installation commands run as root during the image build, not on the host. Container processes and language servers will restart.",
       proposal.preview,
     ].join("\n\n");
     if (!(await session.options.confirm(preview, signal, toolCallId))) {
@@ -63,27 +71,27 @@ export async function requestSandboxTool(
       report("Devcontainer rebuild complete.");
     }
     const probeTimeoutMs = 10_000;
-    const probeStage = `Checking runtime executable ${request.executable} (10-second timeout)…`;
+    const probeStage = `Checking runtime executable ${executable} (10-second timeout)…`;
     progress.stage(probeStage);
     report(probeStage);
     let probe: Awaited<ReturnType<SandboxSession["execute"]>>;
     try {
       probe = await session.execute({
-        command: ["sh", "-c", 'command -v "$1"', "sh", request.executable],
+        command: ["sh", "-c", 'command -v "$1"', "sh", executable],
         signal,
         timeoutMs: probeTimeoutMs,
       });
     } catch (error) {
       signal.throwIfAborted();
       throw new Error(
-        `Tool recipe is saved, but the runtime executable probe for ${request.executable} failed: ${String(error)}. The rebuilt container is retained; verify Podman responsiveness before retrying.`,
+        `Tool recipe is saved, but the runtime executable probe for ${executable} failed: ${String(error)}. The rebuilt container is retained; verify Podman responsiveness before retrying.`,
         { cause: error },
       );
     }
     const executablePath = probe.output.toString().trim();
     if (probe.code !== 0 || !executablePath) {
       throw new Error(
-        `Tool recipe is saved, but ${request.executable} is not available to the devcontainer runtime user. Request a corrected installation or PATH configuration before retrying.`,
+        `Tool recipe is saved, but ${executable} is not available to the devcontainer runtime user. Request a corrected installation or PATH configuration before retrying.`,
       );
     }
     report(`Runtime executable verified: ${executablePath}`);
@@ -95,7 +103,7 @@ export async function requestSandboxTool(
   return {
     status: proposal ? "installed" : "already_in_definition",
     tool: request.tool,
-    requestedVersion: request.version,
+    requestedVersion: version,
     executable: executablePath,
     definitionPath: session.options.resolved.path,
     definitionTier: session.options.resolved.tier,

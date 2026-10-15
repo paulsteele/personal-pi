@@ -23,14 +23,16 @@ The actual agent directory follows `getAgentDir()`/`PI_CODING_AGENT_DIR`. When n
 
 Three private configuration files extend the selected base without rewriting it:
 
-- `global/tools.json`: all five language servers and pinned private Node/.NET/Go/Rust support, plus optional personal tools.
+- `global/tools.json`: all five language servers, pinned private Node/.NET/Go/Rust support, and optional personal tools. New default profiles also include jscpd 5.4.1. Existing profiles are not silently extended. To add jscpd to an existing profile, add its verified catalog entry through Sandbox Tools, then adopt it with the normal approved rebuild.
 - `{repos|projects}/<id>/devcontainer/tools.json`: project tool additions and catalog-version overrides.
 - `{repos|projects}/<id>/devcontainer/project-environment.json`: project SDK/native-library installation recipes, companion files, explicit environment overrides, and ordered container lifecycle additions.
 
 Provisioning sequence:
 1. Resolve catalog versions from `tools.json` and build independently cached server/runtime artifact images.
 2. Add sandbox infrastructure and compatible native libraries to the selected project base, then apply ordinary private project installations. These image builds do not receive LSP artifacts or their private runtimes.
-3. Mount each catalog artifact's versioned directory read-only from its artifact image to `/opt/pi-tools/<id>/<version>` in the project container. Language servers run in the project container, where they can access project source, dependencies, and application toolchains.
+3. Mount each catalog artifact's versioned directory read-only from its artifact image to `/opt/pi-tools/<id>/<version>` in the project container. Language servers and managed quality tools run there, with access to mapped project source, dependencies, and application toolchains.
+
+   jscpd is a managed quality tool, not an additional required language server. Its Linux ARM64/x86-64 GNU/musl binaries are checksum-pinned, and its runtime version is probed.
 
 A tool-only artifact change reuses the project image when native libraries and project recipes are unchanged. It still requires an approved session recreation and restarts language servers. Private LSP runtimes do not replace application executables or the application's global PATH. Server caches belong in writable home/temp/cache locations, not in the artifact mounts.
 

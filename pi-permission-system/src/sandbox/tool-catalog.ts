@@ -1,13 +1,21 @@
 export interface CatalogTool {
   id: string;
   version: string;
-  role: "runtime" | "language-server";
+  role: "runtime" | "language-server" | "quality-tool";
   dependencies: readonly string[];
   executable: string;
   distributionPackages: readonly string[];
 }
 
 export const STANDARD_TOOL_CATALOG: readonly CatalogTool[] = [
+  {
+    id: "jscpd",
+    version: "5.4.1",
+    role: "quality-tool",
+    dependencies: [],
+    executable: "/opt/pi-tools/jscpd/5.4.1/bin/jscpd",
+    distributionPackages: [],
+  },
   {
     id: "node-runtime",
     version: "24.21.0",
@@ -96,6 +104,24 @@ export function catalogTool(
     throw new Error(`No verified tooling recipe for ${id}@${version}`);
   }
   return tool;
+}
+
+export function managedCatalogTool(
+  id: string,
+  requestedVersion: string,
+  catalog: readonly CatalogTool[] = STANDARD_TOOL_CATALOG,
+): CatalogTool | undefined {
+  const managedVersions = catalog.filter((tool) => tool.id === id).map((tool) => tool.version);
+  if (!managedVersions.length) {
+    return undefined;
+  }
+  const version = requestedVersion.replace(/^v/, "");
+  if (!managedVersions.includes(version)) {
+    throw new Error(
+      `${id} is a managed tool; request a verified catalog version: ${managedVersions.join(", ")}`,
+    );
+  }
+  return catalogTool(id, version, catalog);
 }
 
 export function catalogToolPrefix(tool: Pick<CatalogTool, "id" | "version">): string {

@@ -1,4 +1,5 @@
 import type { LspServerStatus } from "./lsp-diagnostics.js";
+import type { DryStatus, QualityStageSource } from "./dry-types.js";
 
 export const QUALITY_ACTIVITY_CHANNEL = "code-quality:activity";
 export const QUALITY_STATUS_CHANNEL = "code-quality:status";
@@ -12,7 +13,8 @@ export type QualityDecisionKind =
 	| "model"
 	| "waiver"
 	| "lsp_setup"
-	| "lsp_failure";
+	| "lsp_failure"
+	| "dry_failure";
 export interface QualityAttentionEvent {
 	version: 1;
 	sessionId: string;
@@ -59,6 +61,8 @@ export interface QualityActivityPublisher {
 	updateHeader(status: QualityActivityStatus, modelId: string, counts: QualityReviewCounts): void;
 	finishTool(toolCallId: string, phase: QualityActivityPhase): void;
 	updateLsp(servers: LspServerStatus[]): void;
+	updateDry?(status: DryStatus): void;
+	updateStage?(source: QualityStageSource | undefined): void;
 	requestDecision(kind: QualityDecisionKind): () => void;
 	dispose(): void;
 }
@@ -75,6 +79,8 @@ export interface QualityHeaderEvent extends QualityActivityStatus, QualityReview
 	sessionId: string;
 	revision: number;
 	modelId: string;
+	activeStage?: QualityStageSource;
+	dry?: DryStatus;
 	lsp?: Array<Pick<LspServerStatus, "id" | "name" | "root" | "phase" | "clients" | "queued">>;
 }
 
@@ -90,6 +96,8 @@ export function createQualityActivityPublisher(events: ActivityTransport): Quali
 	let disposed = false;
 	let header: QualityHeaderEvent | undefined;
 	let lsp: QualityHeaderEvent["lsp"];
+	let dry: DryStatus | undefined;
+	let activeStage: QualityStageSource | undefined;
 	const latest = new Map<string, QualityActivityEvent>();
 	const batch = new Set<string>();
 	let decisionSequence = 0;
@@ -153,6 +161,8 @@ export function createQualityActivityPublisher(events: ActivityTransport): Quali
 			sessionId = nextSessionId;
 			header = undefined;
 			lsp = undefined;
+			dry = undefined;
+			activeStage = undefined;
 			latest.clear();
 			batch.clear();
 			collecting = false;
@@ -198,6 +208,8 @@ export function createQualityActivityPublisher(events: ActivityTransport): Quali
 				sessionId,
 				modelId: publishedModelId,
 				...(lsp ? { lsp } : {}),
+				...(dry ? { dry } : {}),
+				...(activeStage ? { activeStage } : {}),
 				...counts,
 				revision: ++revision,
 			};
@@ -222,6 +234,27 @@ export function createQualityActivityPublisher(events: ActivityTransport): Quali
 			try {
 				events.emit(QUALITY_STATUS_CHANNEL, { ...header });
 			} catch {}
+		},
+		updateDry(status) {
+			if (disposed || !sessionId) {
+				return;
+			}
+			dry = { ...status, reason: status.reason?.slice(0, 2000), formats: status.formats?.slice(0, 32) };
+			if (header) {
+				header = { ...header, dry, revision: ++revision };
+				try {
+					events.emit(QUALITY_STATUS_CHANNEL, { ...header });
+				} catch {}
+			}
+		},
+		updateStage(source) {
+			activeStage = source;
+			if (header) {
+				header = { ...header, activeStage, revision: ++revision };
+				try {
+					events.emit(QUALITY_STATUS_CHANNEL, { ...header });
+				} catch {}
+			}
 		},
 		finishTool(toolCallId: string, phase: QualityActivityPhase) {
 			batch.delete(toolCallId);

@@ -1,6 +1,8 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createEventBus } from "@earendil-works/pi-coding-agent";
+import { discoverSettingsSections } from "@paulsteele/pi-shared-ui";
 import { afterEach, expect, it, vi } from "vitest";
 import sandboxExtension from "../src/sandbox-extension.ts";
 import { defaultToolProfile, globalToolProfilePath } from "../src/sandbox/tool-profile.ts";
@@ -115,3 +117,41 @@ it.each(["session_shutdown", "session_tree"])(
     expect(notify).not.toHaveBeenCalled();
   },
 );
+
+it("contributes sandbox settings only while its session is running", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "sandbox-settings-owner-"));
+  directories.push(agentDir);
+  vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+  await publishPrivateText(
+    globalToolProfilePath(agentDir),
+    JSON.stringify(defaultToolProfile()),
+    undefined,
+  );
+  resolveDefinition.mockRejectedValueOnce(new Error("Invalid base definition"));
+  const events = createEventBus();
+  const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>();
+  sandboxExtension({
+    on: (name: string, handler: (event: unknown, ctx: unknown) => Promise<void>) =>
+      handlers.set(name, handler),
+    events,
+    registerTool() {},
+    registerCommand() {},
+    registerEntryRenderer() {},
+  } as never);
+  const ctx = {
+    cwd: agentDir,
+    mode: "rpc",
+    hasUI: true,
+    sessionManager: { getSessionId: () => "settings-session" },
+    ui: { select: async () => "first/devcontainer.json", notify: vi.fn(), setStatus: vi.fn() },
+  };
+  expect(discoverSettingsSections({ events })).toEqual([]);
+
+  await handlers.get("session_start")!({}, ctx);
+  expect(discoverSettingsSections({ events }).map((section) => section.id)).toContain(
+    "sandbox-tools-global",
+  );
+
+  await handlers.get("session_shutdown")!({}, ctx);
+  expect(discoverSettingsSections({ events })).toEqual([]);
+});

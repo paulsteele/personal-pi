@@ -17,6 +17,8 @@ import {
 } from "./lsp-profile.js";
 import { digest } from "./proposal.js";
 import { saveConfig } from "./config.js";
+import type { SandboxDryManager } from "./dry-sandbox-manager.js";
+import { emptyDryStatus } from "./dry-types.js";
 
 import { validateAndActivateLspDraft } from "./lsp-setup.js";
 vi.mock("./lsp-setup.js", async (original) => ({
@@ -33,12 +35,16 @@ afterEach(async () => {
 	await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-async function settingsFixture(options: { initialStartupFailure?: boolean } = {}) {
+async function settingsFixture(
+	options: { initialStartupFailure?: boolean; dryManager?: SandboxDryManager } = {},
+) {
 	const directory = await mkdtemp(join(tmpdir(), "quality-settings-draft-"));
 	directories.push(directory);
 	const cwd = join(directory, "project");
 	const agentDir = join(directory, "agent");
 	await mkdir(cwd);
+	const dryManager = options.dryManager;
+	saveConfig(agentDir, { dryEnabled: dryManager !== undefined });
 	if (options.initialStartupFailure) {
 		saveConfig(agentDir, { provider: "fixture", model: "reviewer" });
 	}
@@ -136,16 +142,58 @@ async function settingsFixture(options: { initialStartupFailure?: boolean } = {}
 				arbitrate: async () => undefined,
 			},
 			createLspManager: () => manager,
+			createDryManager: dryManager ? () => dryManager : undefined,
 		},
 		agentDir,
 	);
 	await handlers.get("session_start")!({}, ctx);
 	const project = await resolveLspProject(cwd, agentDir);
 	const profile = { version: 1 as const, projectId: project.id, enabled: true, routes: [] };
-	const section = discoverSettingsSections(pi).find((section) => section.id === "lsp")!;
-	return { agentDir, project, profile, section, ctx, manager, handlers, review };
+	const sections = discoverSettingsSections(pi);
+	const section = sections.find((section) => section.id === "lsp")!;
+	const drySection = sections.find((section) => section.id === "quality-dry")!;
+	return { agentDir, project, profile, section, drySection, ctx, manager, handlers, review };
 }
 
+it("starts a baseline in the background on every assistant turn without blocking the hook", async () => {
+	let finishScan!: () => void;
+	const dryManager = {
+		status: emptyDryStatus(),
+		start: vi.fn(async () => {}),
+		stop: vi.fn(async () => {}),
+		beginTurn: vi.fn(
+			() =>
+				new Promise<void>((resolve) => {
+					finishScan = resolve;
+				}),
+		),
+	} as unknown as SandboxDryManager;
+	const fixture = await settingsFixture({ dryManager });
+	await fixture.handlers.get("turn_start")!({ turnIndex: 0 }, fixture.ctx);
+	await vi.waitFor(() => expect(dryManager.beginTurn).toHaveBeenCalledOnce());
+	finishScan();
+	await fixture.handlers.get("turn_start")!({ turnIndex: 1 }, fixture.ctx);
+	await vi.waitFor(() => expect(dryManager.beginTurn).toHaveBeenCalledTimes(2));
+	finishScan();
+	await fixture.handlers.get("session_shutdown")!({}, fixture.ctx);
+});
+it("contributes DRY recovery actions and typed settings without selecting another model", async () => {
+	const fixture = await settingsFixture();
+	const section = fixture.drySection;
+	expect(section.plugin?.id).toBe("quality");
+	expect(section.actions?.map((action) => action.label)).toEqual(["Show status", "Run fresh scan"]);
+	expect(section.fields.map((field) => field.path)).toEqual([
+		"dryEnabled",
+		"dryScanTimeoutMs",
+		"dryMaxInputChars",
+		"dryMaxOutputTokens",
+		"profile",
+	]);
+	const loaded = await section.load(fixture.ctx);
+	expect(loaded.value.dryEnabled).toBe(false);
+	expect(loaded.value).not.toHaveProperty("modelSelection");
+	await fixture.handlers.get("session_shutdown")!({}, fixture.ctx);
+});
 it("replaces a rejected startup barrier when the quality recovery flow retries LSP", async () => {
 	const fixture = await settingsFixture({ initialStartupFailure: true });
 	const path = join(fixture.ctx.cwd, "app.ts");

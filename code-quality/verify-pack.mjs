@@ -9,6 +9,16 @@ const files = new Set(JSON.parse(result.stdout)[0].files.map((entry) => entry.pa
 for (const required of [
 	"index.ts",
 	"controller.ts",
+	"dry-worker.mjs",
+	"dry-mcp.mjs",
+	"dry-lexical.mjs",
+	"source-disclosure.mjs",
+	"dry-policy.md",
+	"dry-examples.md",
+	"dry-sandbox-manager.ts",
+	"dry-worker-schema.ts",
+	"dry-check.ts",
+	"reviewer-call.ts",
 	"activity.ts",
 	"feedback.ts",
 	"capture.ts",
@@ -46,6 +56,6 @@ for (const required of [
 ])
 	if (!files.has(required)) throw new Error(`Missing packaged file: ${required}`);
 for (const path of files)
-	if (/\.test\.|vitest|biome|tsconfig|calibrate|fixtures\/|lsp-probe/.test(path))
+	if (/\.test\.|vitest|biome|tsconfig|calibrate|dry-scenarios|fixtures\/|lsp-probe/.test(path))
 		throw new Error(`Unexpected development file: ${path}`);
 console.log(`Quality package contents verified (${files.size} files)`);

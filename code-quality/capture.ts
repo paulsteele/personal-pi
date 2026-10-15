@@ -3,6 +3,8 @@ import { relative } from "node:path";
 import { generateUnifiedPatch } from "@earendil-works/pi-coding-agent";
 import type { QualityConfig } from "./config.js";
 import type { ReviewFile } from "./proposal.js";
+import { sensitivePath, containsSecrets } from "./source-disclosure.mjs";
+export { sensitivePath, containsSecrets } from "./source-disclosure.mjs";
 
 export { canonicalPath, inside } from "./paths.js";
 
@@ -14,16 +16,6 @@ export class CoverageError extends Error {
 	) {
 		super(message);
 	}
-}
-export function sensitivePath(path: string): boolean {
-	return /(?:^|[/\\])(?:\.env(?:\..+)?|auth\.json|credentials(?:\.json)?|id_(?:rsa|ed25519)|[^/\\]+\.(?:pem|key|p12))$/i.test(
-		path,
-	);
-}
-export function containsSecrets(text: string): boolean {
-	return /-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:sk-|ghp_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{16,}|\bAKIA[A-Z0-9]{16}\b|\bBearer\s+[A-Za-z0-9._~-]{20,}/.test(
-		text,
-	);
 }
 export function readSnapshot(path: string, config: QualityConfig, authorized = false): string | null {
 	if (!authorized && sensitivePath(path))

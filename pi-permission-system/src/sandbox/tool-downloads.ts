@@ -47,6 +47,23 @@ const rustChecksums: Record<string, { runtime: string; analyzer: string }> = {
   },
 };
 
+const jscpdChecksums: Record<string, string> = {
+  "arm64-gnu": "6f8ddab0aec0232d08a6aa0c36cddb435ddde2c24a447cc9afe603ac8556748c",
+  "arm64-musl": "9a89b6c6a62d798759d2e94142e22bfcfdb6962dfca9b12b890a92d541c4069e",
+  "x64-gnu": "f2017a17de2a8d5708f8354c6e7223f82da3dc6489675bce543ba00d9d529468",
+  "x64-musl": "226149bbf3e48df408005dd3222d5c42367f7cfef4c5788e4da9f4f6a5003b63",
+};
+
+export function jscpdDownload(platform: ToolPlatform): PinnedDownload {
+  const architecture = platform.architecture === "amd64" ? "x64" : "arm64";
+  const target = `${architecture}-${platform.libc === "musl" ? "musl" : "gnu"}`;
+  return {
+    url: `https://github.com/kucherenko/jscpd/releases/download/v5.4.1/jscpd-linux-${target}.tar.gz`,
+    algorithm: "sha256",
+    checksum: jscpdChecksums[target],
+  };
+}
+
 export function toolRuntimeDownload(id: string, platform: ToolPlatform): PinnedDownload {
   if (id === "node-runtime") {
     const architecture = platform.architecture === "amd64" ? "x64" : "arm64";

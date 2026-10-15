@@ -104,16 +104,20 @@ export function registerSandboxSettings(
   pi: ExtensionAPI,
   agentDir: string,
   getSession: () => SandboxSession,
-): void {
-  const registerSandboxSettingsSection = (owner: ExtensionAPI, section: SettingsSection) =>
-    contributeSettingsSection(owner, {
-      ...section,
-      plugin: {
-        id: "sandbox",
-        title: "Sandbox",
-        description: "Permissions, native commands, container bases, tools, and environment",
-      },
-    });
+): () => void {
+  const unregisterSections: Array<() => void> = [];
+  const registerSandboxSettingsSection = (owner: ExtensionAPI, section: SettingsSection) => {
+    unregisterSections.push(
+      contributeSettingsSection(owner, {
+        ...section,
+        plugin: {
+          id: "sandbox",
+          title: "Sandbox",
+          description: "Permissions, native commands, container bases, tools, and environment",
+        },
+      }),
+    );
+  };
   registerSandboxSettingsSection(pi, {
     id: "sandbox",
     title: "General Settings",
@@ -363,4 +367,9 @@ export function registerSandboxSettings(
       };
     },
   });
+  return () => {
+    for (const unregister of unregisterSections) {
+      unregister();
+    }
+  };
 }

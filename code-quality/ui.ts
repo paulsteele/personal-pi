@@ -45,6 +45,26 @@ export function reviewText(state: QualityCase): string {
 		for (const file of state.files)
 			parts.push(`${plain(file.path)} — current code\n${plain(file.after ?? "(deleted)")}`);
 	}
+	if (state.dry?.verdict?.findings.length) {
+		parts.push("DRY findings — shared knowledge, not detector clone counts");
+		for (const finding of state.dry.verdict.findings) {
+			const findingLocation = `${plain(finding.file)}:${finding.line}`;
+			const counterpartLocation = `${plain(finding.counterpartFile)}:${finding.counterpartRange.join("–")}`;
+			const findingDetails = [
+				`${findingLocation} / ${counterpartLocation}`,
+				plain(finding.duplicatedKnowledge),
+				plain(finding.sharedOwnershipRationale),
+				`Correction: ${plain(finding.correctionDirection)}`,
+			];
+			parts.push(findingDetails.join("\n"));
+		}
+		for (const evidencePair of state.dry.evidence) {
+			parts.push(
+				`${plain(evidencePair.changed.file)} — current\n${plain(evidencePair.changed.text)}`,
+				`${plain(evidencePair.counterpart.file)} — counterpart\n${plain(evidencePair.counterpart.text)}`,
+			);
+		}
+	}
 	if (state.objection) parts.push(`Agent disagreement: ${plain(state.objection)}`);
 	for (const finding of state.verdict?.findings ?? [])
 		parts.push(`${plain(finding.file)}:${finding.line} [${finding.rule}] ${plain(finding.rationale)}`);
@@ -230,9 +250,12 @@ export const qualityUI: QualityUI = {
 		return choice?.startsWith("Authorize") ? "authorize" : choice?.startsWith("Waive") ? "waive" : undefined;
 	},
 	async failure(ctx, reason, signal) {
+		const waiverLabel = reason.startsWith("DRY unavailable:")
+			? "Waive DRY for this case"
+			: "Waive this quality check";
 		const choice = await ctx.ui.select(
 			plain(reason),
-			["Retry review", "Select reviewer model", "Waive this quality check"],
+			["Retry review", "Select reviewer model", waiverLabel],
 			{ signal },
 		);
 		return choice?.startsWith("Retry")

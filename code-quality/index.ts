@@ -20,6 +20,10 @@ import {
 	publishLspDraft,
 } from "./lsp-profile.js";
 import { loadConfig, qualityConfigRevision } from "./config.js";
+import { SandboxDryManager } from "./dry-sandbox-manager.js";
+import { createDryGate } from "./dry-check.js";
+import { handleDryCommand, type DryCommandPorts } from "./dry-commands.js";
+import { loadDryProfile, parseDryProfile, resolveDryProject, saveDryProfile } from "./dry-profile.js";
 
 export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agentDir = getAgentDir()): void {
 	const runtime = new QualityController(pi, agentDir, { ...ports });
@@ -29,6 +33,43 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 	let context: Parameters<QualityController["start"]>[0] | undefined;
 	let sessionAbort = new AbortController();
 	let lspSetupError: string | undefined;
+	let dry: SandboxDryManager | undefined;
+	let dryStartup: Promise<void> = Promise.resolve();
+	let dryRestartPending = false;
+	const restartDry = async (ctx: ExtensionContext): Promise<void> => {
+		if (!dry) {
+			return;
+		}
+		dryRestartPending = true;
+		dryStartup = dry.start(ctx.cwd, ctx.isProjectTrusted(), runtime.config);
+		try {
+			await dryStartup;
+		} finally {
+			dryRestartPending = false;
+		}
+	};
+	const dryCommandPorts = (): DryCommandPorts => {
+		if (!dry) {
+			throw new Error("DRY requires an interactive quality session");
+		}
+		return {
+			manager: dry,
+			async setEnabled(enabled, ctx, signal) {
+				if (!enabled && runtime.pending && !runtime.state?.dryWaived) {
+					const approved = await ctx.ui.confirm(
+						"Disable pending DRY?",
+						"This explicitly waives only DRY for the current case.",
+					);
+					if (!approved) {
+						return;
+					}
+					runtime.waiveDry();
+				}
+				await runtime.applySettings(ctx, { ...runtime.config, dryEnabled: enabled }, signal);
+				await restartDry(ctx);
+			},
+		};
+	};
 	const qualityPlugin = {
 		id: "quality",
 		title: "Code Quality",
@@ -78,6 +119,7 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 						signal,
 						settingsFormConfigRevision,
 					);
+					await restartDry(ctx);
 					await lsp?.stop();
 					lspStartup = lsp?.start(ctx.cwd, ctx.isProjectTrusted(), runtime.active) ?? Promise.resolve();
 					await lspStartup;
@@ -178,6 +220,58 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 		},
 		actions: [setupLspAction],
 	});
+	registerSettingsSection(pi, {
+		plugin: qualityPlugin,
+		id: "quality-dry",
+		title: "DRY Checking",
+		description: "Shared reviewer and fresh repository clone retrieval",
+		effect:
+			"DRY settings applied; every check scans current sources and pending case decisions remain explicit.",
+		fields: [
+			{
+				path: "dryEnabled",
+				label: "Enabled",
+				kind: "boolean",
+				edit: async (ctx, current, signal) => {
+					await handleDryCommand(current ? "off" : "on", ctx, dryCommandPorts(), signal);
+					return { value: runtime.config.dryEnabled };
+				},
+			},
+			{ path: "dryScanTimeoutMs", label: "Scan timeout (ms)", kind: "number" },
+			{ path: "dryMaxInputChars", label: "Reviewer input characters", kind: "number" },
+			{ path: "dryMaxOutputTokens", label: "Reviewer output tokens", kind: "number" },
+			{ path: "profile", label: "Project retrieval profile", kind: "json" },
+		],
+		async load(ctx) {
+			const project = await resolveDryProject(ctx.cwd, agentDir);
+			const stored = await loadDryProfile(agentDir, project);
+			let profileRevision = stored.revision;
+			const settingsValue = { ...runtime.config, profile: stored.profile };
+			return {
+				value: settingsValue,
+				async apply(value, signal = new AbortController().signal) {
+					const { profile, ...config } = value;
+					const validatedProfile = parseDryProfile(profile);
+					await runtime.applySettings(ctx, config, signal);
+					await saveDryProfile(agentDir, project, validatedProfile, profileRevision);
+					profileRevision = (await loadDryProfile(agentDir, project)).revision;
+					await restartDry(ctx);
+				},
+			};
+		},
+		actions: [
+			{
+				id: "status",
+				label: "Show status",
+				run: (ctx, signal) => handleDryCommand("status", ctx, dryCommandPorts(), signal),
+			},
+			{
+				id: "refresh",
+				label: "Run fresh scan",
+				run: (ctx, signal) => handleDryCommand("refresh", ctx, dryCommandPorts(), signal),
+			},
+		],
+	});
 	pi.registerMessageRenderer("code-quality:feedback", feedbackRenderer);
 	pi.registerEntryRenderer(
 		QUALITY_CHECK_ENTRY,
@@ -197,6 +291,24 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 		};
 		await runtime.start(ctx);
 		if (ctx.mode === "tui") {
+			const updateDryStatus = () => activity?.updateDry?.(dry!.status);
+			dry = ports.createDryManager?.(updateDryStatus) ?? new SandboxDryManager(pi, agentDir, updateDryStatus);
+			const dryGate = createDryGate(dry);
+			runtime.ports.dry = ports.dry ?? {
+				get revision() {
+					return dryGate.revision;
+				},
+				get configRevision() {
+					return dryGate.configRevision;
+				},
+				current: (signal) => dryGate.current(signal),
+				check: async (request) => {
+					await dryStartup.catch(() => {});
+					return dryGate.check(request);
+				},
+			};
+			dryStartup = restartDry(ctx);
+			dryStartup.catch(() => {});
 			const updateLspStatus = () => {
 				activity?.updateLsp(lsp?.header ?? []);
 				if (context) context.ui.setStatus("quality-lsp", lsp?.statusText());
@@ -247,16 +359,40 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 			});
 		}
 	});
+	const unsubscribeSandboxState = pi.events.on("sandbox:state:v1", (raw) => {
+		const state = raw as { phase?: string; sessionId?: string };
+		if (
+			state.phase === "ready" &&
+			context &&
+			state.sessionId === context.sessionManager.getSessionId() &&
+			dry?.status.toolPhase !== "ready" &&
+			!dryRestartPending
+		) {
+			dryStartup = restartDry(context);
+			dryStartup.catch(() => {});
+		}
+	});
 	pi.on("session_tree", async (_event, ctx) => {
 		sessionAbort.abort();
 		sessionAbort = new AbortController();
 		await runtime.start(ctx);
 		activity?.updateLsp(lsp?.header ?? []);
+		if (dry) {
+			void dry
+				.stop()
+				.then(() => restartDry(ctx))
+				.catch(() => {});
+		}
 	});
 	pi.on("session_shutdown", async () => {
 		sessionAbort.abort();
+		unsubscribeSandboxState();
 		context = undefined;
 		runtime.dispose();
+		await dry?.stop();
+		await dryStartup.catch(() => {});
+		dry = undefined;
+		runtime.ports.dry = undefined;
 		await lspStartup.catch(() => {});
 		await lsp?.stop();
 		lsp = undefined;
@@ -271,6 +407,22 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 			(ctx.mode === "tui" && runtime.active
 				? `\n${runtime.summary()}`
 				: "\nQuality gate is inactive; policy is guidance only in this mode.");
+	});
+	pi.on("turn_start", (_event, ctx) => {
+		if (ctx.mode !== "tui" || !runtime.active || !runtime.config.dryEnabled || ports.dry) {
+			return;
+		}
+		const owner = sessionAbort;
+		const manager = dry;
+		void dryStartup
+			.then(async () => {
+				if (owner.signal.aborted || dry !== manager || !manager) {
+					return;
+				}
+				const signal = ctx.signal ? AbortSignal.any([ctx.signal, owner.signal]) : owner.signal;
+				await manager.beginTurn(signal);
+			})
+			.catch(() => {});
 	});
 	pi.on("tool_call", (event, ctx) => runtime.beforeTool(event.toolName, event.input, ctx, event.toolCallId));
 	pi.on("tool_result", async (event, ctx) => {
@@ -363,6 +515,13 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 		description: "Quality gate status, on/off, retry, or resolve",
 		handler: async (args, ctx) => {
 			const action = args.trim();
+			if (action === "dry" || action.startsWith("dry ")) {
+				if (action !== "dry" && action !== "dry status") {
+					await ctx.waitForIdle();
+				}
+				await handleDryCommand(action.slice(3).trim(), ctx, dryCommandPorts(), sessionAbort.signal);
+				return;
+			}
 			if (action === "lsp" || action.startsWith("lsp ")) {
 				if (!lsp) {
 					ctx.ui.notify("LSP quality requires TUI mode", "warning");
@@ -410,6 +569,7 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 			if (action && action !== "status") await ctx.waitForIdle();
 			await runtime.command(action, ctx);
 			if ((action === "off" && !runtime.active) || (action === "on" && runtime.active)) {
+				await restartDry(ctx);
 				await lsp?.stop();
 				lspStartup = lsp?.start(ctx.cwd, ctx.isProjectTrusted(), runtime.active) ?? Promise.resolve();
 				await lspStartup;

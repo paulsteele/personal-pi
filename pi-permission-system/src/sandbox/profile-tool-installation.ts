@@ -3,16 +3,27 @@ import { unlink } from "node:fs/promises";
 import type { SandboxSession } from "./session.ts";
 import type { ImageToolInstallation } from "./image-tool-recipe.ts";
 import { buildContentKey } from "./tool-cache.ts";
+import { managedCatalogTool } from "./tool-catalog.ts";
 import {
   globalToolProfilePath,
   loadToolProfile,
   parseToolProfile,
   projectToolProfilePath,
   resolveToolProfiles,
+  type ToolProfileEntry,
 } from "./tool-profile.ts";
 import { resolveDefinition } from "./definition.ts";
 import { publishPrivateText, readPrivateText, sha256Hex, withPrivateLock } from "./storage.ts";
 import { validateEnvironmentSources } from "./environment-layers.ts";
+
+function profileEntry(installation: ImageToolInstallation): ToolProfileEntry {
+  const { id, ...recipe } = installation;
+  const managedTool = managedCatalogTool(id, installation.version);
+  if (managedTool) {
+    return { kind: "catalog", version: managedTool.version };
+  }
+  return { kind: "recipe", ...recipe, dependencies: [] };
+}
 
 export async function planProfileToolInstallation(
   session: SandboxSession,
@@ -36,8 +47,8 @@ export async function planProfileToolInstallation(
   const profile = stored?.profile ?? parseToolProfile({ version: 1, tools: {}, exclude: [] });
   let changed = false;
   for (const installation of installations) {
-    const { id, ...recipe } = installation;
-    const next = { kind: "recipe" as const, ...recipe, dependencies: [] };
+    const id = installation.id;
+    const next = profileEntry(installation);
     if (profile.tools[id] && buildContentKey(profile.tools[id]) === buildContentKey(next)) {
       continue;
     }

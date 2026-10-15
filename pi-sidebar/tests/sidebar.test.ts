@@ -891,7 +891,7 @@ describe("legacy two-region compositor migration fixtures", () => {
 		expect(rows[0]).toBe("Observer unavailable");
 		expect(rows).toContainEqual(expect.stringMatching(/^│ 󰔛 ~\s+READY · ┃ 󰄋 ┃\s+~ 󰓅 │$/));
 		expect(rows).toContainEqual(expect.stringMatching(/^╭─+ 0✓ · 0✕ ─+╮$/));
-		expect(rows).toContainEqual(expect.stringMatching(/^╰─+ 󰚩 0 · 󰀄 0 · 󰅴 0 0✕ ─+╯$/));
+		expect(rows).toContainEqual(expect.stringMatching(/^╰─+ 󰅴 0 0✕ ─+╯$/));
 		for (const absent of ["RUN", "AGENT", "CTX", "GIT", "SESSION", "USE", "PLAN", "ALERTS"]) {
 			expect(rows).not.toContain(absent);
 		}
@@ -1078,7 +1078,7 @@ describe("legacy two-region compositor migration fixtures", () => {
 		);
 		const auto = rows.findIndex((row) => row.trim() === "⏵⏵ auto · reviewer");
 		const trackTop = rows.findIndex((row) => row.startsWith("╭─"));
-		const counts = rows.findIndex((row) => row.startsWith("╰─") && row.includes("󰚩 3 · 󰀄 2"));
+		const counts = rows.findIndex((row) => row.startsWith("╰─") && row.includes("󰅴 0 0✕"));
 		const firstTool = rows.findIndex((row) => /^read\s+src\/state\.ts/.test(row));
 		expect(dashboard).toBeGreaterThan(-1);
 		expect(auto).toBeLessThan(trackTop);

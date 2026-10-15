@@ -11,6 +11,7 @@ import { loadConfig, saveConfig } from "../code-quality/config.ts";
 import { canonicalPath } from "../code-quality/capture.ts";
 import type { QualityUI } from "../code-quality/controller.ts";
 import type { ReviewResult } from "../code-quality/reviewer.ts";
+import type { DryGate } from "../code-quality/dry-check.ts";
 import { parseQualityActivity, parseQualityHeader, type QualityHeader } from "../pi-sidebar/src/quality-activity.ts";
 import { createRunActivityTracker } from "../pi-sidebar/src/run-activity.ts";
 import { QUALITY_CHECK_ENTRY, QUALITY_CHECK_UPDATE_ENTRY } from "../code-quality/feedback.ts";
@@ -55,12 +56,12 @@ function registerFixtureSandboxService(pi: ExtensionAPI, cwd: string) {
   });
 }
 
-async function fixture(review: (options: any) => Promise<ReviewResult>, calls: string[], denied = false, uiOverride: Partial<QualityUI> = {}, script?: (turn: number, context: Context) => unknown[], lspOptions: { configureLsp?: boolean; qualityEnabled?: boolean } = {}) {
+async function fixture(review: (options: any) => Promise<ReviewResult>, calls: string[], denied = false, uiOverride: Partial<QualityUI> = {}, script?: (turn: number, context: Context) => unknown[], lspOptions: { configureLsp?: boolean; qualityEnabled?: boolean; dry?: DryGate } = {}) {
   const root = canonicalPath(mkdtempSync(join(tmpdir(), "pi-quality-integration-"))); directories.push(root);
   const cwd = join(root, "repo"), agentDir = join(root, "agent"); mkdirSync(cwd); mkdirSync(agentDir);
   const activity = createRunActivityTracker({ cwd });
   const qualityHeaders: QualityHeader[] = [];
-  saveConfig(agentDir, { provider: "synthetic", model: "fixture", enabled: lspOptions.qualityEnabled ?? true });
+  saveConfig(agentDir, { provider: "synthetic", model: "fixture", enabled: lspOptions.qualityEnabled ?? true, dryEnabled: lspOptions.dry !== undefined });
   if (lspOptions.configureLsp) await configureFixtureLsp(agentDir, cwd);
   const settingsManager = SettingsManager.inMemory({ defaultProjectTrust: "always", compaction: { enabled: false }, retry: { enabled: false } });
   const ui: QualityUI = { arbitrate: async () => ({ choice: "original", note: "Fixture decision" }), coverage: async () => undefined, failure: async () => undefined, ...uiOverride };
@@ -68,7 +69,7 @@ async function fixture(review: (options: any) => Promise<ReviewResult>, calls: s
     (pi) => { if (denied) pi.on("tool_call", (event) => event.toolName === "write" ? { block: true, reason: "Synthetic permission denial" } : undefined); },
     (pi) => {
       registerFixtureSandboxService(pi, cwd);
-      registerQualityGate(pi, { ui, review, createLspManager: (changed) => new LspManager(agentDir, changed) }, agentDir);
+      registerQualityGate(pi, { ui, review, dry: lspOptions.dry, createLspManager: (changed) => new LspManager(agentDir, changed) }, agentDir);
     },
     (pi) => {
       pi.events.on("code-quality:activity", (raw) => {
@@ -109,6 +110,28 @@ async function fixture(review: (options: any) => Promise<ReviewResult>, calls: s
   return { session, cwd, agentDir, errors, activity, qualityHeaders, notifications };
 }
 
+test("real Pi gates DRY before readability without requiring an exact diff", async () => {
+  const calls: string[] = [];
+  const dry: DryGate = {
+    revision: "a".repeat(64), configRevision: "b".repeat(64), current: async () => true,
+    async check(request) {
+      calls.push("dry");
+      return { kind: "checked", metrics: { requests: 0, latencyMs: 0, usages: [] }, assessment: {
+        evidence: [], coverage: [], revision: request.revision, manifestRevision: "a".repeat(64), configuration: "b".repeat(64), generation: "fixture", providerKey: "synthetic/fixture",
+      } };
+    },
+  };
+  const h = await fixture(async () => { calls.push("readability"); return approved(); }, calls, false, {}, undefined, { dry });
+  try {
+    await h.session.prompt("Write the synthetic fixture.");
+    expect(calls).toEqual(["main:1", "dry", "readability", "main:2"]);
+    expect(h.errors).toEqual([]);
+    expect(h.qualityHeaders.at(-1)?.phase).toBe("approved");
+  } finally {
+    await h.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    h.session.dispose();
+  }
+});
 test("reload retains the enabled LSP profile while the master quality switch suspends checks", async () => {
   const h = await fixture(async () => approved(), [], false, {}, undefined, { configureLsp: true, qualityEnabled: false });
   const status = async () => {
@@ -176,9 +199,9 @@ test("real Pi receives LSP warnings on the write result and fixes them before re
       return renderer(entry, { expanded: false }, logTheme)!.render(100).map((line) => line.trimEnd());
     });
     expect(checkLines).toEqual([
-      "quality check: lsp ✕",
-      "quality check: lsp ✓",
-      "quality check: readability ✓",
+      expect.stringMatching(/^quality check: lsp · \d+\.\ds ✕$/),
+      expect.stringMatching(/^quality check: lsp · \d+\.\ds ✓$/),
+      expect.stringMatching(/^quality check: readability · \d+\.\ds ✓$/),
     ]);
   } finally {
     await h.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
@@ -201,10 +224,10 @@ test("real Pi waits for the post-write verdict before the next primary request",
     }
     const renderer = h.session.extensionRunner.getEntryRenderer(QUALITY_CHECK_ENTRY)!;
     const component = renderer(checkingEntry, { expanded: false }, logTheme)!;
-    expect(component.render(100).map((line) => line.trimEnd())).toEqual(["quality check: readability"]);
+    expect(component.render(100).map((line) => line.trimEnd())).toEqual([expect.stringMatching(/^quality check: readability · \d+\.\ds$/)]);
     expect(readFileSync(join(h.cwd, "a.ts"), "utf8")).toBe("const count = 1;\n");
     release(approved()); await pending;
-    expect(component.render(100).map((line) => line.trimEnd())).toEqual(["quality check: readability ✓"]);
+    expect(component.render(100).map((line) => line.trimEnd())).toEqual([expect.stringMatching(/^quality check: readability · \d+\.\ds ✓$/)]);
     expect(calls).toEqual(["main:1", "review", "main:2"]);
     expect(h.errors).toEqual([]);
     expect(JSON.stringify(h.session.messages)).toContain("Code clarity policy");

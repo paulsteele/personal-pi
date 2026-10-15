@@ -21,6 +21,10 @@ export interface QualityConfig {
 	maxBatchBytes: number;
 	maxInputChars: number;
 	maxOutputTokens: number;
+	dryEnabled: boolean;
+	dryScanTimeoutMs: number;
+	dryMaxInputChars: number;
+	dryMaxOutputTokens: number;
 }
 
 export const DEFAULT_CONFIG: QualityConfig = Object.freeze({
@@ -30,6 +34,10 @@ export const DEFAULT_CONFIG: QualityConfig = Object.freeze({
 	maxBatchBytes: 1_048_576,
 	maxInputChars: 128_000,
 	maxOutputTokens: 16_000,
+	dryEnabled: true,
+	dryScanTimeoutMs: 60_000,
+	dryMaxInputChars: 24_000,
+	dryMaxOutputTokens: 1024,
 });
 export const configPath = (agentDir: string): string =>
 	join(agentDir, "extensions", "code-quality", "config.json");
@@ -41,13 +49,21 @@ export function parseConfig(value: unknown): QualityConfig {
 	const known = new Set([...Object.keys(DEFAULT_CONFIG), "provider", "model"]);
 	for (const key of Object.keys(raw)) if (!known.has(key)) throw new Error(`Unknown quality setting: ${key}`);
 	const config = { ...DEFAULT_CONFIG, ...raw } as QualityConfig;
-	if (typeof config.enabled !== "boolean") throw new Error("enabled must be a boolean");
+	if (typeof config.enabled !== "boolean") {
+		throw new Error("enabled must be a boolean");
+	}
+	if (typeof config.dryEnabled !== "boolean") {
+		throw new Error("dryEnabled must be a boolean");
+	}
 	const limits = {
 		timeoutMs: [250, 300_000],
 		maxFileBytes: [1024, 16_777_216],
 		maxBatchBytes: [1024, 67_108_864],
 		maxInputChars: [1024, 1_000_000],
 		maxOutputTokens: [256, 32_000],
+		dryScanTimeoutMs: [1000, 300_000],
+		dryMaxInputChars: [2048, 128_000],
+		dryMaxOutputTokens: [256, 8000],
 	} as const;
 	for (const [key, [min, max]] of Object.entries(limits)) {
 		const value = config[key as keyof typeof limits];

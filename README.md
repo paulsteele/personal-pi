@@ -10,7 +10,7 @@ Pi loads the entries in this deliberate order:
 2. `code-blocks` — renders copyable fenced code blocks.
 3. `desktop-notifications` — provides actionable terminal-window notifications.
 4. `pi-permission-system` — mandatory Podman devcontainer tools and host mount approvals.
-5. `code-quality` — isolated post-edit style gate with bounded corrections and human arbitration.
+5. `code-quality` — post-edit diagnostics, indexed DRY and readability gates with bounded corrections and human arbitration.
 6. `progress-observer` — passive side-model progress inference.
 7. `pr-review` — code-owned reviews with private generated repo context and Plannotator findings.
 8. `pi-sidebar` — fullscreen Sidebar with pinned status/turn headers and Tools, Summary, Sandbox, and Settings tabs.
@@ -24,7 +24,7 @@ Permission System and Progress Observer load before Sidebar so their replayable 
 After the public repository and release tag exist:
 
 ```sh
-pi install https://github.com/paulsteele/personal-pi@v2.2.0
+pi install https://github.com/paulsteele/personal-pi@v2.3.0
 ```
 
 The dotfiles repository normally records the same pinned source in `~/.pi/agent/settings.json`, so Pi installs a missing user package automatically at startup when online. The public HTTPS URL requires no SSH alias or repository credentials.
@@ -132,7 +132,13 @@ All five LSPs are built into reusable tool images and added to the generated dev
 
 PR review methodology and personal-global rules are versioned here in `pr-review/prompts/`; only generated repo semantics and runtime settings live in Pi config. Run `/pr setup` to create a private context draft, inspect it, then run `/pr setup approve` to activate it before the first review. Use `/pr model` to choose the independent model and `/pr` to review changes. Existing approved context is reused; `/pr setup regenerate` explicitly creates a replacement draft that also requires inspection and `/pr setup approve`. Verified findings open in the already-loaded Plannotator UI without a version allowlist; submitted feedback goes to the main agent without a second fix-selection screen. The harness never installs or updates Plannotator. See [`pr-review/README.md`](pr-review/README.md) for compatibility, privacy, scope, and verification details.
 
-The Code Quality gate injects its versioned clarity policy and reviews explicit edit/write batches in interactive sessions. Configure its independent reviewer with `/quality-model`. Provisioned LSPs work automatically in trusted projects; `/quality lsp setup` is only for exceptional project overrides and never installs software. Servers execute inside the session devcontainer; distinct sandbox generations never share a host server. All diagnostic severities enter the existing correction flow before readability review. Quality reviews accessible files without an outside-repository filter. It pauses unrelated work while feedback is unresolved. Corrections and bounded disagreements return to the reviewer, sharing five response-and-review rounds before automatic terminal arbitration. Known generated/lock filenames auto-approve without model review. See [`code-quality/README.md`](code-quality/README.md) for coverage, privacy, controls, and recovery. It does not replace tests, permissions, or PR review.
+The Code Quality gate checks explicit edit/write batches in interactive sessions, applying its clarity and DRY policies after LSP diagnostics.
+
+Stages run LSP → DRY → readability using one configured quality model. DRY findings cite bounded counterpart evidence without requiring an exact patch. Configure the reviewer with `/quality-model`. Managed jscpd tooling and turn-start background baselines expose readiness and details in Sidebar's Quality tab and DRY Settings. Current edits query one baseline per assistant turn; selected pairs receive fresh judgments. Main-transcript stage lines show live timers and completion durations.
+
+Provisioned LSPs work automatically in trusted projects. `/quality lsp setup` is only for exceptional project overrides and never installs software. Servers execute inside the session devcontainer, with separate sandbox generations using separate servers. All diagnostic severities enter the correction flow before readability review. Quality reviews accessible files without an outside-repository filter and pauses unrelated work while feedback is unresolved. Corrections and bounded disagreements return to the reviewer, sharing five response-and-review rounds before automatic terminal arbitration. Known generated/lock filenames auto-approve without model review.
+
+See [`code-quality/README.md`](code-quality/README.md) for coverage, privacy, controls, and recovery. The gate does not replace tests, permissions, or PR review.
 
 The Progress Observer uses a separate model to infer goal/progress/current/next state for Sidebar's Summary tab. It is TUI-only, memory-only, never injects into the main agent conversation, and degrades without interrupting work. See [`progress-observer/README.md`](progress-observer/README.md) for cadence, commands, privacy, and cost details.
 

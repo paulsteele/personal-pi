@@ -1,3 +1,5 @@
+import { parseDryStatus, type SidebarDryStatus } from "./quality-dry.js";
+
 export type QualityActivityPhase =
 	| "ready"
 	| "pending"
@@ -67,6 +69,8 @@ export interface QualityHeader extends QualityActivity, QualityReviewCounts {
 	sessionId: string;
 	modelId: string;
 	lsp?: QualityLspServer[];
+	dry?: SidebarDryStatus;
+	activeStage?: "lsp" | "dry" | "readability";
 }
 
 const MAX_REVIEW_REQUESTS_WITH_REPAIR = 6;
@@ -195,5 +199,24 @@ export function parseQualityHeader(value: unknown): QualityHeader | undefined {
 			lsp.push(server);
 		}
 	}
-	return { ...status, modelId, checkCount, rejectionCount, ...(lsp === undefined ? {} : { lsp }) };
+	const rawStatus = value as Record<string, unknown>;
+	const dry = rawStatus.dry === undefined ? undefined : parseDryStatus(rawStatus.dry);
+	if (rawStatus.dry !== undefined && !dry) {
+		return undefined;
+	}
+	const activeStage = rawStatus.activeStage;
+	if (activeStage !== undefined && !["lsp", "dry", "readability"].includes(String(activeStage))) {
+		return undefined;
+	}
+	const header: QualityHeader = { ...status, modelId, checkCount, rejectionCount };
+	if (lsp !== undefined) {
+		header.lsp = lsp;
+	}
+	if (dry !== undefined) {
+		header.dry = dry;
+	}
+	if (activeStage !== undefined) {
+		header.activeStage = activeStage as "lsp" | "dry" | "readability";
+	}
+	return header;
 }

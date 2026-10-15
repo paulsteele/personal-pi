@@ -160,8 +160,9 @@ it.each([28, 44])("shows all track counts at %s columns in every phase", (width)
 		});
 		const lines = renderActivityLines(snapshot, theme, width, 12, false, 100);
 		const lowerRail = lines.find((line) => line.startsWith("│ ╰"))!;
-		expect(lowerRail).toMatch(/󰚩 3 (?:· )?󰀄 2 (?:· )?󰅴 17 3✕/);
-		if (width === 44) expect(lowerRail).toContain("󰚩 3 · 󰀄 2 · 󰅴 17 3✕");
+		expect(lowerRail).toMatch(/─ 󰅴 17 3✕ ─/);
+		expect(lowerRail).not.toContain("󰚩");
+		expect(lowerRail).not.toContain("󰀄");
 		const coloredRail = renderActivityLines(snapshot, { ...theme, name: "dark" }, width, 12, true, 100).find(
 			(line) => line.includes("╰"),
 		)!;

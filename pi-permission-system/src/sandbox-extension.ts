@@ -84,8 +84,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
   registerPermissionEntryRenderers(pi);
   registerSandboxTools(pi, getSession);
   registerSandboxToolRequests(pi, getSession);
-  const agentDir = getAgentDir();
-  registerSandboxSettings(pi, agentDir, getSession);
+  let unregisterSettings: (() => void) | undefined;
 
   async function confirm(
     preview: string,
@@ -513,9 +512,12 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
   }
 
   pi.on("session_start", async (_event, ctx) => {
+    unregisterSettings ??= registerSandboxSettings(pi, getAgentDir(), getSession);
     await start(ctx);
   });
   pi.on("session_shutdown", async () => {
+    unregisterSettings?.();
+    unregisterSettings = undefined;
     await retire();
     publisher.dispose();
   });

@@ -80,7 +80,7 @@ it("uses the already resolved builder and names tools in cache summaries", async
 it("reuses all tooling artifacts across two different compatible project bases", async () => {
   const fixture = await provisioningFixture();
   const first = await provisionEnvironmentImage(fixture.options);
-  expect(fixture.build).toHaveBeenCalledTimes(10);
+  expect(fixture.build).toHaveBeenCalledTimes(11);
   fixture.build.mockClear();
   const second = await provisionEnvironmentImage({
     ...fixture.options,

@@ -183,6 +183,17 @@ it("bounds Sidebar measurement when the sandbox tab contains long mount details"
 	expect(component.render(44)).toHaveLength(viewportRows);
 });
 
+function isTabSelectorRow(line: string): boolean {
+	const content = line.replace(/^│\s*/, "").trim();
+	const tabIcons = new Set(Object.values(SIDEBAR_TAB_ICONS));
+	return (
+		content.length > 0 &&
+		content
+			.split(/\s+/)
+			.every((glyph) => tabIcons.has(glyph as (typeof SIDEBAR_TAB_ICONS)[keyof typeof SIDEBAR_TAB_ICONS]))
+	);
+}
+
 it.each([16, 44, 120])("clicks centered and wrapped tabs at %i fullscreen columns", (columns) => {
 	let tab: SidebarTab = "tools";
 	const snapshot = buildSidebarSnapshot({
@@ -224,7 +235,7 @@ it.each([16, 44, 120])("clicks centered and wrapped tabs at %i fullscreen column
 			for (const paddingColumnOffset of [-1, 2]) {
 				renderer.renderNow();
 				const lines = renderer.getScreenLines().map(stripTerminalSequences);
-				const row = lines.findIndex((line) => line.includes(icon));
+				const row = lines.findIndex((line) => isTabSelectorRow(line) && line.includes(icon));
 				expect(row).toBeGreaterThan(0);
 				const line = lines[row]!;
 				const iconColumn = visibleWidth(line.slice(0, line.indexOf(icon)));
@@ -239,11 +250,11 @@ it.each([16, 44, 120])("clicks centered and wrapped tabs at %i fullscreen column
 });
 
 it.each([
-	{ width: 28, expectedRows: ["󰋚    󰨸    󰄬    󰆧    󰒓"] },
-	{ width: 44, expectedRows: ["󰋚    󰨸    󰄬    󰆧    󰒓"] },
-	{ width: 16, expectedRows: ["󰋚    󰨸    󰄬", "󰆧    󰒓"] },
-	{ width: 17, expectedRows: ["󰋚    󰨸    󰄬", "󰆧    󰒓"] },
-	{ width: 21, expectedRows: ["󰋚    󰨸    󰄬    󰆧", "󰒓"] },
+	{ width: 28, expectedRows: ["󰋚    󰨸    󰄬    󰆧    󰅴", "󰒓"] },
+	{ width: 44, expectedRows: ["󰋚    󰨸    󰄬    󰆧    󰅴    󰒓"] },
+	{ width: 16, expectedRows: ["󰋚    󰨸    󰄬", "󰆧    󰅴    󰒓"] },
+	{ width: 17, expectedRows: ["󰋚    󰨸    󰄬", "󰆧    󰅴    󰒓"] },
+	{ width: 21, expectedRows: ["󰋚    󰨸    󰄬    󰆧", "󰅴    󰒓"] },
 ])("centers equal-width tab cells on every selector row at $width columns", ({ width, expectedRows }) => {
 	const snapshot = buildSidebarSnapshot({
 		state: createInertAtelierState(),
@@ -259,7 +270,7 @@ it.each([
 	const selectorLines = component
 		.render(width)
 		.map(stripTerminalSequences)
-		.filter((line) => Object.values(SIDEBAR_TAB_ICONS).some((icon) => line.includes(icon)))
+		.filter(isTabSelectorRow)
 		.map((line) => line.slice(2));
 	expect(selectorLines.map((line) => line.trim())).toEqual(expectedRows);
 	for (const line of selectorLines) {
@@ -291,7 +302,7 @@ it.each(Object.keys(SIDEBAR_TAB_ICONS) as SidebarTab[])(
 		const rows = component.render(44);
 		const selectorRow = rows.findIndex((row) => row.includes(SIDEBAR_TAB_ICONS.tools));
 		const selectorLine = rows[selectorRow]!;
-		expect(stripTerminalSequences(selectorLine).trim()).toBe("│           󰋚    󰨸    󰄬    󰆧    󰒓");
+		expect(stripTerminalSequences(selectorLine).trim()).toBe("│        󰋚    󰨸    󰄬    󰆧    󰅴    󰒓");
 		for (const [targetTab, icon] of Object.entries(SIDEBAR_TAB_ICONS)) {
 			const color = targetTab === tab ? "177;140;255" : "128;128;128";
 			expect(selectorLine).toContain(`\u001b[38;2;${color}m ${icon}  \u001b[39m`);

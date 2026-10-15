@@ -122,7 +122,7 @@ it("extends a fallback with private project settings without writing the fallbac
   const resolved = await resolveDefinition(fixture);
   expect(resolved.definition.remoteEnv).toEqual({ PROJECT: "private" });
   expect(resolved.definition.postCreateCommand).toEqual(["project-setup"]);
-  expect(resolved.layers?.tools).toHaveLength(9);
+  expect(resolved.layers?.tools).toHaveLength(10);
   expect((await readPrivateText(fixture.base))?.text).toBe('{"image":"node:24-bookworm"}');
 });
 

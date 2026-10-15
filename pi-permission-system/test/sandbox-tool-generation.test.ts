@@ -286,6 +286,30 @@ it.each(["project", "global"] as const)(
   },
 );
 
+it("installs a managed catalog tool without generating a recipe", async () => {
+  const fixture = await settingsInstallationFixture({ toolName: "jscpd" });
+  await addSandboxToolFromSettings(
+    fixture.ctx,
+    fixture.agentDir,
+    fixture.getSession,
+    "global",
+    fixture.signal,
+  );
+  expect(fixture.streamSimple).not.toHaveBeenCalled();
+  expect(fixture.install).toHaveBeenCalledExactlyOnceWith(
+    fixture.session,
+    expect.objectContaining({
+      tool: "jscpd",
+      version: "5.4.1",
+      executable: "/opt/pi-tools/jscpd/5.4.1/bin/jscpd",
+    }),
+    fixture.signal,
+    undefined,
+    undefined,
+    "global",
+  );
+});
+
 it("leaves files and the container untouched when tool name entry is discarded", async () => {
   const fixture = await settingsInstallationFixture({ toolName: "" });
   await addSandboxToolFromSettings(

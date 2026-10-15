@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.0 — 2026-10-15
+
+- Add container-backed jscpd/lexical DRY retrieval and an isolated finding-only judge using the existing quality model and shared correction/arbitration flow.
+- Capture and scan one background baseline per assistant turn, then query current edited snippets without rescanning. Drop obsolete selected counterparts with targeted reads instead of repeated whole-repository freshness walks; keep fresh judgments, stage-only waivers, and no persistent derived cache.
+- Add DRY Settings/status/fresh-scan controls and replayable tool/scan readiness metadata for Sidebar's Quality tab; remove cache-clear controls and reuse metrics.
+- Attach live elapsed timers and frozen completion durations to LSP, DRY, and readability transcript stages without per-tick model calls or session entries.
+
 ## 2.0.0 — 2026-10-12
 
 - Remove correction-scope requests, approval prompts, path allowlists, and associated notifications. Additional correction files join the current quality case through ordinary edits; exact user-approved proposals remain restricted to their approved files.

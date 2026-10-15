@@ -17,6 +17,7 @@ import { Check } from "typebox/value";
 import { canonicalPath, inside } from "./capture.js";
 import { digest, VerdictSchema } from "./proposal.js";
 import type { QualityCase } from "./case.js";
+import { DryAssessmentSchema } from "./dry-types.js";
 
 export const STATE_ENTRY = "code-quality:state:v1";
 export interface StateReference {
@@ -79,6 +80,14 @@ const CaseSchema = Type.Object({
 	lspRequired: Type.Optional(Type.Boolean()),
 	lspCapturePaths: Type.Optional(Type.Array(Text)),
 	lspUnavailable: OptionalText,
+	dry: Type.Optional(DryAssessmentSchema),
+	dryRequiredPaths: Type.Optional(Type.Array(Text)),
+	dryWaived: Type.Optional(Type.Boolean()),
+	dryUnavailable: OptionalText,
+	activeRejectionSource: Type.Optional(
+		Type.Union([Type.Literal("lsp"), Type.Literal("dry"), Type.Literal("readability")]),
+	),
+	responsePass: Type.Optional(Type.Object({ revision: Text, responseRound: Type.Boolean() })),
 	sizeWaivers: Type.Optional(Type.Array(Type.Object({ path: Text, reason: Text }))),
 	reason: OptionalText,
 	verdict: Type.Optional(
@@ -161,6 +170,11 @@ export class CaseStore {
 				...state.pendingPaths,
 				...(state.lspCapturePaths ?? []),
 				...(state.lsp?.paths ?? []),
+				...(state.dryRequiredPaths ?? []),
+				...(state.dry?.evidence.flatMap((evidencePair) => [
+					evidencePair.changed.file,
+					evidencePair.counterpart.file,
+				]) ?? []),
 			];
 			if (new Set(paths).size !== paths.length || allCasePaths.some((path) => !isAbsolute(path)))
 				throw new Error("Invalid quality case paths");

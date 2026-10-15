@@ -245,3 +245,53 @@ it("removes its own newly published file when session persistence fails", async 
   );
   expect(await readPrivateText(fixture.path)).toBeUndefined();
 });
+
+it("saves a managed catalog tool as its verified catalog entry instead of a recipe", async () => {
+  const fixture = await installationFixture();
+  const signal = new AbortController().signal;
+  const globalProfile = JSON.parse((await readPrivateText(fixture.globalPath))!.text);
+  delete globalProfile.tools.jscpd;
+  await writeFile(fixture.globalPath, JSON.stringify(globalProfile));
+  fixture.session.options.resolved.layers = await resolveEnvironmentLayers(
+    fixture.session.options.agentDir,
+    fixture.resolved.project,
+  );
+  fixture.rebuild.mockImplementation(async (_replacement, _signal, publication) => {
+    await publication!.commit();
+  });
+  const jscpdRecipe = {
+    id: "jscpd",
+    version: "v5.4.1",
+    executable: "/usr/local/bin/jscpd",
+    command: ["npm", "install", "--global", "jscpd@5.4.1"],
+    prerequisites: ["npm"],
+    environment: {},
+  };
+
+  const proposal = await planProfileToolInstallation(
+    fixture.session,
+    [jscpdRecipe],
+    signal,
+    "global",
+  );
+  await proposal!.apply(signal);
+
+  expect(JSON.parse((await readPrivateText(fixture.globalPath))!.text).tools.jscpd).toEqual({
+    kind: "catalog",
+    version: "5.4.1",
+  });
+});
+
+it("rejects a managed catalog tool at an unverified version", async () => {
+  const fixture = await installationFixture();
+  const unverifiedJscpd = { ...fixture.installation, id: "jscpd", version: "4.0.0" };
+
+  await expect(
+    planProfileToolInstallation(
+      fixture.session,
+      [unverifiedJscpd],
+      new AbortController().signal,
+      "global",
+    ),
+  ).rejects.toThrow("jscpd is a managed tool; request a verified catalog version: 5.4.1");
+});

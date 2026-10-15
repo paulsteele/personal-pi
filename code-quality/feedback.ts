@@ -1,11 +1,13 @@
 export const QUALITY_CHECK_ENTRY = "code-quality:checking";
 export const QUALITY_CHECK_UPDATE_ENTRY = "code-quality:check-update";
 
-export type QualityCheckSource = "lsp" | "readability";
+export type QualityCheckSource = "lsp" | "dry" | "readability";
 export type QualityCheckOutcome = "passed" | "failed" | "stale" | "interrupted";
 export interface QualityCheckStage {
 	source: QualityCheckSource;
 	outcome?: QualityCheckOutcome;
+	startedAtMs?: number;
+	elapsedMs?: number;
 }
 export interface QualityCheckData {
 	checkId: string;
@@ -14,7 +16,9 @@ export interface QualityCheckData {
 }
 
 export function qualityCheckLabel(stage: QualityCheckStage): string {
-	const label = `quality check: ${stage.source}`;
+	const elapsed =
+		stage.elapsedMs === undefined ? "" : ` · ${(Math.max(0, stage.elapsedMs) / 1000).toFixed(1)}s`;
+	const label = `quality check: ${stage.source}${elapsed}`;
 	switch (stage.outcome) {
 		case "passed":
 			return `${label} ✓`;

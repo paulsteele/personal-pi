@@ -5,6 +5,7 @@ import { Check } from "typebox/value";
 import { awaitSandboxWork } from "./cancellation.ts";
 import { resolveSandboxProject } from "./definition.ts";
 import { imageToolInstallationSchema } from "./image-tool-recipe.ts";
+import { STANDARD_TOOL_CATALOG } from "./tool-catalog.ts";
 import type { SandboxSession } from "./session.ts";
 import {
   requestSandboxTool,
@@ -100,6 +101,22 @@ export async function generateSandboxToolRecipe(
   return request;
 }
 
+function catalogToolRequest(description: string): SandboxToolRequest | undefined {
+  const [requestedId, requestedVersion] = description.split(/\s+/);
+  const managedTool = STANDARD_TOOL_CATALOG.find((tool) => tool.id === requestedId);
+  if (!managedTool) {
+    return undefined;
+  }
+  return {
+    tool: managedTool.id,
+    version: requestedVersion ?? managedTool.version,
+    command: ["true"],
+    executable: managedTool.executable,
+    prerequisites: [],
+    reason: `Add the verified ${managedTool.id} catalog tool.`,
+  };
+}
+
 type RecipeGenerationResult =
   | { status: "generated"; request: SandboxToolRequest }
   | { status: "failed"; error: unknown }
@@ -177,7 +194,9 @@ export async function addSandboxToolFromSettings(
     throw new Error("The settings project differs from the running sandbox; reload first");
   }
   const sessionRevision = session.revision;
-  const request = await generateWithProgress(ctx, session, description.trim(), signal);
+  const request =
+    catalogToolRequest(description.trim()) ??
+    (await generateWithProgress(ctx, session, description.trim(), signal));
   if (!request) {
     return;
   }

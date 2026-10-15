@@ -49,6 +49,7 @@ const QUALITY_DECISION_NOTICES = {
 	waiver: { subtitle: "Quality waiver needs confirmation", body: "Confirm or decline waiving the pending quality gate." },
 	lsp_setup: { subtitle: "Language server setup needs attention", body: "Configure, validate, or approve a language server installation." },
 	lsp_failure: { subtitle: "Language server needs attention", body: "Retry, reconfigure, or explicitly waive the pending LSP check." },
+	dry_failure: { subtitle: "DRY check needs attention", body: "Restore scanner/cache readiness, retry, or waive DRY for this case." },
 } satisfies Record<string, AskUserNotification>;
 
 type QualityDecisionKind = keyof typeof QUALITY_DECISION_NOTICES;

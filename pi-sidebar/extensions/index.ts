@@ -532,7 +532,10 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 			} else if (action === "off") {
 				current.sidebar.hide();
 			} else {
-				ctx.ui.notify("Usage: /sidebar [on|off|toggle|logs|tools|summary|tasks|sandbox|settings]", "warning");
+				ctx.ui.notify(
+					"Usage: /sidebar [on|off|toggle|logs|tools|summary|tasks|sandbox|quality|settings]",
+					"warning",
+				);
 			}
 		},
 	});

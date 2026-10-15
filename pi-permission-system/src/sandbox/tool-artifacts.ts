@@ -1,6 +1,6 @@
 import { catalogTool, catalogToolPrefix, type CatalogTool } from "./tool-catalog.ts";
 import { shellQuote } from "./image-tool-recipe.ts";
-import { toolRuntimeDownload, type PinnedDownload } from "./tool-downloads.ts";
+import { jscpdDownload, toolRuntimeDownload, type PinnedDownload } from "./tool-downloads.ts";
 import {
   dotnetRuntimeIdentifier,
   rustDistributionTarget,
@@ -272,6 +272,30 @@ function serverInstallCommands(tool: CatalogTool, platform: ToolPlatform): strin
   ];
 }
 
+function qualityToolInstallCommands(tool: CatalogTool, platform: ToolPlatform): string[] {
+  if (tool.id !== "jscpd") {
+    throw new Error(`No verified quality-tool recipe for ${tool.id}`);
+  }
+  return [
+    ...downloadCommands(jscpdDownload(platform), "/tmp/jscpd.tar.gz"),
+    "mkdir -p /tmp/jscpd-release",
+    "tar -xzf /tmp/jscpd.tar.gz -C /tmp/jscpd-release",
+    `mkdir -p ${shellQuote(`${catalogToolPrefix(tool)}/bin`)}`,
+    `install -m 755 /tmp/jscpd-release/jscpd ${shellQuote(tool.executable)}`,
+    `${shellQuote(tool.executable)} --version | grep -F ${shellQuote(tool.version)}`,
+  ];
+}
+
+function catalogInstallCommands(tool: CatalogTool, platform: ToolPlatform): string[] {
+  if (tool.role === "runtime") {
+    return runtimeInstallCommands(tool, platform);
+  }
+  if (tool.role === "quality-tool") {
+    return qualityToolInstallCommands(tool, platform);
+  }
+  return serverInstallCommands(tool, platform);
+}
+
 export function toolArtifactRecipe(options: {
   tool: CatalogTool;
   platform: ToolPlatform;
@@ -292,10 +316,7 @@ export function toolArtifactRecipe(options: {
       copy: `COPY --from=dependency_${index} ${prefix}/ ${prefix}/`,
     };
   });
-  const commands =
-    tool.role === "runtime"
-      ? runtimeInstallCommands(tool, options.platform)
-      : serverInstallCommands(tool, options.platform);
+  const commands = catalogInstallCommands(tool, options.platform);
   const prefix = catalogToolPrefix(tool);
   return {
     containerfile: [

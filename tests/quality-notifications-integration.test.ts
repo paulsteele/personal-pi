@@ -15,7 +15,7 @@ test("a pending quality failure reaches the notification consumer and cancellati
 	const cwd = join(root, "repo");
 	mkdirSync(cwd);
 	const agentDir = join(root, "agent");
-	saveConfig(agentDir, { provider: "fixture", model: "reviewer" });
+	saveConfig(agentDir, { provider: "fixture", model: "reviewer", dryEnabled: false });
 	const tracker = createQualityAttentionTracker("session");
 	const notices: unknown[] = [];
 	const activity = createQualityActivityPublisher({
