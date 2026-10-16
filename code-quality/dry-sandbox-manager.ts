@@ -5,7 +5,15 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ProjectLocation } from "@paulsteele/pi-project-locations";
 import { CoverageError, type SnapshotFile } from "./capture.js";
 import type { QualityConfig } from "./config.js";
-import { DEFAULT_DRY_PROFILE, loadDryProfile, resolveDryProject, type DryProfile } from "./dry-profile.js";
+import { parseCorpusError } from "./dry-corpus.mjs";
+import { corpusErrorMessage, suspectWarning } from "./dry-messages.js";
+import {
+	DEFAULT_DRY_PROFILE,
+	dryProfilePath,
+	loadDryProfile,
+	resolveDryProject,
+	type DryProfile,
+} from "./dry-profile.js";
 import { buildDryEvidence, retrieveDryCandidates, rangesOverlap } from "./dry-retrieval.js";
 import {
 	emptyDryStatus,
@@ -73,6 +81,8 @@ export class SandboxDryManager {
 	private turnBaselineVersion = 0;
 	private serverOperation?: Promise<unknown>;
 	private serverAbort?: AbortController;
+	private serverExited = false;
+	private serverConfigRevision = "";
 	private config?: QualityConfig;
 	private authorizedPaths: string[] = [];
 	constructor(
@@ -146,7 +156,15 @@ export class SandboxDryManager {
 			this.executable = tool.executable;
 			this.node = node.executable;
 			await sandbox.session.filesystem.mkdir(this.directory, this.lifetime.signal);
-			for (const name of ["dry-worker.mjs", "dry-mcp.mjs", "source-disclosure.mjs", "dry-lexical.mjs"]) {
+			const guestModules = [
+				"dry-worker.mjs",
+				"dry-mcp.mjs",
+				"dry-corpus.mjs",
+				"dry-suspects.mjs",
+				"source-disclosure.mjs",
+				"dry-lexical.mjs",
+			];
+			for (const name of guestModules) {
 				await sandbox.session.filesystem.write(
 					join(this.directory, name),
 					await readFile(new URL(name, import.meta.url)),
@@ -227,22 +245,124 @@ export class SandboxDryManager {
 		}
 		return JSON.parse(result.output.toString("utf8")) as T;
 	}
+	/** Brings the session baseline up to date, updating the running server in place when possible. */
 	beginTurn(signal: AbortSignal): Promise<void> {
+		return this.scheduleBaseline(signal, "incremental");
+	}
+	/** Discards the session baseline and rebuilds it from scratch. */
+	async refresh(signal: AbortSignal): Promise<void> {
+		await this.scheduleBaseline(signal, "rebuild");
+	}
+	private scheduleBaseline(signal: AbortSignal, mode: "incremental" | "rebuild"): Promise<void> {
 		this.turnBaselineVersion++;
 		const previous = this.baselineOperation;
 		const operation = (async () => {
 			await previous?.catch(() => {});
-			await this.retireServer();
 			this.lifetime.signal.throwIfAborted();
 			signal.throwIfAborted();
+			if (mode === "incremental" && (await this.serverReusable(signal))) {
+				try {
+					await this.updateBaseline(signal);
+					return;
+				} catch (error) {
+					if (signal.aborted || this.lifetime.signal.aborted) {
+						throw error;
+					}
+				}
+			}
+			await this.retireServer();
 			await this.buildBaseline(signal);
 		})();
 		this.baselineOperation = operation;
 		operation.catch(() => {});
 		return operation;
 	}
-	async refresh(signal: AbortSignal): Promise<void> {
-		await this.beginTurn(signal);
+	private async serverReusable(signal: AbortSignal): Promise<boolean> {
+		const serverRunning = this.serverOperation !== undefined && !this.serverExited;
+		return (
+			serverRunning &&
+			this.manifest !== undefined &&
+			this.serverConfigRevision === this.configRevision &&
+			(await this.current(signal))
+		);
+	}
+	private async updateBaseline(signal: AbortSignal): Promise<void> {
+		const update = await this.request<{ revision: string; changed: string[]; removed: string[] }>(
+			"update",
+			{},
+			signal,
+		);
+		if (update.revision === this.manifest?.revision) {
+			this.publish({ lastScanAt: Date.now() });
+			return;
+		}
+		const manifest = await this.exportManifest(signal);
+		const report = await this.exportReport(signal);
+		if (report.manifestRevision !== manifest.revision || manifest.revision !== update.revision) {
+			throw new Error("DRY report does not match the updated manifest");
+		}
+		const restaged = await this.exportIndex(signal, update.changed);
+		const filesByPath = new Map(this.files.map((file) => [file.path, file]));
+		for (const path of update.removed) {
+			filesByPath.delete(path);
+		}
+		for (const file of restaged) {
+			filesByPath.set(file.path, file);
+		}
+		const files = manifest.files.map((entry) => filesByPath.get(entry.path));
+		if (files.some((file, index) => file?.hash !== manifest.files[index]!.hash)) {
+			throw new Error("DRY lexical index does not match the updated manifest");
+		}
+		signal.throwIfAborted();
+		this.acceptBaseline(manifest, report, files as DryIndexedFile[]);
+	}
+	private async exportManifest(signal: AbortSignal): Promise<DryManifest> {
+		const manifest = await this.request<DryManifest>("manifest", {}, signal);
+		if (!isManifest(manifest)) {
+			throw new Error("Invalid DRY manifest");
+		}
+		return manifest;
+	}
+	/** Pages lexical index files out of the guest, limited to `paths` when given. */
+	private async exportIndex(signal: AbortSignal, paths?: string[]): Promise<DryIndexedFile[]> {
+		const files: DryIndexedFile[] = [];
+		if (paths?.length === 0) {
+			return files;
+		}
+		let offset: number | null = 0;
+		while (offset !== null) {
+			const page: { files: DryIndexedFile[]; next: number | null } = await this.request(
+				"index",
+				{ offset, ...(paths ? { paths } : {}) },
+				signal,
+			);
+			for (const file of page.files) {
+				if (!isIndexedFile(file)) {
+					throw new Error("Invalid DRY lexical file");
+				}
+				files.push(file);
+			}
+			offset = page.next;
+		}
+		return files;
+	}
+	private acceptBaseline(manifest: DryManifest, report: DryReport, files: DryIndexedFile[]): void {
+		this.manifest = manifest;
+		this.report = report;
+		this.files = files;
+		this.publish({
+			scanPhase: "ready",
+			warning: this.project && suspectWarning(manifest.suspects, dryProfilePath(this.agentDir, this.project)),
+			revision: manifest.revision,
+			files: files.length,
+			windows: files.reduce((count, file) => count + file.windows.length, 0),
+			bytes: manifest.bytes,
+			excluded: manifest.excluded.length,
+			cloneCounts: report.cloneCounts,
+			formats: report.formats.slice(0, 32),
+			scanDurationMs: report.scanDurationMs,
+			lastScanAt: Date.now(),
+		});
 	}
 	private async buildBaseline(signal: AbortSignal): Promise<void> {
 		if (!this.sandbox || this.status.toolPhase !== "ready") {
@@ -252,11 +372,20 @@ export class SandboxDryManager {
 		this.report = undefined;
 		this.files = [];
 		this.authorizedPaths = [];
-		this.publish({ scanPhase: "scanning", reason: undefined });
+		this.publish({ scanPhase: "scanning", reason: undefined, warning: undefined });
 		const serverAbort = new AbortController();
 		this.serverAbort = serverAbort;
-		this.serverOperation = this.request("serve", {}, AbortSignal.any([serverAbort.signal, signal]));
-		this.serverOperation.catch(() => {});
+		this.serverExited = false;
+		this.serverConfigRevision = this.configRevision;
+		const serverOperation = this.request("serve", {}, serverAbort.signal);
+		this.serverOperation = serverOperation;
+		void serverOperation
+			.catch(() => {})
+			.finally(() => {
+				if (this.serverOperation === serverOperation) {
+					this.serverExited = true;
+				}
+			});
 		try {
 			await Promise.race([
 				this.request("baseline", {}, signal),
@@ -264,57 +393,29 @@ export class SandboxDryManager {
 					throw new Error("DRY baseline server exited before readiness");
 				}),
 			]);
-			const manifest = await this.request<DryManifest>("manifest", {}, signal);
-			if (!isManifest(manifest)) {
-				throw new Error("Invalid DRY manifest");
-			}
+			const manifest = await this.exportManifest(signal);
 			const report = await this.exportReport(signal);
 			if (report.manifestRevision !== manifest.revision) {
 				throw new Error("DRY report does not match the baseline manifest");
 			}
-			const files: DryIndexedFile[] = [];
-			let offset: number | null = 0;
-			while (offset !== null) {
-				const page: { files: DryIndexedFile[]; next: number | null } = await this.request(
-					"index",
-					{ offset },
-					signal,
-				);
-				for (const file of page.files) {
-					if (!isIndexedFile(file)) {
-						throw new Error("Invalid DRY lexical file");
-					}
-					files.push(file);
-				}
-				offset = page.next;
-			}
+			const files = await this.exportIndex(signal);
 			signal.throwIfAborted();
-			this.manifest = manifest;
-			this.report = report;
-			this.files = files;
-			const limited =
-				manifest.truncated ||
-				manifest.excluded.some((entry) => !entry.reason.includes("document")) ||
-				manifest.files.some((file) => file.suppressed);
-			this.publish({
-				scanPhase: limited ? "limited" : "ready",
-				revision: manifest.revision,
-				files: files.length,
-				windows: files.reduce((count, file) => count + file.windows.length, 0),
-				bytes: manifest.bytes,
-				excluded: manifest.excluded.length,
-				cloneCounts: report.cloneCounts,
-				formats: report.formats.slice(0, 32),
-				scanDurationMs: report.scanDurationMs,
-				lastScanAt: Date.now(),
-			});
+			this.acceptBaseline(manifest, report, files);
 		} catch (error) {
 			serverAbort.abort();
+			const failure = this.describeBaselineFailure(error);
 			if (!this.lifetime.signal.aborted) {
-				this.publish({ scanPhase: "unavailable", reason: String(error) });
+				this.publish({ scanPhase: "unavailable", reason: failure.message });
 			}
-			throw error;
+			throw failure;
 		}
+	}
+	private describeBaselineFailure(error: unknown): Error {
+		const corpusError = parseCorpusError(String(error));
+		if (!corpusError || !this.project) {
+			return error instanceof Error ? error : new Error(String(error));
+		}
+		return new Error(corpusErrorMessage(corpusError, dryProfilePath(this.agentDir, this.project)));
 	}
 	private async exportReport(signal: AbortSignal): Promise<DryReport> {
 		const chunks: Buffer[] = [];

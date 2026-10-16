@@ -26,6 +26,7 @@ export const DryProfileSchema = Type.Object(
 		entryLimit: Type.Integer({ minimum: 100, maximum: 100000 }),
 		maxSourceBytes: Type.Integer({ minimum: 1024, maximum: 536870912 }),
 		exclude: Type.Array(Type.String({ minLength: 1, maxLength: 240 }), { maxItems: 64 }),
+		include: Type.Array(Type.String({ minLength: 1, maxLength: 240 }), { maxItems: 64 }),
 		formats: Type.Record(
 			Type.String({ pattern: "^[a-zA-Z0-9_-]+$" }),
 			Type.Array(Type.String({ pattern: "^\\.[a-zA-Z0-9]+$" }), { maxItems: 20 }),
@@ -47,13 +48,14 @@ export const DEFAULT_DRY_PROFILE: DryProfile = {
 	entryLimit: 50000,
 	maxSourceBytes: 128 * 1024 * 1024,
 	exclude: [],
+	include: [],
 	formats: {},
 };
 export function parseDryProfile(value: unknown): DryProfile {
 	let profile = value;
 	if (value && typeof value === "object" && !Array.isArray(value)) {
 		const { maxCacheBytes: _retiredCacheBudget, ...settings } = value as Record<string, unknown>;
-		profile = settings;
+		profile = { include: [], ...settings };
 	}
 	if (!Check(DryProfileSchema, profile)) {
 		throw new Error("Invalid DRY retrieval profile");

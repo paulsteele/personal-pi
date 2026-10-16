@@ -91,6 +91,15 @@ it("loads existing profiles without retaining their retired cache budget", () =>
 	expect(profile).not.toHaveProperty("maxCacheBytes");
 	expect(() => parseDryProfile({ ...DEFAULT_DRY_PROFILE, unknownSetting: true })).toThrow("profile");
 });
+it("defaults a missing include list while keeping a saved source byte cap", () => {
+	const { include: _include, ...legacyProfile } = {
+		...DEFAULT_DRY_PROFILE,
+		maxSourceBytes: 64 * 1024 * 1024,
+	};
+	const profile = parseDryProfile(legacyProfile);
+	expect(profile.include).toEqual([]);
+	expect(profile.maxSourceBytes).toBe(64 * 1024 * 1024);
+});
 it("restores both legacy cases and finding-only DRY evidence", () => {
 	const directory = mkdtempSync(join(tmpdir(), "dry-case-contract-"));
 	directories.push(directory);

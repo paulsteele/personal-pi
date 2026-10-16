@@ -1,5 +1,6 @@
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
+import type { DrySuspectDirectory } from "./dry-suspects.mjs";
 
 const text = (maxLength: number) => Type.String({ minLength: 1, maxLength });
 const hash = Type.String({ pattern: "^[a-f0-9]{64}$" });
@@ -165,6 +166,7 @@ export interface DryManifest {
 	excluded: Array<{ path: string; reason: string }>;
 	truncated: boolean;
 	bytes: number;
+	suspects: DrySuspectDirectory[];
 }
 export interface DryReport {
 	version: 1;
@@ -175,7 +177,7 @@ export interface DryReport {
 	scanDurationMs: number;
 }
 export type DryToolPhase = "unavailable" | "validating" | "ready" | "off";
-export type DryScanPhase = "idle" | "scanning" | "ready" | "limited" | "unavailable" | "off";
+export type DryScanPhase = "idle" | "scanning" | "ready" | "unavailable" | "off";
 export interface DryStatus {
 	toolPhase: DryToolPhase;
 	scanPhase: DryScanPhase;
@@ -202,7 +204,10 @@ export interface DryStatus {
 		inputTokens: number;
 		outputTokens: number;
 	};
+	/** Why the scan is unavailable. */
 	reason?: string;
+	/** Advice about a ready scan, such as directories that look vendored or generated. */
+	warning?: string;
 }
 export function emptyDryStatus(): DryStatus {
 	return {

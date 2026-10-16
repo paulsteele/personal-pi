@@ -3,8 +3,13 @@ const path = require("node:path");
 const readline = require("node:readline");
 
 const sourceDirectory = process.argv.at(-1);
-const baselineCode = fs.readFileSync(path.join(sourceDirectory, "existing.ts"), "utf8");
+let baselineCode = fs.readFileSync(path.join(sourceDirectory, "existing.ts"), "utf8");
 fs.appendFileSync(path.join(sourceDirectory, "..", "launches"), "scan\n");
+function rescan() {
+	baselineCode = fs.readFileSync(path.join(sourceDirectory, "existing.ts"), "utf8");
+	fs.appendFileSync(path.join(sourceDirectory, "..", "launches"), "rescan\n");
+	return { structuredContent: { files: 1, byKind: {}, duplications: [] } };
+}
 
 function snippetResponse(code) {
 	if (!code.includes("retentionDays")) {
@@ -34,6 +39,9 @@ function respond(rpcRequest) {
 				statistics: { total: { sources: 1 }, formats: { typescript: { sources: 1 } } },
 			},
 		};
+	}
+	if (rpcRequest.params.name === "check_current_directory") {
+		return rescan();
 	}
 	if (rpcRequest.params.name === "check_duplication") {
 		return snippetResponse(rpcRequest.params.arguments.code);

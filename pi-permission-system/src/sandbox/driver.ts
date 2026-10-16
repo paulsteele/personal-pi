@@ -219,8 +219,10 @@ export async function createDevcontainer(options: {
       definition.remoteUser ?? definition.containerUser ?? "root",
     ],
   };
+  const fingerprintResolvedBuildContext = (buildContext: string) =>
+    fingerprintBuildContext(buildContext, options.signal, options.resolved.containerfile);
   const contextFingerprint = options.resolved.buildContext
-    ? await fingerprintBuildContext(options.resolved.buildContext, options.signal)
+    ? await fingerprintResolvedBuildContext(options.resolved.buildContext)
     : undefined;
   if (options.resolved.containerfile) {
     const containerfileText = (await readPrivateText(options.resolved.containerfile))?.text ?? "";
@@ -285,7 +287,7 @@ export async function createDevcontainer(options: {
       authority.users = [...new Set([...authority.users, details.Config.User || "root"])];
       if (
         options.resolved.buildContext &&
-        (await fingerprintBuildContext(options.resolved.buildContext, options.signal)) !==
+        (await fingerprintResolvedBuildContext(options.resolved.buildContext)) !==
           contextFingerprint
       ) {
         throw new Error("Build context changed during environment creation");

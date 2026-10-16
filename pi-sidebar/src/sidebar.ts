@@ -123,12 +123,14 @@ export function buildSidebarSnapshot(input: SidebarSnapshotInput): SidebarSnapsh
 	};
 }
 
-const sanitize = (text: string): string =>
+/** Strips terminal escapes and control characters while keeping the line's own spacing. */
+const sanitizeLine = (text: string): string =>
 	text
 		.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
 		.replace(/[\u0000-\u001f\u007f]/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
+		.trimEnd();
+
+const sanitize = (text: string): string => sanitizeLine(text).replace(/\s+/g, " ").trim();
 
 const display = (value: string | undefined): string => {
 	const safe = value === undefined ? "" : sanitize(value);
@@ -763,6 +765,13 @@ function activityBandRows(
 	return rows;
 }
 
+/** Keeps the message's own line breaks so aligned directory lists stay readable. */
+function attentionRows(message: string, width: number, palette: AtelierPalette): string[] {
+	return message
+		.split("\n")
+		.flatMap((line) => wrapTextWithAnsi(palette.paint("warning", sanitizeLine(line)), width));
+}
+
 export function renderQualityContent(
 	quality: QualityHeader | undefined,
 	theme: ThemeLike,
@@ -827,7 +836,7 @@ export function renderQualityContent(
 			palette,
 		),
 		...sidebarDetail("Size", `${Math.round(dry.bytes / 1024)} KiB`, width, palette),
-		...sidebarDetail("Checking", "Current snippets against turn-start baseline", width, palette),
+		...sidebarDetail("Checking", "Current snippets against session baseline", width, palette),
 	];
 	rows.push("", sidebarSectionHeading("JSCPD", width, palette), "");
 	rows.push(...jscpdDetails);
@@ -854,13 +863,12 @@ export function renderQualityContent(
 			),
 		);
 	}
-	if (dry.reason) {
-		rows.push(
-			"",
-			sidebarSectionHeading("ATTENTION", width, palette),
-			"",
-			...wrapTextWithAnsi(palette.paint("warning", sanitize(dry.reason)), width),
-		);
+	const attention = [dry.reason, dry.warning].filter((message) => message !== undefined);
+	if (attention.length) {
+		rows.push("", sidebarSectionHeading("ATTENTION", width, palette), "");
+		for (const message of attention) {
+			rows.push(...attentionRows(message, width, palette));
+		}
 	}
 	return rows.map((row) => truncateToWidth(row, width, ""));
 }

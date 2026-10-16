@@ -7,6 +7,8 @@ import { pathToFileURL } from "node:url";
 import { containsSecrets, sensitivePath } from "./source-disclosure.mjs";
 import { lexicalWindows } from "./dry-lexical.mjs";
 import { serveBaseline, queryBaseline } from "./dry-mcp.mjs";
+import { corpusError, largestDirectories } from "./dry-corpus.mjs";
+import { suspectDirectories } from "./dry-suspects.mjs";
 
 export const WORKER_VERSION = 1;
 export const hash = (value) => createHash("sha256").update(value).digest("hex");
@@ -113,9 +115,16 @@ function safeRelative(path) {
 		!path.split("/").some((part) => part === ".." || part === "")
 	);
 }
-export async function run(command, args, cwd, timeoutMs = 60000) {
+export async function run(command, args, cwd, timeoutMs = 60000, input = undefined) {
 	return new Promise((resolveResult, reject) => {
-		const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn(command, args, {
+			cwd,
+			stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+		});
+		if (input !== undefined) {
+			child.stdin.on("error", () => {});
+			child.stdin.end(input);
+		}
 		let output = "";
 		let stderr = "";
 		let exceeded = false;
@@ -208,7 +217,35 @@ function pathExcluded(path, options) {
 	}
 	return undefined;
 }
-async function discover(root, limit) {
+function normalizedExcludes(profile) {
+	return profile.exclude.map((pattern) => pattern.replace(/\/+$/, "")).filter(Boolean);
+}
+/**
+ * Lists the paths that cover everything outside the excluded prefixes, so Git never walks
+ * excluded trees while collecting untracked files. `:(exclude)` pathspecs do not prune that walk.
+ */
+export async function walkPathspecs(root, excludes, directory = "") {
+	const pathspecs = [];
+	for (const entry of await readdir(join(root, directory), { withFileTypes: true })) {
+		const path = directory ? `${directory}/${entry.name}` : entry.name;
+		if (path === ".git" || excludes.includes(path)) {
+			continue;
+		}
+		const containsExcludedPath = excludes.some((exclude) => exclude.startsWith(`${path}/`));
+		if (containsExcludedPath && entry.isDirectory()) {
+			pathspecs.push(...(await walkPathspecs(root, excludes, path)));
+		} else {
+			pathspecs.push(`:(literal)${path}`);
+		}
+	}
+	return pathspecs;
+}
+async function discover(root, limit, profile, timeoutMs) {
+	const excludes = normalizedExcludes(profile);
+	const pathspecs = excludes.length ? await walkPathspecs(root, excludes) : [];
+	if (excludes.length && !pathspecs.length) {
+		return { paths: [], truncated: false };
+	}
 	let git;
 	try {
 		git = await run(
@@ -222,9 +259,11 @@ async function discover(root, limit) {
 				"--others",
 				"--exclude-standard",
 				"-z",
+				"--",
+				...pathspecs,
 			],
 			root,
-			10000,
+			timeoutMs,
 		);
 	} catch (error) {
 		if (error.code !== "ENOENT") {
@@ -234,7 +273,7 @@ async function discover(root, limit) {
 	}
 	if (git.code === 0) {
 		const paths = [...new Set(git.output.split("\0").filter(Boolean))].sort();
-		return { paths: paths.slice(0, limit), truncated: paths.length > limit };
+		return { paths, truncated: paths.length > limit };
 	}
 	const paths = [];
 	const directories = [root];
@@ -250,7 +289,8 @@ async function discover(root, limit) {
 				continue;
 			}
 			const full = join(directory, entry.name);
-			if (entry.isDirectory() && !DEPENDENCY_DIRECTORIES.has(entry.name)) {
+			const excluded = excludes.includes(relative(root, full));
+			if (entry.isDirectory() && !DEPENDENCY_DIRECTORIES.has(entry.name) && !excluded) {
 				directories.push(full);
 			} else if (entry.isFile()) {
 				paths.push(relative(root, full));
@@ -258,6 +298,43 @@ async function discover(root, limit) {
 		}
 	}
 	return { paths: paths.sort(), truncated: false };
+}
+const LINGUIST_ATTRIBUTES = ["linguist-vendored", "linguist-generated"];
+function isAttributeSet(value) {
+	return value === "set" || value === "true";
+}
+/** Reads `.gitattributes` linguist markings; repositories without Git report none. */
+async function linguistAttributes(root, paths, timeoutMs) {
+	const linguistAttributeByPath = new Map();
+	if (!paths.length) {
+		return linguistAttributeByPath;
+	}
+	let git;
+	try {
+		git = await run(
+			"git",
+			["--no-optional-locks", "check-attr", "-z", "--stdin", ...LINGUIST_ATTRIBUTES],
+			root,
+			timeoutMs,
+			`${paths.join("\0")}\0`,
+		);
+	} catch (error) {
+		if (error.code === "ENOENT") {
+			return linguistAttributeByPath;
+		}
+		throw error;
+	}
+	if (git.code !== 0) {
+		return linguistAttributeByPath;
+	}
+	const fields = git.output.split("\0");
+	for (let index = 0; index + 2 < fields.length; index += 3) {
+		const [path, attribute, value] = fields.slice(index, index + 3);
+		if (isAttributeSet(value)) {
+			linguistAttributeByPath.set(path, attribute.replace(/^linguist-/, ""));
+		}
+	}
+	return linguistAttributeByPath;
 }
 async function privateJson(path, value) {
 	await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -269,11 +346,55 @@ async function stageSource(options, indexed, bytes, windows) {
 	await writeFile(staged, bytes, { mode: 0o600 });
 	await privateJson(join(options.directory, "index", `${indexed.path}.json`), { ...indexed, windows });
 }
+const STAGED_ARTIFACTS = ["sources", "index", "manifest.json", "capture-state.json", "report.json"];
+function fileStat(metadata) {
+	return { size: metadata.size, mtimeMs: metadata.mtimeMs };
+}
+function unchangedSince(recordedStat, metadata) {
+	return (
+		recordedStat !== undefined &&
+		metadata.isFile() &&
+		recordedStat.size === metadata.size &&
+		recordedStat.mtimeMs === metadata.mtimeMs
+	);
+}
+function sameMembers(left, right) {
+	return left.length === right.length && left.every((value) => right.includes(value));
+}
+async function previousCapture(directory) {
+	const manifest = JSON.parse(await readFile(join(directory, "manifest.json"), "utf8"));
+	const state = JSON.parse(await readFile(join(directory, "capture-state.json"), "utf8"));
+	return {
+		manifest,
+		filesByPath: new Map(manifest.files.map((file) => [file.path, file])),
+		fileStats: state.fileStats,
+		linguistAttributeByPath: new Map(Object.entries(state.linguistAttributes)),
+	};
+}
+/** Rebuilds the staged corpus from scratch. */
 export async function capture(options, extractWindows = lexicalWindows) {
-	const root = await realpath(options.root);
-	const discovered = await discover(root, options.profile.entryLimit);
-	for (const name of ["sources", "index", "manifest.json", "report.json"]) {
+	for (const name of STAGED_ARTIFACTS) {
 		await rm(join(options.directory, name), { recursive: true, force: true });
+	}
+	return (await stageCorpus(options, extractWindows, undefined)).manifest;
+}
+/**
+ * Restages only files whose size or modification time changed since the previous capture and
+ * removes staged files that left the corpus.
+ */
+export async function updateCapture(options, extractWindows = lexicalWindows) {
+	return stageCorpus(options, extractWindows, await previousCapture(options.directory));
+}
+async function stageCorpus(options, extractWindows, previous) {
+	const root = await realpath(options.root);
+	const discovered = await discover(root, options.profile.entryLimit, options.profile, options.timeoutMs);
+	if (discovered.truncated) {
+		const discoveredFilesByPath = new Map(discovered.paths.map((path) => [path, 1]));
+		throw corpusError({
+			kind: "discovery_truncated",
+			limit: options.profile.entryLimit,
+			...largestDirectories(discoveredFilesByPath, options.profile.entryLimit),
+		});
 	}
 	const manifest = {
 		version: 1,
@@ -282,7 +403,12 @@ export async function capture(options, extractWindows = lexicalWindows) {
 		excluded: [],
 		truncated: discovered.truncated,
 		bytes: 0,
+		suspects: [],
 	};
+	const corpusBytesByPath = new Map();
+	const fileStats = {};
+	const changed = [];
+	let corpusOverflowed = false;
 	for (const path of discovered.paths) {
 		const exclusion = pathExcluded(path, options);
 		if (exclusion) {
@@ -300,11 +426,21 @@ export async function capture(options, extractWindows = lexicalWindows) {
 				throw new Error("Unsafe DRY discovery path");
 			}
 			const metadata = await lstat(join(root, path));
-			if (
-				metadata.size > options.maxFileBytes ||
-				manifest.bytes + metadata.size > options.profile.maxSourceBytes
-			) {
+			if (metadata.size > options.maxFileBytes) {
 				manifest.excluded.push({ path, reason: "size limit" });
+				continue;
+			}
+			corpusOverflowed ||= manifest.bytes + metadata.size > options.profile.maxSourceBytes;
+			if (corpusOverflowed) {
+				corpusBytesByPath.set(path, metadata.size);
+				continue;
+			}
+			const stagedFile = previous?.filesByPath.get(path);
+			if (stagedFile && unchangedSince(previous.fileStats[path], metadata)) {
+				manifest.files.push(stagedFile);
+				manifest.bytes += stagedFile.bytes;
+				corpusBytesByPath.set(path, stagedFile.bytes);
+				fileStats[path] = fileStat(metadata);
 				continue;
 			}
 			source = await readSource(root, path);
@@ -316,6 +452,7 @@ export async function capture(options, extractWindows = lexicalWindows) {
 			continue;
 		}
 		const { bytes } = source;
+		fileStats[path] = fileStat(source.metadata);
 		const text = bytes.toString("utf8");
 		const binary = bytes.includes(0) || !Buffer.from(text).equals(bytes);
 		const oversized =
@@ -338,13 +475,44 @@ export async function capture(options, extractWindows = lexicalWindows) {
 		};
 		manifest.files.push(indexed);
 		manifest.bytes += bytes.length;
+		corpusBytesByPath.set(path, bytes.length);
+		if (previous?.filesByPath.get(path)?.hash !== sourceHash) {
+			changed.push(path);
+		}
 		await stageSource(options, indexed, bytes, extractWindows(text));
 	}
+	if (corpusOverflowed) {
+		throw corpusError({
+			kind: "corpus_too_large",
+			limit: options.profile.maxSourceBytes,
+			...largestDirectories(corpusBytesByPath, options.profile.maxSourceBytes),
+		});
+	}
+	const stagedPaths = manifest.files.map((file) => file.path);
+	const removed = [...(previous?.filesByPath.keys() ?? [])].filter((path) => !stagedPaths.includes(path));
+	for (const path of removed) {
+		await rm(join(options.directory, "sources", path), { force: true });
+		await rm(join(options.directory, "index", `${path}.json`), { force: true });
+	}
+	const stagedPathsUnchanged = previous && sameMembers(stagedPaths, [...previous.filesByPath.keys()]);
+	const linguistAttributeByPath = stagedPathsUnchanged
+		? previous.linguistAttributeByPath
+		: await linguistAttributes(root, stagedPaths, options.timeoutMs);
+	manifest.suspects = suspectDirectories(
+		discovered.paths,
+		corpusBytesByPath,
+		linguistAttributeByPath,
+		options.profile,
+	);
 	manifest.revision = hash(
 		JSON.stringify([manifest.files, manifest.excluded, manifest.truncated, options.profile, WORKER_VERSION]),
 	);
 	await privateJson(join(options.directory, "manifest.json"), manifest);
-	return manifest;
+	await privateJson(join(options.directory, "capture-state.json"), {
+		fileStats,
+		linguistAttributes: Object.fromEntries(linguistAttributeByPath),
+	});
+	return { manifest, changed, removed };
 }
 export async function configureDetector(options) {
 	const configPath = join(options.directory, "jscpd-config.json");
@@ -391,10 +559,10 @@ export async function worker(options) {
 		return { version: "5.4.1", formats: formats.output.trim().split(/\s+/) };
 	}
 	if (options.operation === "serve") {
-		await serveBaseline(options, capture, configureDetector);
+		await serveBaseline(options, capture, configureDetector, updateCapture);
 		return { stopped: true };
 	}
-	if (options.operation === "baseline") {
+	if (options.operation === "baseline" || options.operation === "update") {
 		return queryBaseline(options);
 	}
 	if (options.operation === "query") {
@@ -425,11 +593,15 @@ export async function worker(options) {
 	}
 	if (options.operation === "index") {
 		const manifest = JSON.parse(await readFile(join(options.directory, "manifest.json"), "utf8"));
+		const requestedPaths = options.paths === undefined ? undefined : new Set(options.paths);
+		const sources = requestedPaths
+			? manifest.files.filter((file) => requestedPaths.has(file.path))
+			: manifest.files;
 		const files = [];
 		let next = options.offset ?? 0;
 		let bytes = 0;
-		while (next < manifest.files.length) {
-			const source = manifest.files[next];
+		while (next < sources.length) {
+			const source = sources[next];
 			if (!safeRelative(source.path)) {
 				throw new Error("Invalid DRY index path");
 			}
@@ -447,7 +619,7 @@ export async function worker(options) {
 			bytes += size;
 			next++;
 		}
-		return { files, next: next < manifest.files.length ? next : null };
+		return { files, next: next < sources.length ? next : null };
 	}
 	if (options.operation === "manifest") {
 		return JSON.parse(await readFile(join(options.directory, "manifest.json"), "utf8"));

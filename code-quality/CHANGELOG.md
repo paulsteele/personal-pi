@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.6.0 — 2026-10-16
+
+- Keep one DRY baseline for the whole session. Each turn restages only files whose size or modification time changed, rescans in the running jscpd process, and exports only changed lexical index files. Profile/config changes, sandbox rebuilds, `/quality dry refresh`, and update failures rebuild from scratch.
+- Scope Git discovery of untracked files with pathspecs derived from the profile `exclude` list, so excluded vendored trees are never walked. The Git timeout uses the DRY scan budget instead of a fixed 10 seconds.
+- Fail with a clear error when the DRY corpus exceeds `maxSourceBytes` or discovery exceeds `entryLimit`, instead of silently dropping files in path order. The message lists the largest directories and a working `"exclude"` value to paste into the project profile.
+- Remove the `limited` scan phase. Scans with ordinary exclusions report `ready`; the exclusion count stays visible.
+- Warn when a ready scan includes directories that look vendored or generated (NuGet/CocoaPods package markers, `Pods`, `Carthage`, `third_party`, `.store`, and `linguist-vendored`/`linguist-generated` attributes). A new profile `include` list silences the warning for directories you intend to scan.
+
 ## 2.4.0 — 2026-10-15
 
 - Suspend the quality gate for the session while the sandbox escape hatch is active (`sandbox:state:v1` phase `off`). The pending case is waived without a prompt, LSP and DRY stop locally, and the saved `enabled` setting is unchanged. The gate resumes when the sandbox is ready again, and new sessions start active.

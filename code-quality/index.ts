@@ -224,9 +224,9 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 		plugin: qualityPlugin,
 		id: "quality-dry",
 		title: "DRY Checking",
-		description: "Shared reviewer and fresh repository clone retrieval",
+		description: "Shared reviewer and session-baseline repository clone retrieval",
 		effect:
-			"DRY settings applied; every check scans current sources and pending case decisions remain explicit.",
+			"DRY settings applied; the session baseline is rebuilt from scratch and pending case decisions remain explicit.",
 		fields: [
 			{
 				path: "dryEnabled",

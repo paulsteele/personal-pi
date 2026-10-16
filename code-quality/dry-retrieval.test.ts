@@ -31,6 +31,7 @@ function scenario() {
 		excluded: [],
 		truncated: false,
 		bytes: 100,
+		suspects: [],
 	};
 	const changed = [{ path: "/repo/new.ts", before: "", after: changedText }];
 	return {

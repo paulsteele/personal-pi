@@ -1,5 +1,6 @@
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { lstat, readdir, realpath } from "node:fs/promises";
+import { type BuildContextIgnore, loadBuildContextIgnore } from "./build-ignore.ts";
 import { canonicalPath, isPathInside } from "./storage.ts";
 
 export async function authorizeBuildInputs(options: {
@@ -39,20 +40,32 @@ export async function authorizeBuildInputs(options: {
     }
   };
   let inspectedEntries = 0;
-  const inspectBuildInput = async (path: string): Promise<void> => {
+  const inspectBuildInput = async (
+    path: string,
+    context?: { root: string; ignore: BuildContextIgnore },
+  ): Promise<void> => {
     options.signal?.throwIfAborted();
+    const identity = await lstat(path);
+    const contextRelativePath = context ? relative(context.root, path).split(sep).join("/") : "";
+    const isExcludedFromContext =
+      contextRelativePath !== "" &&
+      context?.ignore.skipsEntry(contextRelativePath, identity.isDirectory());
+    if (isExcludedFromContext) {
+      return;
+    }
     if (++inspectedEntries > 20_000) {
-      throw new Error("Build input exceeds 20,000 entries; use a narrower context");
+      throw new Error(
+        "Build input exceeds 20,000 entries after .containerignore/.dockerignore exclusions; use a narrower context or ignore file",
+      );
     }
     assertNoPrivateAuthority(path);
-    const identity = await lstat(path);
     if (identity.isSymbolicLink()) {
       assertNoPrivateAuthority(await canonicalPath(path));
       return;
     }
     if (identity.isDirectory()) {
       for (const entry of await readdir(path)) {
-        await inspectBuildInput(join(path, entry));
+        await inspectBuildInput(join(path, entry), context);
       }
     }
   };
@@ -74,7 +87,12 @@ export async function authorizeBuildInputs(options: {
         throw new Error(`External host build input is not authorized: ${path}`);
       }
     }
-    await inspectBuildInput(path);
+    if (input === options.buildContext && identity.isDirectory()) {
+      const ignore = await loadBuildContextIgnore(path, options.containerfile);
+      await inspectBuildInput(path, { root: path, ignore });
+    } else {
+      await inspectBuildInput(path);
+    }
     options.signal?.throwIfAborted();
     const current = await lstat(path, { bigint: true });
     if (

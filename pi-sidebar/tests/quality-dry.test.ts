@@ -25,6 +25,34 @@ it("retains only bounded presentation metadata", () => {
 	expect(parseDryStatus({ ...readyStatus, scanPhase: "approved" })).toBeUndefined();
 	expect(parseDryStatus({ ...readyStatus, files: -1 })).toBeUndefined();
 });
+it("shows a legacy limited scan as ready", () => {
+	expect(parseDryStatus({ ...readyStatus, scanPhase: "limited" })?.scanPhase).toBe("ready");
+});
+it("renders a ready-scan warning line by line under Attention", () => {
+	const warning = [
+		"DRY is scanning directories that look vendored or generated:",
+		"  internal-packages   (11 NuGet packages, 0.4 MiB)",
+		"  build/tools/.store  (NuGet tool store, 0.1 MiB)",
+	].join("\n");
+	const header = parseQualityHeader({
+		version: 1,
+		sessionId: "fixture",
+		revision: 1,
+		phase: "ready",
+		modelId: "provider/shared",
+		dry: { ...readyStatus, warning },
+	});
+	const theme = {
+		fg: (_role: string, text: string) => text,
+		bold: (text: string) => text,
+		italic: (text: string) => text,
+	};
+	const rows = renderQualityContent(header, theme, 80, false);
+	expect(header?.dry?.warning).toBe(warning);
+	expect(rows.join("\n")).toContain("ATTENTION");
+	expect(rows).toContain("  internal-packages   (11 NuGet packages, 0.4 MiB)");
+	expect(rows).toContain("  build/tools/.store  (NuGet tool store, 0.1 MiB)");
+});
 it("renders the detailed Quality tab safely at narrow widths", () => {
 	const header = parseQualityHeader({
 		version: 1,

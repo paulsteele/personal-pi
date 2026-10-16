@@ -1,6 +1,6 @@
 export interface SidebarDryStatus {
 	toolPhase: "unavailable" | "validating" | "ready" | "off";
-	scanPhase: "idle" | "scanning" | "ready" | "limited" | "unavailable" | "off";
+	scanPhase: "idle" | "scanning" | "ready" | "unavailable" | "off";
 	version?: string;
 	executable?: string;
 	scope?: string;
@@ -25,24 +25,33 @@ export interface SidebarDryStatus {
 		outputTokens: number;
 	};
 	reason?: string;
+	warning?: string;
 }
 function boundedText(value: unknown, maxChars = 4096): value is string {
 	return typeof value === "string" && value.length <= maxChars && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
 }
+/** Allows line breaks so directory lists in reasons and warnings keep their layout. */
+function boundedMultilineText(value: unknown, maxChars = 4096): value is string {
+	return (
+		typeof value === "string" &&
+		value.split("\n").every((line) => boundedText(line, maxChars)) &&
+		value.length <= maxChars
+	);
+}
 function finiteCount(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
+/** Legacy phase for scans with exclusions; those scans are complete. */
+const LEGACY_LIMITED_SCAN_PHASE = "limited";
 export function parseDryStatus(value: unknown): SidebarDryStatus | undefined {
 	if (!value || typeof value !== "object" || Array.isArray(value)) {
 		return undefined;
 	}
 	const raw = value as Record<string, unknown>;
 	const allowedToolPhases = ["unavailable", "validating", "ready", "off"];
-	const allowedScanPhases = ["idle", "scanning", "ready", "limited", "unavailable", "off"];
-	if (
-		!allowedToolPhases.includes(String(raw.toolPhase)) ||
-		!allowedScanPhases.includes(String(raw.scanPhase))
-	) {
+	const allowedScanPhases = ["idle", "scanning", "ready", "unavailable", "off"];
+	const scanPhase = raw.scanPhase === LEGACY_LIMITED_SCAN_PHASE ? "ready" : raw.scanPhase;
+	if (!allowedToolPhases.includes(String(raw.toolPhase)) || !allowedScanPhases.includes(String(scanPhase))) {
 		return undefined;
 	}
 	const fields = ["files", "windows", "bytes", "excluded", "formatCount", "astFormatCount"] as const;
@@ -55,7 +64,7 @@ export function parseDryStatus(value: unknown): SidebarDryStatus | undefined {
 	}
 	const status: SidebarDryStatus = {
 		toolPhase: raw.toolPhase as SidebarDryStatus["toolPhase"],
-		scanPhase: raw.scanPhase as SidebarDryStatus["scanPhase"],
+		scanPhase: scanPhase as SidebarDryStatus["scanPhase"],
 		files: raw.files as number,
 		windows: raw.windows as number,
 		bytes: raw.bytes as number,
@@ -69,9 +78,17 @@ export function parseDryStatus(value: unknown): SidebarDryStatus | undefined {
 			ast: clones.ast as number,
 		},
 	};
-	for (const field of ["version", "executable", "scope", "revision", "reason"] as const) {
+	for (const field of ["version", "executable", "scope", "revision"] as const) {
 		if (raw[field] !== undefined) {
 			if (!boundedText(raw[field])) {
+				return undefined;
+			}
+			status[field] = raw[field];
+		}
+	}
+	for (const field of ["reason", "warning"] as const) {
+		if (raw[field] !== undefined) {
+			if (!boundedMultilineText(raw[field])) {
 				return undefined;
 			}
 			status[field] = raw[field];

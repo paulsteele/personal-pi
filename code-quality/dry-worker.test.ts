@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,7 @@ import { DEFAULT_DRY_PROFILE } from "./dry-profile.js";
 
 const worker = await import("./dry-worker.mjs" as string);
 const mcp = await import("./dry-mcp.mjs" as string);
+const corpus = await import("./dry-corpus.mjs" as string);
 const directories: string[] = [];
 afterEach(async () => {
 	for (const directory of directories.splice(0)) {
@@ -58,6 +59,105 @@ it("stages owned code and derived features without secrets, documents, or genera
 	expect(indexed).not.toHaveProperty("text");
 	expect(indexed).not.toHaveProperty("fragment");
 });
+async function gitRepository(
+	repo: string,
+	tracked: Record<string, string>,
+	untracked: Record<string, string>,
+) {
+	for (const [path, text] of Object.entries({ ...tracked, ...untracked })) {
+		await mkdir(join(repo, path, ".."), { recursive: true });
+		await writeFile(join(repo, path), text);
+	}
+	const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+	git("init", "--quiet");
+	git("add", "--", ...Object.keys(tracked));
+}
+it("does not discover tracked or untracked files under top-level and nested project exclusions", async () => {
+	const h = await fixture();
+	await gitRepository(
+		h.repo,
+		{
+			"packages/Vendor/vendor.ts": "const vendored = 1;\n",
+			"lib/packages/Nested/nested.ts": "const nested = 1;\n",
+			"lib/src/owned.ts": "const owned = 1;\n",
+			"src/tracked.ts": "const tracked = 1;\n",
+		},
+		{
+			"packages/Vendor/untracked.ts": "const untrackedVendor = 1;\n",
+			"src/untracked.ts": "const untracked = 1;\n",
+		},
+	);
+	const profile = { ...DEFAULT_DRY_PROFILE, exclude: ["packages", "lib/packages/"] };
+	const manifest = await worker.capture({ ...h.options, profile });
+	const discoveredPaths = [...manifest.files, ...manifest.excluded].map(
+		(entry: { path: string }) => entry.path,
+	);
+	expect(discoveredPaths.sort()).toEqual(["lib/src/owned.ts", "src/tracked.ts", "src/untracked.ts"]);
+});
+it("skips excluded directories when discovering outside a Git repository", async () => {
+	const h = await fixture();
+	await mkdir(join(h.repo, "lib", "packages"), { recursive: true });
+	await writeFile(join(h.repo, "lib", "packages", "vendor.ts"), "const vendored = 1;\n");
+	await writeFile(join(h.repo, "lib", "owned.ts"), "const owned = 1;\n");
+	const profile = { ...DEFAULT_DRY_PROFILE, exclude: ["lib/packages"] };
+	const manifest = await worker.capture({ ...h.options, profile });
+	expect(manifest.files.map((file: { path: string }) => file.path)).toEqual(["lib/owned.ts"]);
+	expect(manifest.excluded).toEqual([]);
+});
+it("records linguist-generated and NuGet package directories as suspects in the manifest", async () => {
+	const h = await fixture();
+	await gitRepository(
+		h.repo,
+		{
+			".gitattributes": "src/generated/** linguist-generated\n",
+			"src/app.ts": "const app = 1;\n",
+			"src/generated/api.ts": "const api = 1;\n",
+			"internal-packages/Foo/Foo.nuspec": "<package />\n",
+			"internal-packages/Foo/content/foo.ts": "const foo = 1;\n",
+		},
+		{},
+	);
+	const manifest = await worker.capture(h.options);
+	expect(manifest.suspects).toEqual([
+		{ directory: "internal-packages", suspectSignal: "1 NuGet package", files: 1, bytes: 15 },
+		{ directory: "src/generated", suspectSignal: "linguist-generated", files: 1, bytes: 15 },
+	]);
+});
+it("fails with the corpus size and a working exclusion when sources exceed the byte cap", async () => {
+	const h = await fixture();
+	await mkdir(join(h.repo, "packages", "Vendor"), { recursive: true });
+	await mkdir(join(h.repo, "src"));
+	await writeFile(join(h.repo, "packages", "Vendor", "vendor.ts"), `// ${"v".repeat(3000)}\n`);
+	await writeFile(join(h.repo, "src", "owned.ts"), `// ${"o".repeat(500)}\n`);
+	const profile = { ...DEFAULT_DRY_PROFILE, maxSourceBytes: 1024 };
+	const failure = await worker.capture({ ...h.options, profile }).catch((error: Error) => error);
+	expect(corpus.parseCorpusError(String(failure))).toEqual({
+		kind: "corpus_too_large",
+		total: 3508,
+		limit: 1024,
+		largest: [
+			{ directory: "packages/Vendor", weight: 3004 },
+			{ directory: "src", weight: 504 },
+		],
+		suggestedExclude: ["packages/Vendor"],
+	});
+});
+it("fails with the largest directories by file count when discovery exceeds the entry limit", async () => {
+	const h = await fixture();
+	await mkdir(join(h.repo, "generated"));
+	for (let index = 0; index < 101; index++) {
+		await writeFile(join(h.repo, "generated", `file${index}.ts`), "const value = 1;\n");
+	}
+	await gitRepository(h.repo, {}, {});
+	const profile = { ...DEFAULT_DRY_PROFILE, entryLimit: 100 };
+	const failure = await worker.capture({ ...h.options, profile }).catch((error: Error) => error);
+	expect(corpus.parseCorpusError(String(failure))).toMatchObject({
+		kind: "discovery_truncated",
+		total: 101,
+		limit: 100,
+		suggestedExclude: ["generated"],
+	});
+});
 it("rebuilds the next baseline and removes deleted staged files", async () => {
 	const h = await fixture();
 	await writeFile(join(h.repo, "rule.ts"), "const retentionDays = 30;\n");
@@ -97,6 +197,79 @@ it("serves current snippets from one immutable baseline without scanning again",
 		expect(await readFile(join(h.options.directory, "launches"), "utf8")).toBe("scan\n");
 		expect(await readFile(join(h.options.directory, "sources", "existing.ts"), "utf8")).toBe(
 			"const retentionDays = 30;",
+		);
+	} finally {
+		workerProcess.kill("SIGTERM");
+		await workerProcessClosed;
+	}
+});
+it("restages only edited files and removes deleted ones when updating a capture", async () => {
+	const h = await fixture();
+	await writeFile(join(h.repo, "kept.ts"), "const kept = 1;\n");
+	await writeFile(join(h.repo, "edited.ts"), "const edited = 1;\n");
+	await writeFile(join(h.repo, "deleted.ts"), "const deleted = 1;\n");
+	const first = await worker.capture(h.options);
+	const unchanged = await worker.updateCapture(h.options);
+	expect(unchanged).toMatchObject({ changed: [], removed: [] });
+	expect(unchanged.manifest.revision).toBe(first.revision);
+
+	await writeFile(join(h.repo, "edited.ts"), "const edited = 22;\n");
+	await rm(join(h.repo, "deleted.ts"));
+	await writeFile(join(h.repo, "added.ts"), "const added = 1;\n");
+	const updated = await worker.updateCapture(h.options);
+	expect(updated.changed.sort()).toEqual(["added.ts", "edited.ts"]);
+	expect(updated.removed).toEqual(["deleted.ts"]);
+	expect(updated.manifest.revision).not.toBe(first.revision);
+	expect(await readFile(join(h.options.directory, "sources", "edited.ts"), "utf8")).toBe(
+		"const edited = 22;\n",
+	);
+	await expect(readFile(join(h.options.directory, "sources", "deleted.ts"))).rejects.toThrow();
+	await expect(readFile(join(h.options.directory, "index", "deleted.ts.json"))).rejects.toThrow();
+
+	const page = await worker.worker({ ...h.options, operation: "index", paths: ["edited.ts"] });
+	expect(page.files.map((file: { path: string }) => file.path)).toEqual(["edited.ts"]);
+	expect(page.next).toBeNull();
+});
+it("updates a served baseline in place and rescans only when sources changed", async () => {
+	const h = await fixture();
+	await writeFile(join(h.repo, "existing.ts"), "const retentionDays = 30;");
+	const executable = await fakeJscpd(h.root);
+	const workerProcess = spawn(process.execPath, [new URL("./dry-worker.mjs", import.meta.url).pathname], {
+		stdio: ["pipe", "pipe", "pipe"],
+	});
+	const workerProcessClosed = new Promise<void>((resolve) => workerProcess.once("close", () => resolve()));
+	workerProcess.stdin.end(JSON.stringify({ ...h.options, executable, operation: "serve" }));
+	try {
+		await mcp.queryBaseline({ ...h.options, operation: "baseline" });
+		const initialManifest = await worker.worker({ ...h.options, operation: "manifest" });
+		const unchanged = await worker.worker({ ...h.options, operation: "update" });
+		expect(unchanged).toEqual({ revision: initialManifest.revision, changed: [], removed: [] });
+		expect(await readFile(join(h.options.directory, "launches"), "utf8")).toBe("scan\n");
+
+		await writeFile(join(h.repo, "existing.ts"), "const retentionDays = 60;");
+		const edited = await worker.worker({ ...h.options, operation: "update" });
+		expect(edited.changed).toEqual(["existing.ts"]);
+		expect(await readFile(join(h.options.directory, "launches"), "utf8")).toBe("scan\nrescan\n");
+		const report = JSON.parse(await readFile(join(h.options.directory, "report.json"), "utf8"));
+		expect(report.manifestRevision).toBe(edited.revision);
+	} finally {
+		workerProcess.kill("SIGTERM");
+		await workerProcessClosed;
+	}
+});
+it("answers a waiting baseline request with the corpus error before the server exits", async () => {
+	const h = await fixture();
+	await writeFile(join(h.repo, "existing.ts"), `// ${"x".repeat(2000)}\n`);
+	const options = { ...h.options, profile: { ...DEFAULT_DRY_PROFILE, maxSourceBytes: 1024 } };
+	const executable = await fakeJscpd(h.root);
+	const workerProcess = spawn(process.execPath, [new URL("./dry-worker.mjs", import.meta.url).pathname], {
+		stdio: ["pipe", "pipe", "pipe"],
+	});
+	const workerProcessClosed = new Promise<void>((resolve) => workerProcess.once("close", () => resolve()));
+	workerProcess.stdin.end(JSON.stringify({ ...options, executable, operation: "serve" }));
+	try {
+		await expect(mcp.queryBaseline({ ...options, operation: "baseline" })).rejects.toThrow(
+			/DRY_CORPUS_ERROR \{"kind":"corpus_too_large","limit":1024,/,
 		);
 	} finally {
 		workerProcess.kill("SIGTERM");

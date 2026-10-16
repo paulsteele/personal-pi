@@ -246,6 +246,10 @@ function parseNumstat(
 	return { linesAdded, linesRemoved, binaryFiles };
 }
 
+/**
+ * Never take `.git/index.lock`: a timed-out refresh is SIGKILLed and would strand it. Porcelain
+ * `diff` takes the lock even with `--no-optional-locks`, so keep `diff-index`.
+ */
 async function inspectWorkspacePulseUnchecked(
 	options: InspectWorkspacePulseOptions,
 ): Promise<WorkspacePulseInspection> {
@@ -265,7 +269,16 @@ async function inspectWorkspacePulseUnchecked(
 
 	const status = await options.exec(
 		"git",
-		["-C", root, "status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all"],
+		[
+			"--no-optional-locks",
+			"-C",
+			root,
+			"status",
+			"--porcelain=v2",
+			"-z",
+			"--branch",
+			"--untracked-files=all",
+		],
 		{ timeout: 2_000 },
 	);
 	if (status.code !== 0 || status.killed) return { kind: "unavailable" };
@@ -286,7 +299,7 @@ async function inspectWorkspacePulseUnchecked(
 
 	const diff = await options.exec(
 		"git",
-		["-C", root, "diff", "--numstat", "-z", "--find-renames", baseline, "--"],
+		["-C", root, "diff-index", "--numstat", "-z", "--find-renames", baseline, "--"],
 		{ timeout: 2_000 },
 	);
 	if (diff.code !== 0 || diff.killed) return { kind: "unavailable" };

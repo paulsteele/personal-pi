@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.6.0 — 2026-10-16
+
+- Show the DRY scan `warning` (directories that look vendored or generated) under Attention, keeping the message's line breaks for both warnings and errors.
+- Treat the retired `limited` DRY scan phase from older Code Quality producers as `ready`.
+- Stop Workspace Pulse from taking `.git/index.lock`. A refresh killed on timeout could leave a stale lock that blocked the user's own Git commands. Pulse now runs `git --no-optional-locks status` and read-only `git diff-index`.
+
 ## 2.4.0 — 2026-10-15
 
 - Accept the sandbox `off` phase and render it in the Sandbox tab as `OFF · host passthrough` instead of Podman runtime details.

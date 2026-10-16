@@ -1,4 +1,6 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, watch, writeFileSync } from "node:fs";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -204,7 +206,16 @@ describe("inspectWorkspacePulse", () => {
 		expect(exec).toHaveBeenNthCalledWith(
 			2,
 			"git",
-			["-C", "/repo", "status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all"],
+			[
+				"--no-optional-locks",
+				"-C",
+				"/repo",
+				"status",
+				"--porcelain=v2",
+				"-z",
+				"--branch",
+				"--untracked-files=all",
+			],
 			{ timeout: 2_000 },
 		);
 		expect(exec).toHaveBeenNthCalledWith(3, "git", ["-C", "/repo", "rev-parse", "--verify", "HEAD^{tree}"], {
@@ -213,7 +224,7 @@ describe("inspectWorkspacePulse", () => {
 		expect(exec).toHaveBeenNthCalledWith(
 			4,
 			"git",
-			["-C", "/repo", "diff", "--numstat", "-z", "--find-renames", "tree-id", "--"],
+			["-C", "/repo", "diff-index", "--numstat", "-z", "--find-renames", "tree-id", "--"],
 			{ timeout: 2_000 },
 		);
 	});
@@ -254,6 +265,51 @@ describe("inspectWorkspacePulse", () => {
 			kind: "unavailable",
 		});
 	});
+
+	it("never takes the Git index lock while inspecting a repository whose file stats are stale", async () => {
+		const repo = mkdtempSync(join(tmpdir(), "pulse-index-lock-"));
+		try {
+			const trackedFiles = Array.from({ length: 2000 }, (_, index) => join(repo, `file${index}.txt`));
+			for (const [index, file] of trackedFiles.entries()) {
+				writeFileSync(file, `${index}\n`);
+			}
+			const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+			git("init", "--quiet");
+			git("add", "--all");
+			git(
+				"-c",
+				"user.email=pulse@example.com",
+				"-c",
+				"user.name=pulse",
+				"commit",
+				"--quiet",
+				"-m",
+				"initial",
+			);
+			const unchangedContentWithOldTimestamp = 1_000_000_000;
+			for (const file of trackedFiles) {
+				utimesSync(file, unchangedContentWithOldTimestamp, unchangedContentWithOldTimestamp);
+			}
+			await new Promise((resolve) => setTimeout(resolve, 1_100));
+			const indexLockEvents: string[] = [];
+			const watcher = watch(join(repo, ".git"), (_event, name) => {
+				if (name === "index.lock") {
+					indexLockEvents.push(name);
+				}
+			});
+			const exec = async (command: string, args: string[], options?: { cwd?: string }) => {
+				const { stdout, stderr } = await promisify(execFile)(command, args, { cwd: options?.cwd ?? repo });
+				return { stdout, stderr, code: 0, killed: false };
+			};
+			const inspection = await inspectWorkspacePulse({ exec, cwd: repo });
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			watcher.close();
+			expect(inspection).toMatchObject({ kind: "available", snapshot: { linesAdded: 0, linesRemoved: 0 } });
+			expect(indexLockEvents).toEqual([]);
+		} finally {
+			rmSync(repo, { recursive: true, force: true });
+		}
+	}, 20_000);
 
 	it("uses the empty tree as the baseline before the first commit", async () => {
 		const exec = vi

@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.6.0 — 2026-10-16
+
+- Respect build ignore files when authorizing and fingerprinting devcontainer build contexts. Entries that Podman would exclude are no longer inspected or counted against the 20,000-entry limit. Podman uses `.containerignore` before `.dockerignore`, and also reads the Containerfile-specific `<Containerfile>.containerignore`/`.dockerignore` files. An entry is skipped only when every ignore file that could apply excludes it. Directories with `!` re-included descendants are still traversed, and private-authority checks still apply to every remaining entry. Repositories with `"context": ".."` and a large ignored `node_modules` now start.
+
 ## 2.4.0 — 2026-10-15
 
 - Add a session-scoped sandbox escape hatch: `/sandbox off|on`, the Settings → Sandbox → General toggle, the `--no-sandbox` launch flag, and `PI_SANDBOX=off`. While off, the devcontainer is retired and built-in file tools, Bash, and `!` user shell run on the host in the session cwd. Explicit tool, path, and shell denies still apply, and mount and tool-installation requests are refused. The choice persists across `/reload` and resume of that session only; new sessions start sandboxed. Sidebar and quality observe the new `off` presentation phase.

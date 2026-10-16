@@ -67,6 +67,18 @@ const ManifestSchema = Type.Object(
 		),
 		truncated: Type.Boolean(),
 		bytes: count,
+		suspects: Type.Array(
+			Type.Object(
+				{
+					directory: relativePath,
+					suspectSignal: Type.String({ minLength: 1, maxLength: 240 }),
+					files: count,
+					bytes: count,
+				},
+				{ additionalProperties: false },
+			),
+			{ maxItems: 8 },
+		),
 	},
 	{ additionalProperties: false },
 );

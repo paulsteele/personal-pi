@@ -11,6 +11,8 @@ for (const required of [
 	"controller.ts",
 	"dry-worker.mjs",
 	"dry-mcp.mjs",
+	"dry-corpus.mjs",
+	"dry-suspects.mjs",
 	"dry-lexical.mjs",
 	"source-disclosure.mjs",
 	"dry-policy.md",

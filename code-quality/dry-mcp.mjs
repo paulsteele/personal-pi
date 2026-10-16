@@ -203,11 +203,58 @@ export function snippetClones(value, query, manifest) {
 	return { clones, retrieved: value.count, note: value.note, unavailable: value.unavailable };
 }
 
-export async function serveBaseline(options, capture, configure) {
+async function writeReport(options, client, manifest, scanStarted) {
+	const stats = await client.call("get_statistics", { kinds: detectorKinds(options.profile) });
+	if (!Number.isInteger(stats.files) || stats.files < 0 || !stats.statistics?.total || !stats.byKind) {
+		throw new Error("Invalid jscpd baseline statistics");
+	}
+	if (
+		stats.unavailable ||
+		/unknown (?:key|field)|invalid (?:value|config)|configuration.*error/i.test(client.stderr)
+	) {
+		throw new Error(
+			`jscpd baseline configuration unavailable: ${JSON.stringify(stats.unavailable ?? client.stderr)}`,
+		);
+	}
+	const cloneCounts = Object.fromEntries(
+		["exact", "renamed", "gap", "ast"].map((kind) => [kind, stats.byKind[kind] ?? 0]),
+	);
+	const formats = Object.entries(stats.statistics.formats ?? {}).map(([name, entry]) => ({
+		name,
+		files: entry.sources,
+	}));
+	const report = {
+		version: 1,
+		manifestRevision: manifest.revision,
+		cloneCounts,
+		analyzedFiles: stats.files,
+		formats,
+		scanDurationMs: performance.now() - scanStarted,
+	};
+	await writeFile(join(options.directory, "report.json"), JSON.stringify(report), { mode: 0o600 });
+}
+/**
+ * Serves one session baseline. `update` requests restage changed sources and rescan in the same
+ * jscpd process instead of rebuilding the baseline.
+ */
+export async function serveBaseline(options, capture, configure, updateCapture) {
 	const socketPath = join(options.directory, "baseline.sock");
 	let client;
 	let manifest;
 	let queue = Promise.resolve();
+	const update = async () => {
+		const started = performance.now();
+		const updated = await updateCapture(options);
+		const stagedSourcesChanged = updated.changed.length > 0 || updated.removed.length > 0;
+		if (stagedSourcesChanged) {
+			await client.call("check_current_directory", { kinds: detectorKinds(options.profile), limit: 0 });
+		}
+		if (stagedSourcesChanged || updated.manifest.revision !== manifest.revision) {
+			await writeReport(options, client, updated.manifest, started);
+		}
+		manifest = updated.manifest;
+		return { revision: manifest.revision, changed: updated.changed, removed: updated.removed };
+	};
 	const baseline = (async () => {
 		manifest = await capture(options);
 		await mkdir(join(options.directory, "sources"), { recursive: true, mode: 0o700 });
@@ -229,37 +276,13 @@ export async function serveBaseline(options, capture, configure) {
 			options.timeoutMs,
 		);
 		await client.initialize();
-		const stats = await client.call("get_statistics", { kinds: detectorKinds(options.profile) });
-		if (!Number.isInteger(stats.files) || stats.files < 0 || !stats.statistics?.total || !stats.byKind) {
-			throw new Error("Invalid jscpd baseline statistics");
-		}
-		if (
-			stats.unavailable ||
-			/unknown (?:key|field)|invalid (?:value|config)|configuration.*error/i.test(client.stderr)
-		) {
-			throw new Error(
-				`jscpd baseline configuration unavailable: ${JSON.stringify(stats.unavailable ?? client.stderr)}`,
-			);
-		}
-		const cloneCounts = Object.fromEntries(
-			["exact", "renamed", "gap", "ast"].map((kind) => [kind, stats.byKind[kind] ?? 0]),
-		);
-		const formats = Object.entries(stats.statistics.formats ?? {}).map(([name, entry]) => ({
-			name,
-			files: entry.sources,
-		}));
-		const report = {
-			version: 1,
-			manifestRevision: manifest.revision,
-			cloneCounts,
-			analyzedFiles: stats.files,
-			formats,
-			scanDurationMs: performance.now() - started,
-		};
-		await writeFile(join(options.directory, "report.json"), JSON.stringify(report), { mode: 0o600 });
+		await writeReport(options, client, manifest, started);
 		return { ready: true };
 	})();
-	baseline.catch(() => {});
+	let baselineFailed = false;
+	baseline.catch(() => {
+		baselineFailed = true;
+	});
 	const sockets = new Set();
 	const server = createServer((socket) => {
 		sockets.add(socket);
@@ -287,6 +310,9 @@ export async function serveBaseline(options, capture, configure) {
 				await baseline;
 				if (request.operation === "baseline") {
 					return { ready: true };
+				}
+				if (request.operation === "update") {
+					return update();
 				}
 				if (request.operation !== "query" || typeof request.code !== "string") {
 					throw new Error("Invalid DRY baseline query");
@@ -329,6 +355,9 @@ export async function serveBaseline(options, capture, configure) {
 	} finally {
 		process.removeListener("SIGTERM", retire);
 		process.removeListener("SIGINT", retire);
+		if (baselineFailed) {
+			await queue;
+		}
 		for (const socket of sockets) {
 			socket.destroy();
 		}

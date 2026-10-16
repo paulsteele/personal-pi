@@ -11,6 +11,9 @@ export function dryStatusText(manager: Pick<SandboxDryManager, "status">): strin
 	if (status.reason) {
 		lines.push(status.reason);
 	}
+	if (status.warning) {
+		lines.push(status.warning);
+	}
 	return lines.join("\n");
 }
 export interface DryCommandPorts {

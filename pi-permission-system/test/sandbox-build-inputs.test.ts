@@ -71,6 +71,31 @@ it("rejects project context links into private authority before building", async
   ).rejects.toThrow("exposes private sandbox authority");
 });
 
+it("skips context entries excluded by .dockerignore", async () => {
+  const fixture = await buildFixture();
+  const dependencies = join(fixture.projectRoot, "node_modules");
+  await mkdir(dependencies);
+  await symlink(fixture.privateStorage, join(dependencies, "authority"));
+  await writeFile(join(fixture.projectRoot, ".dockerignore"), "node_modules\n");
+  await expect(
+    authorizeBuildInputs({ ...fixture, buildContext: fixture.projectRoot }),
+  ).resolves.toBeUndefined();
+});
+
+it("still inspects entries re-included by an ignore exception", async () => {
+  const fixture = await buildFixture();
+  const dependencies = join(fixture.projectRoot, "node_modules");
+  await mkdir(dependencies);
+  await symlink(fixture.privateStorage, join(dependencies, "authority"));
+  await writeFile(
+    join(fixture.projectRoot, ".dockerignore"),
+    "node_modules\n!node_modules/authority\n",
+  );
+  await expect(
+    authorizeBuildInputs({ ...fixture, buildContext: fixture.projectRoot }),
+  ).rejects.toThrow("exposes private sandbox authority");
+});
+
 it("requires independent consent for external build input and detects replacement during approval", async () => {
   const fixture = await buildFixture();
   const external = join(fixture.directory, "external");
