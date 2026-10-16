@@ -296,13 +296,6 @@ export class SandboxSession {
             destination: declared.destination,
             access: declared.access,
           });
-          if (
-            !(await this.options.confirm(
-              `Approve project volume shared by sessions of this checkout? ${volume.name} -> ${volume.destination} (${volume.access})`,
-            ))
-          ) {
-            throw new Error("Declared project volume was not approved");
-          }
           volumeGrants.push(volume);
           continue;
         }

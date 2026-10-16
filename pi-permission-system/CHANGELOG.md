@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.8.0 — 2026-10-16
+
+- Accept the `Dockerfile-with-features` recipe that devcontainer features generate when the final stage is already named, the Containerfile has multiple stages, `build.target` is set, or a `# syntax` directive is present. These builds previously failed with "Unverified generated devcontainer build recipe".
+- Stop asking for approval of declared `type=volume` mounts. Sandbox-owned named volumes never expose host paths, and the ownership check for each checkout still applies.
+
 ## 2.7.0 — 2026-10-16
 
 - Support `type=volume` devcontainer mounts as approved, sandbox-owned Podman named volumes, shared by sessions of the same checkout and labeled `pi.sandbox.volume=1`. Previously these definitions failed with "V1 mount declarations require explicit bind sources and destinations". Volume paths never map to the shadowed host directory. Container inspection, engine policy, and session records track volumes separately from host binds. Unsupported mount errors now name the offending declaration.

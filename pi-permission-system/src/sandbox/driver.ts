@@ -25,6 +25,7 @@ import {
   verifyRuntimeInventory,
 } from "./tool-build-runtime.ts";
 import { authorizeBuildInputs } from "./build-inputs.ts";
+import { isGeneratedFeatureRecipe } from "./feature-recipe.ts";
 import { requireToolImageMountCapability } from "./tool-mount-capability.ts";
 import {
   toolImageMountsSchema,
@@ -253,12 +254,8 @@ export async function createDevcontainer(options: {
       if (!generated || !original) {
         throw new Error("Unverified generated devcontainer build recipe");
       }
-      const originalWithFeatureStage = original.text.replace(
-        /^(FROM[^\n]+)$/m,
-        "$1 AS dev_container_auto_added_stage_label",
-      );
-      const containsOriginalRecipe = generated.text.includes(originalWithFeatureStage);
-      if (!containsOriginalRecipe) {
+      const buildTarget = options.resolved.definition.build?.target;
+      if (!isGeneratedFeatureRecipe(generated.text, original.text, buildTarget)) {
         throw new Error("Unverified generated devcontainer build recipe");
       }
       authority.containerfiles.push(file);
