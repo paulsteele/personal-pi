@@ -1,19 +1,24 @@
 import { basename } from "node:path";
 import { sha256Hex } from "./storage.ts";
 
+export function projectEngineSlug(projectRoot: string): string {
+  return (
+    basename(projectRoot)
+      .normalize("NFKD")
+      .toLowerCase()
+      .replace(/[^a-z0-9_.-]+/g, "-")
+      .replace(/^[_.-]+|[_.-]+$/g, "")
+      .slice(0, 48) || "project"
+  );
+}
+
 export function containerIdentity(options: {
   projectRoot: string;
   startupDirectory: string;
   sessionId: string;
   generation: number;
 }): { name: string; labels: Record<string, string> } {
-  const projectName =
-    basename(options.projectRoot)
-      .normalize("NFKD")
-      .toLowerCase()
-      .replace(/[^a-z0-9_.-]+/g, "-")
-      .replace(/^[_.-]+|[_.-]+$/g, "")
-      .slice(0, 48) || "project";
+  const projectName = projectEngineSlug(options.projectRoot);
   const sessionSuffix = sha256Hex(options.sessionId).slice(0, 10);
   if (!Number.isSafeInteger(options.generation) || options.generation < 1) {
     throw new Error("Container generation must be a positive integer");

@@ -2,6 +2,7 @@ import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, posix } from "node:path";
 import { z } from "zod";
 import { isPathInside } from "./storage.ts";
+import type { VolumeGrant } from "./volumes.ts";
 
 export const mountGrantSchema = z
   .object({
@@ -163,7 +164,19 @@ export function validateMountTopology(grants: readonly MountGrant[]): void {
   }
 }
 
-export function guestToHost(path: string, grants: readonly MountGrant[]): string | undefined {
+export function isGuestPathInVolume(path: string, volumes: readonly VolumeGrant[]): boolean {
+  const normalizedPath = posix.normalize(path);
+  return volumes.some((volume) => isPathInside(volume.destination, normalizedPath));
+}
+
+export function guestToHost(
+  path: string,
+  grants: readonly MountGrant[],
+  volumes: readonly VolumeGrant[] = [],
+): string | undefined {
+  if (isGuestPathInVolume(path, volumes)) {
+    return undefined;
+  }
   const grant = grants.find((candidate) => {
     const matchesDestination =
       candidate.kind === "file"
@@ -174,13 +187,22 @@ export function guestToHost(path: string, grants: readonly MountGrant[]): string
   return grant ? posix.join(grant.source, posix.relative(grant.destination, path)) : undefined;
 }
 
-export function hostToGuest(path: string, grants: readonly MountGrant[]): string | undefined {
+export function hostToGuest(
+  path: string,
+  grants: readonly MountGrant[],
+  volumes: readonly VolumeGrant[] = [],
+): string | undefined {
   const grant = grants.find((candidate) => {
     const matchesSource =
       candidate.kind === "file" ? path === candidate.source : isPathInside(candidate.source, path);
     return matchesSource;
   });
-  return grant ? posix.join(grant.destination, posix.relative(grant.source, path)) : undefined;
+  if (!grant) {
+    return undefined;
+  }
+  const guestPath = posix.join(grant.destination, posix.relative(grant.source, path));
+  const hostPathIsShadowedByVolume = isGuestPathInVolume(guestPath, volumes);
+  return hostPathIsShadowedByVolume ? undefined : guestPath;
 }
 
 export function mountArgument(grant: MountGrant): string {

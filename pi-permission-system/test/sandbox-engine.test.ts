@@ -75,6 +75,29 @@ it.each([
   expect(() => authorizeEngineArguments(args, "/repo", authority)).toThrow();
 });
 
+it("permits exactly the approved project volume mount", () => {
+  const volumeArgument =
+    "type=volume,source=pi-vol-repo-0123456789abcdef,target=/workspace/node_modules";
+  const volumeAuthority = { ...authority, volumes: [volumeArgument] };
+  const run = (mount: string) =>
+    authorizeEngineArguments(
+      ["run", "--mount", mount, "--entrypoint", "/bin/sh", "debian:bookworm"],
+      "/repo",
+      volumeAuthority,
+    );
+  expect(run(volumeArgument)).toContain(volumeArgument);
+  expect(() => run("type=volume,source=other-volume,target=/workspace/node_modules")).toThrow(
+    "Unapproved engine mount",
+  );
+  expect(() =>
+    authorizeEngineArguments(
+      ["run", "--mount", volumeArgument, "debian:bookworm"],
+      "/repo",
+      authority,
+    ),
+  ).toThrow("Unapproved engine mount");
+});
+
 it("allows only session-scoped inspection and execution", () => {
   expect(
     authorizeEngineArguments(

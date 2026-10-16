@@ -62,6 +62,7 @@ export const toolImageMountsSchema = z
 
 export const inspectedToolMountSchema = z.looseObject({
   Type: z.string(),
+  Name: z.string().optional(),
   Source: z.string(),
   Destination: z.string(),
   RW: z.boolean(),

@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.7.0 — 2026-10-16
+
+- Support `type=volume` devcontainer mounts as approved, sandbox-owned Podman named volumes, shared by sessions of the same checkout and labeled `pi.sandbox.volume=1`. Previously these definitions failed with "V1 mount declarations require explicit bind sources and destinations". Volume paths never map to the shadowed host directory. Container inspection, engine policy, and session records track volumes separately from host binds. Unsupported mount errors now name the offending declaration.
+
 ## 2.6.0 — 2026-10-16
 
 - Respect build ignore files when authorizing and fingerprinting devcontainer build contexts. Entries that Podman would exclude are no longer inspected or counted against the 20,000-entry limit. Podman uses `.containerignore` before `.dockerignore`, and also reads the Containerfile-specific `<Containerfile>.containerignore`/`.dockerignore` files. An entry is skipped only when every ignore file that could apply excludes it. Directories with `!` re-included descendants are still traversed, and private-authority checks still apply to every remaining entry. Repositories with `"context": ".."` and a large ignored `node_modules` now start.

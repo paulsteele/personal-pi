@@ -204,8 +204,8 @@ export async function reviewSandboxAction(options: {
     const lexicalGuestPath = posix.resolve(workspace, guestHomeExpandedPath);
     const workspaceRelativePath = posix.relative(workspace, lexicalGuestPath);
     const guestPathAliases = [workspaceRelativePath, lexicalGuestPath, canonicalGuestPath];
-    const lexicalHostPathAlias = guestToHost(lexicalGuestPath, session.mounts);
-    const canonicalHostPathAlias = guestToHost(canonicalGuestPath, session.mounts);
+    const lexicalHostPathAlias = guestToHost(lexicalGuestPath, session.mounts, session.volumes);
+    const canonicalHostPathAlias = guestToHost(canonicalGuestPath, session.mounts, session.volumes);
     const hostPathAliases = [lexicalHostPathAlias, canonicalHostPathAlias];
     return [
       ...new Set(

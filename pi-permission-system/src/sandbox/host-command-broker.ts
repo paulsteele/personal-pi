@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { ProjectLocation } from "@paulsteele/pi-project-locations";
 import { checkPolicy } from "../policy.ts";
 import { guestToHost, validateMountIdentity, type MountGrant } from "./mounts.ts";
+import type { VolumeGrant } from "./volumes.ts";
 import { isPathInside } from "./storage.ts";
 import { loadSandboxSettings } from "./settings.ts";
 import {
@@ -80,6 +81,7 @@ export class HostCommandBroker {
       plan: HostCommandPlan;
       token: string;
       mounts: readonly MountGrant[];
+      volumes?: readonly VolumeGrant[];
       canonicalGuestPath(path: string): Promise<string>;
       signal: AbortSignal;
       send(id: number, message: HostBridgeReply): void;
@@ -194,7 +196,7 @@ export class HostCommandBroker {
       await validateMountIdentity(mount);
     }
     const canonicalCwd = await this.options.canonicalGuestPath(request.cwd);
-    const mappedCwd = guestToHost(canonicalCwd, this.options.mounts);
+    const mappedCwd = guestToHost(canonicalCwd, this.options.mounts, this.options.volumes);
     if (!mappedCwd) {
       throw new Error("Host command cwd has no approved mapping");
     }
@@ -207,7 +209,7 @@ export class HostCommandBroker {
       const guestScript = await this.options.canonicalGuestPath(
         posix.resolve(canonicalCwd, request.command),
       );
-      const mappedScript = guestToHost(guestScript, this.options.mounts);
+      const mappedScript = guestToHost(guestScript, this.options.mounts, this.options.volumes);
       if (!mappedScript) {
         throw new Error("Host script has no approved guest mapping");
       }

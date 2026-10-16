@@ -1,6 +1,6 @@
 {
   "name": "@paulsteele/pi-permission-system",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "private": true,
   "description": "Mandatory Podman devcontainer tools and host mount approvals",
   "type": "module",

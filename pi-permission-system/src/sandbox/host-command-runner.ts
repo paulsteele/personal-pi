@@ -113,7 +113,8 @@ export async function executeProjectShell(
 }
 
 export async function runHostRoutedShell(options: {
-  session: Pick<SandboxSession, "options" | "mounts" | "filesystem" | "execute">;
+  session: Pick<SandboxSession, "options" | "mounts" | "filesystem" | "execute"> &
+    Partial<Pick<SandboxSession, "volumes">>;
   options: ShellExecutionOptions;
   profile: HostCommandProfile;
   plan: HostCommandPlan;
@@ -176,6 +177,7 @@ export async function runHostRoutedShell(options: {
     plan: options.plan,
     token,
     mounts: [...options.session.mounts],
+    volumes: [...(options.session.volumes ?? [])],
     canonicalGuestPath: (path) => options.session.filesystem.canonical(path, options.signal),
     signal: options.signal,
     send,

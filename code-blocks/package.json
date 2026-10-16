@@ -1,6 +1,6 @@
 {
   "name": "@paulsteele/pi-code-blocks",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "private": true,
   "description": "Copyable fenced code blocks for Pi",
   "type": "module",

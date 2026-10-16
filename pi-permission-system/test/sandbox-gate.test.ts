@@ -229,6 +229,50 @@ it("checks relative and lexical aliases even when the canonical target is allowe
   await expect(fixture.review("cat src/private.ts")).rejects.toThrow("Shell path denied");
 });
 
+it("does not apply host-path policy to guest paths stored in a project volume", async () => {
+  const fixture = await actionFixture();
+  Object.assign(fixture.session, {
+    mounts: [
+      {
+        source: "/host/project",
+        destination: "/workspace",
+        access: "rw",
+        identity: "1:2",
+        kind: "directory",
+      },
+    ],
+    volumes: [
+      {
+        name: "pi-vol-project-0123456789abcdef",
+        destination: "/workspace/node_modules",
+        access: "rw",
+      },
+    ],
+  });
+  await saveSandboxSettings(
+    fixture.agentDir,
+    parseSandboxSettings({
+      permission: {
+        path: {
+          "/host/project/node_modules/pkg/index.js": "deny",
+          "/host/project/src/index.ts": "deny",
+        },
+      },
+    }),
+    undefined,
+  );
+  const read = (path: string) =>
+    reviewSandboxAction({
+      session: fixture.session as never,
+      agentDir: fixture.agentDir,
+      toolName: "read",
+      input: { path },
+      ctx: {} as never,
+    });
+  await expect(read("/workspace/node_modules/pkg/index.js")).resolves.toBeUndefined();
+  await expect(read("/workspace/src/index.ts")).rejects.toThrow("Path denied");
+});
+
 it("checks the full command deny in addition to its independently allowed units", async () => {
   const fixture = await actionFixture();
   const command = "echo ready && touch /workspace/result";

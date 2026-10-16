@@ -370,7 +370,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
                 : undefined;
             const sourceAliases = [
               ...guestPaths,
-              ...guestPaths.map((path) => guestToHost(path, candidate.mounts)),
+              ...guestPaths.map((path) => guestToHost(path, candidate.mounts, candidate.volumes)),
               ...(request.effects ?? []).map((effect) => effect.path),
               ...(typeof requestedPath === "string" ? [requestedPath] : []),
             ].filter((path): path is string => typeof path === "string");

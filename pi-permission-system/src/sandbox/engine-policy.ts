@@ -53,7 +53,7 @@ function validateRunArguments(args: string[], authority: EngineAuthority): strin
   let index = 1;
   validateMountTopology(authority.mounts);
   const toolMounts = toolImageMountsSchema.parse(authority.toolImageMounts ?? []);
-  const approvedMounts = new Set(authority.mounts.map(mountArgument));
+  const approvedMounts = new Set([...authority.mounts.map(mountArgument), ...authority.volumes]);
   const seenDestinations = new Set<string>();
   for (; index < args.length && args[index].startsWith("-"); ) {
     const argument = args[index];

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { mountGrantSchema } from "./mounts.ts";
 import { toolInventorySchema } from "./tool-inventory.ts";
 import { toolImageMountsSchema } from "./tool-image-mounts.ts";
+import { volumeGrantSchema } from "./volumes.ts";
 
 export const sessionRecordSchema = z
   .object({
@@ -12,6 +13,7 @@ export const sessionRecordSchema = z
     baseDefinitionRevision: z.string().optional(),
     generation: z.number().int().positive(),
     mounts: z.array(mountGrantSchema),
+    volumes: z.array(volumeGrantSchema).optional(),
     approvedPorts: z.array(z.number().int().min(1).max(65535)).optional(),
     inactiveSinceUnixMs: z.number().int().nonnegative().optional(),
     containerPrunedAtUnixMs: z.number().int().nonnegative().optional(),

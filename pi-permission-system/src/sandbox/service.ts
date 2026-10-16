@@ -1,5 +1,6 @@
 import type { SandboxSession } from "./session.ts";
 import type { MountGrant } from "./mounts.ts";
+import type { VolumeGrant } from "./volumes.ts";
 import { canonicalPath } from "./storage.ts";
 import { guestToHost, hostToGuest, validateMountIdentity } from "./mounts.ts";
 import {
@@ -47,6 +48,7 @@ export function createSandboxService(session: SandboxSession): SandboxService {
     return authorizeMappedSources({
       hostPaths,
       mounts: session.mounts,
+      volumes: session.volumes,
       revision: () => session.revision,
       canonicalPaths: probeCanonicalSourcePaths,
       signal,
@@ -58,10 +60,10 @@ export function createSandboxService(session: SandboxSession): SandboxService {
     session,
     async hostPath(path) {
       const canonical = await session.filesystem.canonical(path);
-      return guestToHost(canonical, session.mounts);
+      return guestToHost(canonical, session.mounts, session.volumes);
     },
     async guestPath(path) {
-      return hostToGuest(path, session.mounts);
+      return hostToGuest(path, session.mounts, session.volumes);
     },
     authorizeHostSources,
     async authorizeHostSource(path, signal) {
@@ -75,6 +77,7 @@ export function createSandboxService(session: SandboxSession): SandboxService {
 export async function authorizeMappedSources(options: {
   hostPaths: readonly string[];
   mounts: readonly MountGrant[];
+  volumes?: readonly VolumeGrant[];
   revision(): string;
   canonicalPaths(paths: string[], signal?: AbortSignal): Promise<string[]>;
   signal?: AbortSignal;
@@ -83,7 +86,7 @@ export async function authorizeMappedSources(options: {
   const authorityRevision = options.revision();
   const canonicalHostPaths = await Promise.all(options.hostPaths.map(canonicalPath));
   const mappedGuestPaths = canonicalHostPaths.map((canonicalHostPath) => {
-    const guestPath = hostToGuest(canonicalHostPath, options.mounts);
+    const guestPath = hostToGuest(canonicalHostPath, options.mounts, options.volumes);
     if (!guestPath) {
       throw new Error(`Host source is outside approved sandbox mounts: ${canonicalHostPath}`);
     }
@@ -100,7 +103,8 @@ export async function authorizeMappedSources(options: {
     throw new Error("Sandbox authority changed during source authorization; retry");
   }
   for (const [index, canonicalGuestPath] of canonicalGuestPaths.entries()) {
-    if (guestToHost(canonicalGuestPath, options.mounts) !== canonicalHostPaths[index]) {
+    const mappedHostPath = guestToHost(canonicalGuestPath, options.mounts, options.volumes);
+    if (mappedHostPath !== canonicalHostPaths[index]) {
       throw new Error(
         `Source symlink does not resolve to its approved host path: ${options.hostPaths[index]}`,
       );

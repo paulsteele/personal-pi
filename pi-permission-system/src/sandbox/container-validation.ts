@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { MountGrant } from "./mounts.ts";
+import type { VolumeGrant } from "./volumes.ts";
 import {
   consumeInspectedToolImageMounts,
   inspectedToolMountSchema,
@@ -23,11 +24,36 @@ export const containerDetailsSchema = z.looseObject({
   Mounts: z.array(inspectedToolMountSchema),
 });
 
+type InspectedContainerMount = z.output<typeof containerDetailsSchema>["Mounts"][number];
+
+function matchesApprovedBind(
+  mounted: InspectedContainerMount,
+  mounts: readonly MountGrant[],
+): boolean {
+  const approved = mounts.find(
+    (grant) => grant.source === mounted.Source && grant.destination === mounted.Destination,
+  );
+  return (
+    approved !== undefined && mounted.Type === "bind" && mounted.RW === (approved.access === "rw")
+  );
+}
+
+function matchesApprovedVolume(
+  mounted: InspectedContainerMount,
+  volumes: readonly VolumeGrant[],
+): boolean {
+  const approved = volumes.find(
+    (volume) => volume.name === mounted.Name && volume.destination === mounted.Destination,
+  );
+  return approved !== undefined && mounted.RW === (approved.access === "rw");
+}
+
 export function validateCreatedContainer(
   value: unknown,
   sessionId: string,
   mounts: readonly MountGrant[],
   toolImageMounts: readonly ToolImageMount[] = [],
+  volumes: readonly VolumeGrant[] = [],
 ): string {
   const container = containerDetailsSchema.parse(value);
   const belongsToSession = container.Config.Labels?.["pi.sandbox.session"] === sessionId;
@@ -55,19 +81,16 @@ export function validateCreatedContainer(
     containerId: container.Id,
     staticDir: container.StaticDir,
   };
-  const hostMounts = consumeInspectedToolImageMounts(inspectedMounts);
-  if (hostMounts.length !== mounts.length) {
+  const containerMounts = consumeInspectedToolImageMounts(inspectedMounts);
+  if (containerMounts.length !== mounts.length + volumes.length) {
     throw new Error("Created container has an unexpected mount count");
   }
   const seenDestinations = new Set<string>();
-  for (const mounted of hostMounts) {
-    const approved = mounts.find(
-      (grant) => grant.source === mounted.Source && grant.destination === mounted.Destination,
-    );
+  for (const mounted of containerMounts) {
     const matchesApprovedGrant =
-      approved !== undefined &&
-      mounted.Type === "bind" &&
-      mounted.RW === (approved.access === "rw");
+      mounted.Type === "volume"
+        ? matchesApprovedVolume(mounted, volumes)
+        : matchesApprovedBind(mounted, mounts);
     const isDuplicateDestination = seenDestinations.has(mounted.Destination);
     if (!matchesApprovedGrant || isDuplicateDestination) {
       throw new Error(`Created container has an unapproved mount: ${mounted.Destination}`);

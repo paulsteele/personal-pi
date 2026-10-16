@@ -23,7 +23,8 @@ import {
   processSupervisor as sharedProcessSupervisor,
   type GuestProcessOptions,
 } from "./process.ts";
-import { declaredBindMount, declaredWorkspaceMount } from "./declaration-mounts.ts";
+import { declaredMount, declaredWorkspaceMount } from "./declaration-mounts.ts";
+import { projectVolumeGrant, validateVolumeTopology, type VolumeGrant } from "./volumes.ts";
 import { dirname } from "node:path";
 import { containerIdentity } from "./container-identity.ts";
 import { startLoopbackForwarders, devcontainerPorts } from "./ports.ts";
@@ -123,7 +124,7 @@ export class SandboxSession {
     this.filesystem = new GuestFilesystem(
       () => this.environment,
       (processOptions) => this.execute(processOptions),
-      { mounts: () => this.mounts },
+      { mounts: () => this.mounts, volumes: () => this.volumes },
     );
   }
 
@@ -140,6 +141,9 @@ export class SandboxSession {
   }
   get mounts(): readonly MountGrant[] {
     return this.record?.mounts ?? [];
+  }
+  get volumes(): readonly VolumeGrant[] {
+    return this.record?.volumes ?? [];
   }
   get containerName(): string {
     return containerIdentity({
@@ -283,9 +287,31 @@ export class SandboxSession {
         throw new Error("Expanded workspace mount was not approved");
       }
       const mountGrants = [workspaceGrant];
+      const volumeGrants: VolumeGrant[] = [];
       for (const mountDeclaration of this.options.resolved.definition.mounts ?? []) {
-        const bindMount = declaredBindMount(mountDeclaration, dirname(this.options.resolved.path));
-        const grant = await createMountGrant({ ...bindMount, privateStorage });
+        const declared = declaredMount(mountDeclaration, dirname(this.options.resolved.path));
+        if (declared.kind === "volume") {
+          const volume = projectVolumeGrant({
+            projectRoot: this.options.resolved.project.root,
+            destination: declared.destination,
+            access: declared.access,
+          });
+          if (
+            !(await this.options.confirm(
+              `Approve project volume shared by sessions of this checkout? ${volume.name} -> ${volume.destination} (${volume.access})`,
+            ))
+          ) {
+            throw new Error("Declared project volume was not approved");
+          }
+          volumeGrants.push(volume);
+          continue;
+        }
+        const grant = await createMountGrant({
+          path: declared.path,
+          destination: declared.destination,
+          access: declared.access,
+          privateStorage,
+        });
         if (
           !(await this.options.confirm(
             `Approve declared host bind for this session? ${grant.source} -> ${grant.destination} (${grant.access})`,
@@ -316,12 +342,14 @@ export class SandboxSession {
         }
       }
       validateMountTopology(mountGrants);
+      validateVolumeTopology(mountGrants, volumeGrants);
       const environment = await createDevcontainer({
         resolved: this.options.resolved,
         cacheDirectory: join(sandboxStorageRoot(this.options.agentDir), "tool-cache"),
         buildTimeoutMs: this.options.buildTimeoutMs,
         startupTimeoutMs: this.options.startupTimeoutMs,
         mounts: mountGrants,
+        volumes: volumeGrants,
         privateStorage: sandboxStorageRoot(this.options.agentDir),
         sessionId: this.options.sessionId,
         directory: this.directory,
@@ -341,6 +369,7 @@ export class SandboxSession {
         baseDefinitionRevision: this.options.resolved.baseRevision,
         generation: 1,
         mounts: mountGrants,
+        volumes: volumeGrants,
         environment,
       };
     }
@@ -440,6 +469,7 @@ export class SandboxSession {
         checkpointInventory: toolingChanged ? undefined : record.environment.toolInventory,
         checkpointToolImageMounts: toolingChanged ? undefined : record.environment.toolImageMounts,
         mounts,
+        volumes: record.volumes ?? [],
         privateStorage: sandboxStorageRoot(this.options.agentDir),
         sessionId: this.options.sessionId,
         directory: requiresNewContainer
@@ -602,6 +632,7 @@ if record.exists():
     }
     const updatedMounts = [...previous.mounts.filter((mount) => mount !== existing), grant];
     validateMountTopology(updatedMounts);
+    validateVolumeTopology(updatedMounts, previous.volumes ?? []);
     const approvedRevision = this.revision;
     if (
       !(await this.options.confirm(
@@ -645,6 +676,7 @@ if record.exists():
         checkpointInventory: previous.environment.toolInventory,
         checkpointToolImageMounts: previous.environment.toolImageMounts,
         mounts: updatedMounts,
+        volumes: previous.volumes ?? [],
         privateStorage: sandboxStorageRoot(this.options.agentDir),
         sessionId: this.options.sessionId,
         directory: join(this.directory, `generation-${generation}`),
@@ -786,6 +818,7 @@ if record.exists():
         buildTimeoutMs: this.options.buildTimeoutMs,
         startupTimeoutMs: this.options.startupTimeoutMs,
         mounts: previous.mounts,
+        volumes: previous.volumes ?? [],
         privateStorage: sandboxStorageRoot(this.options.agentDir),
         sessionId: this.options.sessionId,
         directory: join(this.directory, `generation-${generation}`),

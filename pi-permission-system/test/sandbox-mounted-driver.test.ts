@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createDevcontainer } from "../src/sandbox/driver.ts";
 import { catalogTool } from "../src/sandbox/tool-catalog.ts";
 import { toolImageMount } from "../src/sandbox/tool-image-mounts.ts";
+import { projectVolumeGrant, type VolumeGrant } from "../src/sandbox/volumes.ts";
 
 const mocks = vi.hoisted(() => ({ cli: vi.fn(), adapter: vi.fn(), exec: vi.fn() }));
 vi.mock("node:child_process", () => ({ execFile: mocks.exec }));
@@ -43,7 +44,7 @@ afterEach(async () => {
   );
 });
 
-async function mountedDriverFixture() {
+async function mountedDriverFixture(volumes: VolumeGrant[] = []) {
   const directory = await mkdtemp(join(tmpdir(), "mounted-driver-"));
   directories.push(directory);
   const workspace = join(directory, "workspace");
@@ -82,6 +83,13 @@ async function mountedDriverFixture() {
         SubPath: mount.subpath,
         RW: false,
       },
+      ...volumes.map((volume) => ({
+        Type: "volume",
+        Name: volume.name,
+        Source: `/var/lib/containers/storage/volumes/${volume.name}/_data`,
+        Destination: volume.destination,
+        RW: volume.access === "rw",
+      })),
     ],
   };
   const engineCalls: string[][] = [];
@@ -136,6 +144,7 @@ async function mountedDriverFixture() {
       project: { kind: "projects" as const, id: "d".repeat(64), root: workspace },
     },
     mounts: [hostMount],
+    volumes,
     sessionId: "session",
     directory: join(directory, "session"),
     privateStorage: join(directory, "private"),
@@ -208,6 +217,37 @@ it("reports a missing saved artifact without starting a replacement container", 
     "Saved tool artifact unavailable",
   );
   expect(mocks.cli.mock.calls.some(([{ args }]) => args[0] === "up")).toBe(false);
+});
+
+it("creates approved project volumes before startup and passes them to the engine", async () => {
+  const volume = projectVolumeGrant({
+    projectRoot: "/projects/defaults",
+    destination: "/workspace/node_modules",
+    access: "rw",
+  });
+  const fixture = await mountedDriverFixture([volume]);
+  await createDevcontainer(fixture.options);
+  const volumeCreation = fixture.engineCalls.find(
+    (args) => args[0] === "volume" && args[1] === "create",
+  );
+  expect(volumeCreation?.at(-1)).toBe(volume.name);
+  const authority = mocks.adapter.mock.calls[0]![0].authority;
+  expect(authority.volumes).toEqual([
+    `type=volume,source=${volume.name},target=/workspace/node_modules`,
+  ]);
+});
+
+it("refuses a created container whose volume is not the approved project volume", async () => {
+  const volume = projectVolumeGrant({
+    projectRoot: "/projects/defaults",
+    destination: "/workspace/node_modules",
+    access: "rw",
+  });
+  const fixture = await mountedDriverFixture([volume]);
+  fixture.details.Mounts[2] = { ...fixture.details.Mounts[2]!, Name: "someone-elses-volume" };
+  await expect(createDevcontainer(fixture.options)).rejects.toThrow(
+    "unapproved mount: /workspace/node_modules",
+  );
 });
 
 it("refuses reused containers with writable tool image descriptors", async () => {

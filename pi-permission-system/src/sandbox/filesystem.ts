@@ -2,6 +2,7 @@ import type { Stats } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import type { PreparedEnvironment } from "./driver.ts";
 import { guestToHost, type MountGrant } from "./mounts.ts";
+import type { VolumeGrant } from "./volumes.ts";
 import { runGuestProcess } from "./process.ts";
 import { awaitSandboxWork } from "./cancellation.ts";
 
@@ -25,6 +26,7 @@ type HostPathStatus =
 
 interface GuestFilesystemOptions {
   mounts?: () => readonly MountGrant[];
+  volumes?: () => readonly VolumeGrant[];
   statHostPath?: (path: string) => Promise<Pick<Stats, "isFile" | "isDirectory">>;
 }
 
@@ -150,7 +152,11 @@ export class GuestFilesystem {
       return;
     }
     signal?.throwIfAborted();
-    const mountedHostPath = guestToHost(guestAccess.path, this.options.mounts?.() ?? []);
+    const mountedHostPath = guestToHost(
+      guestAccess.path,
+      this.options.mounts?.() ?? [],
+      this.options.volumes?.() ?? [],
+    );
     const hostPath = mountedHostPath ?? guestAccess.path;
     const hostStatus = await this.inspectHostPath(hostPath, signal);
     signal?.throwIfAborted();

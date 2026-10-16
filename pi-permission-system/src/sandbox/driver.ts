@@ -15,6 +15,7 @@ import { containerIdentity } from "./container-identity.ts";
 import { validateCreatedContainer } from "./container-validation.ts";
 import { imageDetailsSchema, validateImageIsolation } from "./metadata-policy.ts";
 import { type MountGrant, mountArgument } from "./mounts.ts";
+import { ensureProjectVolume, volumeMountArgument, type VolumeGrant } from "./volumes.ts";
 import { devcontainerPorts } from "./ports.ts";
 import { canonicalPath, ensurePrivateDirectory, sha256Hex } from "./storage.ts";
 import { provisionEnvironmentImage, type ToolInventory } from "./tool-provisioning.ts";
@@ -102,6 +103,7 @@ export interface PreparedEnvironment {
 export async function createDevcontainer(options: {
   resolved: ResolvedDefinition;
   mounts: MountGrant[];
+  volumes: readonly VolumeGrant[];
   sessionId: string;
   directory: string;
   privateStorage: string;
@@ -189,13 +191,10 @@ export async function createDevcontainer(options: {
   }
   const workspaceMount = options.mounts[0];
   definition.workspaceFolder ??= workspaceMount.destination;
-  definition.workspaceMount = `type=bind,source=${workspaceMount.source},target=${workspaceMount.destination}${workspaceMount.access === "ro" ? ",readonly" : ""}`;
-  definition.mounts = options.mounts
-    .slice(1)
-    .map(
-      (mount) =>
-        `type=bind,source=${mount.source},target=${mount.destination}${mount.access === "ro" ? ",readonly" : ""}`,
-    );
+  definition.workspaceMount = mountArgument(workspaceMount);
+  const volumeMountArguments = options.volumes.map(volumeMountArgument);
+  const approvedMountArguments = [...options.mounts.map(mountArgument), ...volumeMountArguments];
+  definition.mounts = [...options.mounts.slice(1).map(mountArgument), ...volumeMountArguments];
   const imageName = `localhost/pi-sandbox-${sha256Hex(options.sessionId).slice(0, 20)}`;
   const authority: EngineAuthority = {
     label,
@@ -211,7 +210,7 @@ export async function createDevcontainer(options: {
     contexts: options.resolved.buildContext ? [options.resolved.buildContext] : [],
     containerfiles: options.resolved.containerfile ? [options.resolved.containerfile] : [],
     mounts: options.mounts,
-    volumes: [],
+    volumes: volumeMountArguments,
     ports: devcontainerPorts([].concat((definition.appPort as never) ?? [])),
     environment: definition.containerEnv ?? {},
     users: [
@@ -282,7 +281,7 @@ export async function createDevcontainer(options: {
         details.Config.Labels?.["devcontainer.metadata"] ?? "",
         options.hostEnvironment,
       );
-      validateImageIsolation(details, options.mounts.map(mountArgument));
+      validateImageIsolation(details, approvedMountArguments);
       authority.images.push(details.Id);
       authority.users = [...new Set([...authority.users, details.Config.User || "root"])];
       if (
@@ -428,13 +427,12 @@ export async function createDevcontainer(options: {
       image.Config.Labels?.["devcontainer.metadata"] ?? "",
       options.hostEnvironment,
     );
-    validateImageIsolation(image, options.mounts.map(mountArgument));
+    validateImageIsolation(image, approvedMountArguments);
     if (options.resolved.layers && !options.checkpointImage) {
       if (!options.cacheDirectory) {
         throw new Error("Layered provisioning requires a private image cache directory");
       }
       stage("Resolving shared tooling artifacts and infrastructure image…");
-      const approvedMountArguments = options.mounts.map(mountArgument);
       const platform = await inspectToolPlatform({
         run: toolEngine,
         imageId: image.Id,
@@ -479,7 +477,7 @@ export async function createDevcontainer(options: {
       );
       toolInventory = provisioned.inventory;
       toolImageMounts = provisioned.toolImageMounts;
-      validateImageIsolation(image, options.mounts.map(mountArgument));
+      validateImageIsolation(image, approvedMountArguments);
     }
     if (options.resolved.layers && options.checkpointImage && toolImageMounts === undefined) {
       throw new Error(
@@ -509,6 +507,17 @@ export async function createDevcontainer(options: {
     definition.image = image.Id;
     authority.users = [...new Set([...authority.users, image.Config.User || "root"])];
     await writeFile(snapshot, JSON.stringify(definition), { mode: 0o600 });
+    if (options.volumes.length) {
+      stage("Preparing shared project volumes…");
+    }
+    for (const volume of options.volumes) {
+      await ensureProjectVolume({
+        run: toolEngine,
+        volume,
+        projectRoot: options.resolved.project.root,
+        signal: options.signal,
+      });
+    }
     stage("Starting devcontainer and running lifecycle hooks…");
     const result = JSON.parse(
       await run([
@@ -531,6 +540,7 @@ export async function createDevcontainer(options: {
       options.sessionId,
       options.mounts,
       toolImageMounts,
+      options.volumes,
     );
     stage("Loading container environment…");
     const remoteEnvironmentOutput = await run([
