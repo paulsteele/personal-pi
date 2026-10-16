@@ -24,7 +24,7 @@ Permission System and Progress Observer load before Sidebar so their replayable 
 After the public repository and release tag exist:
 
 ```sh
-pi install https://github.com/paulsteele/personal-pi@v2.8.0
+pi install https://github.com/paulsteele/personal-pi@v2.8.1
 ```
 
 The dotfiles repository normally records the same pinned source in `~/.pi/agent/settings.json`, so Pi installs a missing user package automatically at startup when online. The public HTTPS URL requires no SSH alias or repository credentials.
@@ -45,7 +45,7 @@ Trust the checkout when Pi prompts. The committed `.pi/settings.json` disables a
 
 ## Verification
 
-Checks are local by design; this repository does not use GitHub Actions. All workspaces are tested with pinned Pi 1.0.0 development packages. Host-provided Pi packages and TypeBox use `*` peer ranges and are not bundled as runtime dependencies.
+Checks are local by design; this repository does not use GitHub Actions. All workspaces are tested with pinned Pi 1.3.0 development packages. Host-provided Pi packages and TypeBox use `*` peer ranges and are not bundled as runtime dependencies.
 
 ```sh
 bun install --frozen-lockfile

@@ -98,7 +98,7 @@ describe("Pi package integration", () => {
     expect(lock.packages["@paulsteele/pi-pr-review"]).toEqual(["@paulsteele/pi-pr-review@workspace:pr-review"]);
   });
 
-  test("uses host-provided peers and pins Pi development packages to 1.0.0", () => {
+  test("uses host-provided peers and pins Pi development packages to 1.3.0", () => {
     const hostPackages = [
       "@earendil-works/pi-agent-core",
       "@earendil-works/pi-ai",
@@ -114,7 +114,7 @@ describe("Pi package integration", () => {
           expect(pkg.peerDependencies[name]).toBe("*");
         }
         if (name !== "typebox" && name in (pkg.devDependencies ?? {})) {
-          expect(pkg.devDependencies[name]).toBe("1.0.0");
+          expect(pkg.devDependencies[name]).toBe("1.3.0");
         }
       }
     }
