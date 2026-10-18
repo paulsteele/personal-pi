@@ -66,6 +66,8 @@ it.each([
   ["run", "-e", "TOKEN=secret", "debian:bookworm"],
   ["run", "-p", "0.0.0.0:3000:3000", "debian:bookworm"],
   ["run", "--security-opt=seccomp=unconfined", "debian:bookworm"],
+  ["run", "--security-opt", "label=type:spc_t", "debian:bookworm"],
+  ["run", "--userns=host", "debian:bookworm"],
   ["run", "other-image"],
   ["exec", "other-container", "bash"],
   ["system", "prune"],
@@ -73,6 +75,29 @@ it.each([
   ["build", "-f", "/repo/Containerfile", "/other"],
 ])("blocks an unapproved engine operation %j", (...args) => {
   expect(() => authorizeEngineArguments(args, "/repo", authority)).toThrow();
+});
+
+it("accepts the Linux Podman label and user-namespace options the reference CLI adds", () => {
+  const authorized = authorizeEngineArguments(
+    [
+      "run",
+      "--security-opt",
+      "label=disable",
+      "--userns=keep-id",
+      "--entrypoint",
+      "/bin/sh",
+      "debian:bookworm",
+      "-c",
+      "sleep infinity",
+    ],
+    "/repo",
+    authority,
+  );
+  expect(authorized).toEqual(
+    expect.arrayContaining(["--security-opt", "label=disable", "--userns=keep-id"]),
+  );
+  expect(authorized).toContain("--security-opt=no-new-privileges");
+  expect(authorized).toContain("--cap-drop=ALL");
 });
 
 it("permits exactly the approved project volume mount", () => {

@@ -9,6 +9,10 @@ import * as profileInstallation from "../src/sandbox/profile-tool-installation.t
 import { globalToolProfilePath, projectToolProfilePath } from "../src/sandbox/tool-profile.ts";
 
 const planner = vi.hoisted(() => vi.fn());
+vi.mock("../src/sandbox/tool-prerequisites.ts", async (original) => ({
+  ...(await original<typeof import("../src/sandbox/tool-prerequisites.ts")>()),
+  findMissingPrerequisites: async () => [],
+}));
 vi.mock("../src/sandbox/image-tools.ts", () => ({ planImageTools: planner }));
 afterEach(() => {
   vi.restoreAllMocks();
@@ -279,6 +283,7 @@ it("reports the post-rebuild probe failure without reapplying or claiming instal
   ).rejects.toThrow("runtime executable probe for bun failed: Error: Guest process timed out");
   expect(fixture.apply).toHaveBeenCalledTimes(1);
   expect(report.mock.calls.map(([text]) => text)).toEqual([
+    "Checking bun prerequisites in the sandbox image…",
     "Preparing bun (1.3.0) image installation…",
     "Rebuilding devcontainer image for bun…",
     "Devcontainer rebuild complete.",

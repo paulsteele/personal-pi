@@ -15,14 +15,18 @@ import {
 import { resolveDefinition } from "./definition.ts";
 import { publishPrivateText, readPrivateText, sha256Hex, withPrivateLock } from "./storage.ts";
 import { validateEnvironmentSources } from "./environment-layers.ts";
+import { prerequisiteProviderIds } from "./tool-prerequisites.ts";
 
-function profileEntry(installation: ImageToolInstallation): ToolProfileEntry {
+function profileEntry(
+  installation: ImageToolInstallation,
+  dependencies: string[],
+): ToolProfileEntry {
   const { id, ...recipe } = installation;
   const managedTool = managedCatalogTool(id, installation.version);
   if (managedTool) {
     return { kind: "catalog", version: managedTool.version };
   }
-  return { kind: "recipe", ...recipe, dependencies: [] };
+  return { kind: "recipe", ...recipe, dependencies };
 }
 
 export async function planProfileToolInstallation(
@@ -46,9 +50,17 @@ export async function planProfileToolInstallation(
   const stored = await loadToolProfile(path);
   const profile = stored?.profile ?? parseToolProfile({ version: 1, tools: {}, exclude: [] });
   let changed = false;
+  const existingTools = resolveToolProfiles(
+    layers.globalTools.profile,
+    layers.projectTools?.profile,
+  );
   for (const installation of installations) {
     const id = installation.id;
-    const next = profileEntry(installation);
+    const existingPrerequisiteProviderIds = prerequisiteProviderIds(
+      installation.prerequisites,
+      existingTools.filter((tool) => tool.id !== id),
+    );
+    const next = profileEntry(installation, existingPrerequisiteProviderIds);
     if (profile.tools[id] && buildContentKey(profile.tools[id]) === buildContentKey(next)) {
       continue;
     }

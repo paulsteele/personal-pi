@@ -15,22 +15,36 @@ import type { TSchema } from "typebox";
 import { posix } from "node:path";
 import { readFile } from "node:fs/promises";
 import { SandboxArtifacts } from "./artifacts.ts";
+import { HOST_READ_TOOLS, hostReadablePath } from "./host-read-roots.ts";
 import type { SandboxSession } from "./session.ts";
 
 export function registerSandboxTools(
   pi: ExtensionAPI,
   getSession: () => SandboxSession,
   isHostMode: () => boolean = () => false,
+  agentDir?: string,
 ): void {
   const cwd = process.cwd();
   const filesystem = () => getSession().filesystem;
+  const shouldRunPiResourceReadOnHost = async (toolName: string, input: unknown) => {
+    if (!agentDir || !HOST_READ_TOOLS.has(toolName)) {
+      return false;
+    }
+    const requestedPath = (input as { path?: unknown } | undefined)?.path;
+    const isHostReadablePath = (await hostReadablePath(requestedPath, agentDir)) !== undefined;
+    return isHostReadablePath;
+  };
   const registerWithHostFallback = <TParams extends TSchema, TDetails, TState>(
     guest: ToolDefinition<TParams, TDetails, TState>,
     host: ToolDefinition<TParams, TDetails, TState>,
   ) => {
     pi.registerTool({
       ...guest,
-      execute: (...args) => (isHostMode() ? host : guest).execute(...args),
+      execute: async (...args) => {
+        const runsOnHost =
+          isHostMode() || (await shouldRunPiResourceReadOnHost(guest.name, args[1]));
+        return (runsOnHost ? host : guest).execute(...args);
+      },
     });
   };
   registerWithHostFallback(

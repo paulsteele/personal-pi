@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   OWNER_ONLY_DIRECTORY_MODE,
@@ -17,11 +17,26 @@ function cap(value: unknown): unknown {
   return value;
 }
 
+export const REVIEW_LOG_ROTATION_BYTES = 500 * 1024 * 1024;
+
 export class ReviewLogger {
-  constructor(private readonly path: string) {}
+  constructor(
+    private readonly path: string,
+    private readonly rotationBytes = REVIEW_LOG_ROTATION_BYTES,
+  ) {}
+
+  /** Keeps one previous log as `<path>.1` once the current log reaches the rotation size. */
+  private rotateWhenFull(): void {
+    const currentBytes = statSync(this.path, { throwIfNoEntry: false })?.size ?? 0;
+    if (currentBytes >= this.rotationBytes) {
+      renameSync(this.path, `${this.path}.1`);
+    }
+  }
+
   review(event: string, details: Record<string, unknown> = {}): void {
     try {
       mkdirSync(dirname(this.path), { recursive: true, mode: OWNER_ONLY_DIRECTORY_MODE });
+      this.rotateWhenFull();
       restrictExistingPathToOwner(dirname(this.path), OWNER_ONLY_DIRECTORY_MODE);
       restrictExistingPathToOwner(this.path, OWNER_ONLY_FILE_MODE);
       const bounded = cap(details) as Record<string, unknown>;

@@ -96,6 +96,60 @@ export const REQUIRED_LANGUAGE_SERVERS = STANDARD_TOOL_CATALOG.filter(
   (tool) => tool.role === "language-server",
 ).map((tool) => tool.id);
 
+function compareVersionSegments(left: string, right: string): number {
+  const leftSegments = left.split(/[.-]/);
+  const rightSegments = right.split(/[.-]/);
+  for (let index = 0; index < Math.max(leftSegments.length, rightSegments.length); index++) {
+    const leftSegmentValue = Number(leftSegments[index]) || 0;
+    const rightSegmentValue = Number(rightSegments[index]) || 0;
+    const segmentDifference = leftSegmentValue - rightSegmentValue;
+    if (segmentDifference !== 0) {
+      return segmentDifference;
+    }
+  }
+  return 0;
+}
+
+export class MissingCatalogVersionError extends Error {
+  readonly isNewerThanCatalog: boolean;
+
+  constructor(
+    readonly toolId: string,
+    readonly requestedVersion: string,
+    readonly availableVersions: readonly string[],
+    readonly profilePath?: string,
+  ) {
+    const isNewerThanCatalog = availableVersions.every(
+      (available) => compareVersionSegments(requestedVersion, available) > 0,
+    );
+    const location = profilePath ? ` (${profilePath} → tools.${toolId})` : "";
+    const known = availableVersions.length
+      ? `This extension provides ${availableVersions.join(", ")}.`
+      : "This extension does not provide this tool.";
+    const newerHint =
+      isNewerThanCatalog && availableVersions.length
+        ? " The profile may have been written by a newer pi-permission-system; /reload or update the extension."
+        : "";
+    super(
+      `No verified tooling recipe for ${toolId}@${requestedVersion}${location}. ${known}${newerHint}`,
+    );
+    this.isNewerThanCatalog = isNewerThanCatalog;
+  }
+
+  get replacementVersion(): string | undefined {
+    return this.availableVersions.at(-1);
+  }
+
+  withProfilePath(profilePath: string): MissingCatalogVersionError {
+    return new MissingCatalogVersionError(
+      this.toolId,
+      this.requestedVersion,
+      this.availableVersions,
+      profilePath,
+    );
+  }
+}
+
 export function catalogTool(
   id: string,
   version: string,
@@ -103,7 +157,10 @@ export function catalogTool(
 ): CatalogTool {
   const tool = catalog.find((entry) => entry.id === id && entry.version === version);
   if (!tool) {
-    throw new Error(`No verified tooling recipe for ${id}@${version}`);
+    const availableVersions = catalog
+      .filter((entry) => entry.id === id)
+      .map((entry) => entry.version);
+    throw new MissingCatalogVersionError(id, version, availableVersions);
   }
   return tool;
 }

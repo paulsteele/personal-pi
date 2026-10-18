@@ -1,7 +1,13 @@
-import { lstat, open, readdir, unlink } from "node:fs/promises";
+import { lstat, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { podmanOutput } from "./driver.ts";
+import {
+  sessionHashPrefixOfImage,
+  sessionImageHashPrefix,
+  SESSION_IMAGE_REPOSITORY_PREFIX,
+} from "./container-identity.ts";
+import { acquireOwnerLock, hasLiveOwner } from "./owner-lock.ts";
 import { sessionRecordSchema } from "./session-record.ts";
 import { sandboxStorageRoot } from "./settings.ts";
 import {
@@ -13,42 +19,24 @@ import {
 
 export const inactiveSessionRetentionMs = 7 * 24 * 60 * 60 * 1000;
 
-const containerInspectionSchema = z.object({
-  Id: z.string(),
-  Config: z.object({ Labels: z.record(z.string(), z.string()) }),
-  State: z.object({ Running: z.boolean(), Status: z.string() }),
-});
+const sessionDirectoryPattern = /^[a-f0-9]{64}$/;
+const containerIdPattern = /^[a-f0-9]{64}$/;
 
-async function stoppedSessionContainers(sessionId: string): Promise<string[] | undefined> {
-  const output = await podmanOutput([
-    "ps",
-    "--all",
-    "--no-trunc",
-    "--filter",
-    `label=pi.sandbox.session=${sessionId}`,
-    "--format",
-    "{{.ID}}",
-  ]);
-  const containers: string[] = [];
-  for (const id of output.split(/\s+/).filter(Boolean)) {
-    if (!/^[a-f0-9]{64}$/.test(id)) {
-      throw new Error("Invalid sandbox container ID during pruning");
-    }
-    const details = containerInspectionSchema.parse(
-      JSON.parse(await podmanOutput(["inspect", "--type", "container", id]))[0],
-    );
-    if (details.Id !== id || details.Config.Labels["pi.sandbox.session"] !== sessionId) {
-      throw new Error("Sandbox pruning encountered a container owned by another session");
-    }
-    const isStopped =
-      !details.State.Running &&
-      ["exited", "stopped", "created", "configured"].includes(details.State.Status);
-    if (!isStopped) {
-      return undefined;
-    }
-    containers.push(id);
-  }
-  return containers;
+interface SessionContainer {
+  id: string;
+  sessionId: string;
+}
+
+const listedContainersSchema = z.array(
+  z.looseObject({
+    Id: z.string(),
+    Labels: z.record(z.string(), z.string()).nullable().optional(),
+  }),
+);
+
+interface SessionImage {
+  reference: string;
+  sessionHashPrefix: string;
 }
 
 export async function removeSupersededContainer(
@@ -68,59 +56,192 @@ export async function removeSupersededContainer(
   }
 }
 
-async function pruneInactiveSession(
-  directory: string,
-  sessionHash: string,
-  nowUnixMs: number,
-): Promise<number> {
-  await rejectStorageSymlinks(directory);
-  const lockPath = join(directory, "owner.lock");
-  const lock = await open(lockPath, "wx", 0o600).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "EEXIST") {
-      return undefined;
+async function listSessionContainers(): Promise<SessionContainer[]> {
+  const output = await podmanOutput([
+    "ps",
+    "--all",
+    "--no-trunc",
+    "--filter",
+    "label=pi.sandbox.session",
+    "--format",
+    "json",
+  ]);
+  const containers: SessionContainer[] = [];
+  for (const listed of listedContainersSchema.parse(JSON.parse(output || "[]"))) {
+    const sessionId = listed.Labels?.["pi.sandbox.session"];
+    if (sessionId && containerIdPattern.test(listed.Id)) {
+      containers.push({ id: listed.Id, sessionId });
     }
-    throw error;
-  });
+  }
+  return containers;
+}
+
+async function listSessionImages(): Promise<SessionImage[]> {
+  const output = await podmanOutput([
+    "images",
+    "--filter",
+    `reference=${SESSION_IMAGE_REPOSITORY_PREFIX}*`,
+    "--format",
+    "{{.Repository}}:{{.Tag}}",
+  ]);
+  const images: SessionImage[] = [];
+  for (const reference of output.split(/\s+/).filter(Boolean)) {
+    const sessionHashPrefix = sessionHashPrefixOfImage(reference);
+    if (sessionHashPrefix) {
+      images.push({ reference, sessionHashPrefix });
+    }
+  }
+  return images;
+}
+
+async function removeImages(
+  images: readonly SessionImage[],
+  report: (text: string) => void,
+): Promise<void> {
+  for (const image of images) {
+    try {
+      await podmanOutput(["rmi", image.reference]);
+      report(`Removed unused sandbox image ${image.reference}.\n`);
+    } catch (error) {
+      report(`Could not remove sandbox image ${image.reference}: ${String(error)}\n`);
+    }
+  }
+}
+
+export async function removeSessionImages(
+  sessionId: string,
+  report: (text: string) => void,
+): Promise<void> {
+  const hashPrefix = sessionImageHashPrefix(sessionId);
+  const images = await listSessionImages();
+  await removeImages(
+    images.filter((image) => image.sessionHashPrefix === hashPrefix),
+    report,
+  );
+}
+
+async function sessionDirectoryNames(sessionsDirectory: string): Promise<string[]> {
+  const entries = await readdir(sessionsDirectory, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isDirectory() && sessionDirectoryPattern.test(entry.name))
+    .map((entry) => entry.name);
+}
+
+async function liveSessionHashes(
+  sessionsDirectory: string,
+  sessionHashes: readonly string[],
+): Promise<Set<string>> {
+  const live = new Set<string>();
+  for (const sessionHash of sessionHashes) {
+    if (await hasLiveOwner(join(sessionsDirectory, sessionHash, "owner.lock"))) {
+      live.add(sessionHash);
+    }
+  }
+  return live;
+}
+
+async function markContainerDisposed(directory: string, nowUnixMs: number): Promise<void> {
+  const lock = await acquireOwnerLock(join(directory, "owner.lock"));
   if (!lock) {
-    return 0;
+    return;
   }
   try {
-    await lock.writeFile(JSON.stringify({ pid: process.pid }));
     const recordPath = join(directory, "session.json");
     const stored = await readPrivateText(recordPath);
     if (!stored) {
-      return 0;
+      return;
     }
     const record = sessionRecordSchema.parse(JSON.parse(stored.text));
-    if (sha256Hex(record.sessionId) !== sessionHash) {
-      throw new Error("Sandbox pruning encountered a mismatched session record");
+    if (record.containerPrunedAtUnixMs !== undefined) {
+      return;
     }
-    const inactiveSinceUnixMs = record.inactiveSinceUnixMs ?? (await lstat(recordPath)).mtimeMs;
-    if (nowUnixMs - inactiveSinceUnixMs < inactiveSessionRetentionMs) {
-      return 0;
-    }
-    const containers = await stoppedSessionContainers(record.sessionId);
-    if (!containers) {
-      return 0;
-    }
-    if (record.containerPrunedAtUnixMs === undefined) {
-      await publishPrivateText(
-        recordPath,
-        JSON.stringify({
-          ...record,
-          inactiveSinceUnixMs: Math.floor(inactiveSinceUnixMs),
-          containerPrunedAtUnixMs: nowUnixMs,
-        }),
-        stored.revision,
-      );
-    }
-    for (const container of containers) {
-      await podmanOutput(["rm", container]);
-    }
-    return containers.length;
+    await publishPrivateText(
+      recordPath,
+      JSON.stringify({
+        ...record,
+        inactiveSinceUnixMs: record.inactiveSinceUnixMs ?? nowUnixMs,
+        containerPrunedAtUnixMs: nowUnixMs,
+      }),
+      stored.revision,
+    );
   } finally {
-    await lock.close();
-    await unlink(lockPath);
+    await lock.release();
+  }
+}
+
+async function removeAbandonedContainers(options: {
+  sessionsDirectory: string;
+  liveHashes: ReadonlySet<string>;
+  nowUnixMs: number;
+  report: (text: string) => void;
+}): Promise<void> {
+  const disposedSessionHashes = new Set<string>();
+  for (const container of await listSessionContainers()) {
+    const sessionHash = sha256Hex(container.sessionId);
+    if (options.liveHashes.has(sessionHash)) {
+      continue;
+    }
+    try {
+      await podmanOutput(["rm", "--force", "--time=0", container.id]);
+      disposedSessionHashes.add(sessionHash);
+      options.report(`Removed abandoned sandbox container ${container.id.slice(0, 12)}.\n`);
+    } catch (error) {
+      options.report(`Could not remove sandbox container ${container.id}: ${String(error)}\n`);
+    }
+  }
+  for (const sessionHash of disposedSessionHashes) {
+    try {
+      await markContainerDisposed(join(options.sessionsDirectory, sessionHash), options.nowUnixMs);
+    } catch (error) {
+      options.report(`Could not update sandbox session ${sessionHash}: ${String(error)}\n`);
+    }
+  }
+}
+
+async function removeAbandonedSessionImages(options: {
+  liveHashes: ReadonlySet<string>;
+  report: (text: string) => void;
+}): Promise<void> {
+  const liveHashes = [...options.liveHashes];
+  const belongsToLiveSession = (image: SessionImage) =>
+    liveHashes.some((hash) => hash.startsWith(image.sessionHashPrefix));
+  const images = await listSessionImages();
+  await removeImages(
+    images.filter((image) => !belongsToLiveSession(image)),
+    options.report,
+  );
+}
+
+async function removeExpiredFailedStartDirectories(options: {
+  sessionsDirectory: string;
+  sessionHashes: readonly string[];
+  liveHashes: ReadonlySet<string>;
+  nowUnixMs: number;
+  report: (text: string) => void;
+}): Promise<void> {
+  for (const sessionHash of options.sessionHashes) {
+    if (options.liveHashes.has(sessionHash)) {
+      continue;
+    }
+    const directory = join(options.sessionsDirectory, sessionHash);
+    try {
+      await rejectStorageSymlinks(directory);
+      if (await readPrivateText(join(directory, "session.json"))) {
+        continue;
+      }
+      const inactiveForMs = options.nowUnixMs - (await lstat(directory)).mtimeMs;
+      if (inactiveForMs < inactiveSessionRetentionMs) {
+        continue;
+      }
+      const lock = await acquireOwnerLock(join(directory, "owner.lock"));
+      if (!lock) {
+        continue;
+      }
+      await rm(directory, { recursive: true, force: true });
+      options.report(`Removed expired failed-start sandbox directory ${sessionHash}.\n`);
+    } catch (error) {
+      options.report(`Could not prune sandbox session ${sessionHash}: ${String(error)}\n`);
+    }
   }
 }
 
@@ -130,30 +251,35 @@ export async function pruneInactiveSessions(options: {
   report: (text: string) => void;
 }): Promise<void> {
   const sessionsDirectory = join(sandboxStorageRoot(options.agentDir), "sessions");
+  const nowUnixMs = options.nowUnixMs ?? Date.now();
+  let sessionHashes: string[] = [];
   try {
     await rejectStorageSymlinks(sessionsDirectory);
-    const entries = await readdir(sessionsDirectory, { withFileTypes: true });
-    const nowUnixMs = options.nowUnixMs ?? Date.now();
-    for (const entry of entries) {
-      if (!entry.isDirectory() || !/^[a-f0-9]{64}$/.test(entry.name)) {
-        continue;
-      }
-      try {
-        const removed = await pruneInactiveSession(
-          join(sessionsDirectory, entry.name),
-          entry.name,
-          nowUnixMs,
-        );
-        if (removed > 0) {
-          options.report(`Pruned ${removed} inactive sandbox container(s) for ${entry.name}.\n`);
-        }
-      } catch (error) {
-        options.report(`Could not prune sandbox session ${entry.name}: ${String(error)}\n`);
-      }
-    }
+    sessionHashes = await sessionDirectoryNames(sessionsDirectory);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       options.report(`Could not scan inactive sandbox sessions: ${String(error)}\n`);
+      return;
+    }
+  }
+  const liveHashes = await liveSessionHashes(sessionsDirectory, sessionHashes);
+  const sweeps = [
+    () => removeAbandonedContainers({ sessionsDirectory, liveHashes, nowUnixMs, ...options }),
+    () => removeAbandonedSessionImages({ liveHashes, report: options.report }),
+    () =>
+      removeExpiredFailedStartDirectories({
+        sessionsDirectory,
+        sessionHashes,
+        liveHashes,
+        nowUnixMs,
+        report: options.report,
+      }),
+  ];
+  for (const sweep of sweeps) {
+    try {
+      await sweep();
+    } catch (error) {
+      options.report(`Sandbox cleanup step failed: ${String(error)}\n`);
     }
   }
 }

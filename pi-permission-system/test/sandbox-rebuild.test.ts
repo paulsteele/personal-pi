@@ -194,7 +194,8 @@ it("saves the rebuilt definition revision and reuses the tool image when the ses
   const retire = vi.fn(async () => {});
   const recordPath = join(f.session.directory, "session.json");
   ports.podman.mockImplementation(async (args: string[]) => {
-    if (args[0] === "rm") {
+    const removesSupersededContainer = args[0] === "rm" && args[1] === "original-container";
+    if (removesSupersededContainer) {
       expect(JSON.parse((await readPrivateText(recordPath))!.text)).toMatchObject({
         definitionRevision: "tools",
         generation: 2,
@@ -218,7 +219,7 @@ it("saves the rebuilt definition revision and reuses the tool image when the ses
   expect(
     await readPrivateText(join(f.session.directory, "definition-approval.json")),
   ).toBeUndefined();
-  await f.session.close();
+  await f.session.close("reload");
   const resumed = new SandboxSession({ ...f.session.options });
   try {
     await resumed.start();
@@ -287,6 +288,7 @@ it("does not roll back a successful rebuild when superseded-container removal fa
   });
   try {
     await f.session.rebuildFromDefinition(f.replacement);
+    ports.podman.mockResolvedValue("");
     expect(ports.podman).toHaveBeenCalledWith(["rm", "original-container"]);
     expect(ports.podman).not.toHaveBeenCalledWith(["start", "original-container"]);
     expect(f.session.generation).toBe(2);

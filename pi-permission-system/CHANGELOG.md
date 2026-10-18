@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.9.0 — 2026-10-18
+
+- Keep the running container across `/reload` and reattach it without `devcontainer up` or lifecycle hooks. Quit, new session, resume elsewhere, and fork now remove the container plus this session's `pi-sandbox-*` and checkpoint images; resuming later recreates the container from the definition with saved grants and volumes.
+- Remove orphaned session containers and unused `pi-sandbox-*` images during startup cleanup, and delete failed-start session directories with no record after seven days. A failed `devcontainer up` removes the container it created.
+- Take over owner locks left by exited processes automatically; a running owner still blocks the session.
+- When a resumed session's base definition changed, offer a rebuild that reapplies the saved binds instead of failing.
+- Add a TUI recovery menu for startup failures: retry, rebuild, open the relevant configuration, show the log, or turn the sandbox off for this session. Headless and RPC modes keep the hard failure.
+- Missing catalog versions name the profile file and entry plus the versions this extension provides, and the recovery menu can switch the entry to an available version.
+- Check unmanaged recipe prerequisites before approval. Prerequisites provided by another profile tool become ordered dependencies; any other missing prerequisite refuses the request with instructions to request it first.
+- Run `read`, `ls`, `grep`, and `find` on the host for Pi's package docs/examples, session transcripts, and other extensions' `config.json` files, so these paths no longer need mounts. Explicit denies still apply.
+- Serve guest file operations through one long-lived guest process per container. Requests time out independently, a lost server restarts automatically, and per-request timings are written to `guest-timing.jsonl`.
+- Keep the newest 25 startup logs per session, summarize `podman inspect` output in diagnostics, and rotate the permission review log at 500 MB.
+- Let `read`, `ls`, `grep`, and `find` read sandbox startup logs from the sandbox without a mount. Other files in sandbox session storage stay unreadable.
+- Redact `containerEnv`, `remoteEnv`, and approved host environment values from startup logs and console output, and log the container environment probe as a variable count instead of its values.
+- Fix a crash after every `podman inspect`: diagnostics passed text chunks to `Buffer.concat`.
+- Fix startup cleanup failing with a `podman ps` template error. Session containers are now listed as JSON and their labels read from that output.
+- Accept the `--security-opt label=disable` and `--userns=keep-id` options that the devcontainer CLI adds for Podman on Linux hosts. Startup on Linux previously failed with "Unsupported or unsafe engine runtime option".
+
 ## 2.8.0 — 2026-10-16
 
 - Accept the `Dockerfile-with-features` recipe that devcontainer features generate when the final stage is already named, the Containerfile has multiple stages, `build.target` is set, or a `# syntax` directive is present. These builds previously failed with "Unverified generated devcontainer build recipe".

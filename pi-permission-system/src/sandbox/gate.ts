@@ -8,6 +8,7 @@ import { expandHomePath } from "../expand-home.ts";
 import type { SandboxSession } from "./session.ts";
 import { loadSandboxSettings, type SandboxSettings } from "./settings.ts";
 import { guestToHost } from "./mounts.ts";
+import { HOST_READ_TOOLS, hostReadablePath } from "./host-read-roots.ts";
 
 const guestTools = new Set([
   "read",
@@ -106,7 +107,10 @@ export async function reviewSandboxToolCall(options: {
     options.ctx.signal?.throwIfAborted();
     return;
   }
-  if (options.isHostMode?.()) {
+  const readsPiResourceOnHost =
+    HOST_READ_TOOLS.has(tool.name) &&
+    (await hostReadablePath(options.input.path, options.agentDir)) !== undefined;
+  if (options.isHostMode?.() || readsPiResourceOnHost) {
     await reviewHostAction({
       agentDir: options.agentDir,
       toolName: tool.name,

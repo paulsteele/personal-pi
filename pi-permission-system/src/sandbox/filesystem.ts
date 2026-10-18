@@ -5,6 +5,7 @@ import { guestToHost, type MountGrant } from "./mounts.ts";
 import type { VolumeGrant } from "./volumes.ts";
 import { runGuestProcess } from "./process.ts";
 import { awaitSandboxWork } from "./cancellation.ts";
+import type { GuestFilesystemTransport } from "./guest-filesystem-transport.ts";
 
 export interface GuestFileMetadata {
   directory: boolean;
@@ -28,7 +29,11 @@ interface GuestFilesystemOptions {
   mounts?: () => readonly MountGrant[];
   volumes?: () => readonly VolumeGrant[];
   statHostPath?: (path: string) => Promise<Pick<Stats, "isFile" | "isDirectory">>;
+  transport?: GuestFilesystemTransport;
 }
+
+const probeOperations = new Set(["canonical", "canonical_paths", "entries_exist"]);
+const probeTimeoutMs = 10_000;
 
 export class GuestFilesystem {
   constructor(
@@ -44,8 +49,24 @@ export class GuestFilesystem {
     signal?: AbortSignal,
   ): Promise<unknown> {
     const environment = this.environment();
-    const needsExtendedTimeout =
-      operation === "canonical" || operation === "canonical_paths" || operation === "entries_exist";
+    const needsExtendedTimeout = probeOperations.has(operation);
+    const transport = this.options.transport;
+    if (transport) {
+      const payload = { operation, path, cwd: environment.workspace, ...operationParameters };
+      try {
+        return await transport.request(
+          environment,
+          payload,
+          signal,
+          needsExtendedTimeout ? probeTimeoutMs : undefined,
+        );
+      } catch (error) {
+        signal?.throwIfAborted();
+        throw new Error(`Guest ${operation} failed for ${path}: ${(error as Error).message}`, {
+          cause: error,
+        });
+      }
+    }
     const script = await readFile(new URL("./guest-filesystem.py", import.meta.url), "utf8");
     const result = await this.execute({
       container: environment.container,
@@ -57,7 +78,7 @@ export class GuestFilesystem {
         JSON.stringify({ operation, path, cwd: environment.workspace, ...operationParameters }),
       ),
       signal,
-      timeoutMs: needsExtendedTimeout ? 10_000 : undefined,
+      timeoutMs: needsExtendedTimeout ? probeTimeoutMs : undefined,
     });
     if (result.code !== 0) {
       throw new Error(`Guest ${operation} failed for ${path}: ${result.stderr}`);

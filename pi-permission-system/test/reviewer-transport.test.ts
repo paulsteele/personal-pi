@@ -48,10 +48,10 @@ it("reuses one process and correlates fragmented responses for concurrent filesy
 it("rejects every pending request on malformed or unknown response identities", async () => {
   const fixture = transportFixture();
   const first = expect(fixture.transport.canonicalPaths(["a.ts"])).rejects.toThrow(
-    "Invalid reviewer",
+    "invalid response identity",
   );
   const second = expect(fixture.transport.canonicalPaths(["b.ts"])).rejects.toThrow(
-    "Invalid reviewer",
+    "invalid response identity",
   );
   fixture.child.stdout.write('{"id":99,"result":[]}\n');
   await first;

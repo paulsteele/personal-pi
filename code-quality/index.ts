@@ -503,6 +503,11 @@ export function registerQualityGate(pi: ExtensionAPI, ports: RuntimePorts, agent
 			text = checked.findings.length
 				? `LSP diagnostics (file was written):\n${checked.findings.map(diagnosticLabel).join("\n")}`
 				: "LSP: no diagnostics for this file snapshot; quality batch review is still pending.";
+			const slowCheckMs = 5_000;
+			if (checked.phaseMs && checked.elapsedMs >= slowCheckMs) {
+				const { routing, guestReads, diagnostics } = checked.phaseMs;
+				text += `\nSlow LSP check: routing ${routing}ms, guest reads ${guestReads}ms, diagnostics ${diagnostics}ms.`;
+			}
 		} else {
 			text = `LSP ${checked.kind}: ${checked.reason}. The file mutation succeeded; quality review remains pending.`;
 		}

@@ -10,6 +10,12 @@ export interface LspFinding {
 	range: Range;
 	tags?: number[];
 }
+/** Wall-clock split of a sandboxed LSP check, used to locate slow quality batches. */
+export interface LspCheckPhaseMs {
+	routing: number;
+	guestReads: number;
+	diagnostics: number;
+}
 export type LspCheckResult =
 	| {
 			kind: "checked";
@@ -18,6 +24,7 @@ export type LspCheckResult =
 			workspaceRevision: number;
 			hashes: Record<string, string>;
 			elapsedMs: number;
+			phaseMs?: LspCheckPhaseMs;
 	  }
 	| { kind: "stale" | "unavailable" | "cancelled"; reason: string };
 export interface LspFileRequest {

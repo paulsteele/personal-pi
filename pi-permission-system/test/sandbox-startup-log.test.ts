@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, stat, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -99,4 +99,23 @@ it("reports a write failure once and leaves subsequent progress nonblocking", as
   log.record("output", "still nonblocking");
   expect(warning).toHaveBeenCalledOnce();
   expect(warning).toHaveBeenCalledWith(expect.stringContaining("diagnostic log write failed"));
+});
+
+it("keeps only the newest 25 startup logs for a session", async () => {
+  const fixture = await logFixture();
+  await mkdir(fixture.logs, { recursive: true });
+  const olderLogNames = Array.from(
+    { length: 30 },
+    (_, index) => `2026-10-01T00-00-${String(index).padStart(2, "0")}.000Z-old.jsonl`,
+  );
+  for (const name of olderLogNames) {
+    await writeFile(join(fixture.logs, name), "{}\n");
+  }
+  const log = (await SandboxStartupLog.create(fixture.logs, vi.fn()))!;
+  log.close();
+  const remaining = (await readdir(fixture.logs)).sort();
+  expect(remaining).toHaveLength(25);
+  expect(remaining).toContain(olderLogNames.at(-1));
+  expect(remaining).not.toContain(olderLogNames[0]);
+  expect(remaining.at(-1)).toBe(log.path.split("/").at(-1));
 });

@@ -1,6 +1,6 @@
 {
 	"name": "@paulsteele/pi-sidebar",
-	"version": "2.8.1",
+	"version": "2.9.0",
 	"private": true,
 	"description": "Personal fullscreen Sidebar and status footer",
 	"type": "module",

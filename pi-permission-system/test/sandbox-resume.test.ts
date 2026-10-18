@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { SandboxSession } from "../src/sandbox/session.ts";
 import type { ResolvedDefinition } from "../src/sandbox/definition.ts";
-import { readPrivateText, sha256Hex } from "../src/sandbox/storage.ts";
-import { inactiveSessionRetentionMs } from "../src/sandbox/prune.ts";
+import { readPrivateText } from "../src/sandbox/storage.ts";
+import { sessionImageName } from "../src/sandbox/container-identity.ts";
 import { SavedToolArtifactUnavailableError } from "../src/sandbox/tool-image-mounts.ts";
 import {
   SandboxStartupUI,
@@ -26,6 +26,9 @@ vi.mock("../src/sandbox/ports.ts", () => ({
 
 const directories: string[] = [];
 const sessions: SandboxSession[] = [];
+const startupCleanupListings = new Set(["ps", "images"]);
+const engineChanges = () =>
+  ports.podman.mock.calls.filter(([args]) => !startupCleanupListings.has(args[0]));
 afterEach(async () => {
   for (const session of sessions.splice(0)) {
     await session.close();
@@ -88,7 +91,7 @@ async function resumeFixture(startup?: SandboxStartupDisplay) {
   await original.start();
   await original.requestMount(source, "ro", "/config.json", "Read configuration");
   const approvedMounts = [...original.mounts];
-  await original.close();
+  await original.close("reload");
   const recordPath = join(original.directory, "session.json");
   const stored = (await readPrivateText(recordPath))!;
   const resumed = new SandboxSession({ ...options });
@@ -142,6 +145,33 @@ it("requires approval to migrate an older session with copied tools and preserve
   expect(await readPrivateText(fixture.recordPath)).toEqual(legacyStored);
 });
 
+it("offers a rebuild with the saved host binds when the base definition changed", async () => {
+  const fixture = await resumeFixture();
+  fixture.resumed.options.resolved.revision = "edited-base-revision";
+  fixture.resumed.options.resolved.baseRevision = "edited-base";
+  await fixture.resumed.start();
+  expect(fixture.confirm).toHaveBeenCalledExactlyOnceWith(
+    expect.stringContaining("The devcontainer base definition changed. Rebuild this session"),
+    expect.any(AbortSignal),
+  );
+  expect(ports.create).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ mounts: fixture.approvedMounts, checkpointImage: undefined }),
+  );
+  expect(JSON.parse((await readPrivateText(fixture.recordPath))!.text).baseDefinitionRevision).toBe(
+    "edited-base",
+  );
+});
+
+it("keeps the saved session when the base-definition rebuild is declined", async () => {
+  const fixture = await resumeFixture();
+  fixture.resumed.options.resolved.revision = "edited-base-revision";
+  fixture.resumed.options.resolved.baseRevision = "edited-base";
+  fixture.confirm.mockResolvedValue(false);
+  await expect(fixture.resumed.start()).rejects.toThrow("Base definition rebuild was not approved");
+  expect(ports.create).not.toHaveBeenCalled();
+  expect(await readPrivateText(fixture.recordPath)).toEqual(fixture.stored);
+});
+
 it("migrates an approved older session from its definition rather than checkpointing copied tools", async () => {
   const fixture = await legacyToolingResumeFixture();
   await fixture.resumed.start();
@@ -164,7 +194,7 @@ it("preserves saved state when missing-artifact recovery approval is denied", as
   await fixture.resumed.close();
   expect(await readPrivateText(fixture.recordPath)).toEqual(fixture.stored);
   expect(ports.create).toHaveBeenCalledTimes(1);
-  expect(ports.podman).not.toHaveBeenCalled();
+  expect(engineChanges()).toEqual([]);
 });
 
 it("preserves saved state when missing-artifact recovery approval is cancelled", async () => {
@@ -176,7 +206,7 @@ it("preserves saved state when missing-artifact recovery approval is cancelled",
   await fixture.resumed.close();
   expect(await readPrivateText(fixture.recordPath)).toEqual(fixture.stored);
   expect(ports.create).toHaveBeenCalledTimes(1);
-  expect(ports.podman).not.toHaveBeenCalled();
+  expect(engineChanges()).toEqual([]);
 });
 
 it("restores the previous container when an approved missing-artifact replacement fails", async () => {
@@ -188,7 +218,7 @@ it("restores the previous container when an approved missing-artifact replacemen
   await fixture.resumed.close();
   expect(await readPrivateText(fixture.recordPath)).toEqual(fixture.stored);
   expect(ports.create).toHaveBeenCalledTimes(2);
-  expect(ports.podman.mock.calls.map(([args]) => args)).toEqual([
+  expect(engineChanges().map(([args]) => args)).toEqual([
     ["stop", "--time=0", "container-g2"],
     ["start", "container-g2"],
   ]);
@@ -311,7 +341,7 @@ it("reuses the same stopped container and generation when approved sources are u
   const fixture = await resumeFixture();
   await fixture.resumed.start();
   expect(fixture.confirm).not.toHaveBeenCalled();
-  expect(ports.podman).not.toHaveBeenCalled();
+  expect(engineChanges()).toEqual([]);
   expect(ports.create).toHaveBeenCalledExactlyOnceWith(
     expect.objectContaining({
       mounts: fixture.approvedMounts,
@@ -337,7 +367,12 @@ it("reapproves an atomically saved config and recreates the bind from a containe
     15_000,
   );
   expect(ports.podman).toHaveBeenCalledWith(
-    ["commit", "--include-volumes=false", "container-g2"],
+    [
+      "commit",
+      "--include-volumes=false",
+      "container-g2",
+      `${sessionImageName("session")}-checkpoint:g3`,
+    ],
     expect.any(AbortSignal),
   );
   expect(ports.create).toHaveBeenCalledExactlyOnceWith(
@@ -361,7 +396,7 @@ it("reapproves an atomically saved config and recreates the bind from a containe
     mounts: fixture.resumed.mounts,
   });
 
-  await fixture.resumed.close();
+  await fixture.resumed.close("reload");
   const nextReload = new SandboxSession({ ...fixture.resumed.options });
   sessions.push(nextReload);
   fixture.confirm.mockClear();
@@ -379,7 +414,7 @@ it("does not start a container or overwrite authority when replacement approval 
   fixture.confirm.mockResolvedValue(false);
   await expect(fixture.resumed.start()).rejects.toThrow("Replacement host mount was not approved");
   expect(ports.create).not.toHaveBeenCalled();
-  expect(ports.podman).not.toHaveBeenCalled();
+  expect(engineChanges()).toEqual([]);
   expect(await readPrivateText(fixture.recordPath)).toEqual(fixture.stored);
 });
 
@@ -575,7 +610,7 @@ it("recreates a pruned session from its definition with saved grants instead of 
       checkpointToolImageMounts: record.environment.toolImageMounts,
     }),
   );
-  expect(ports.podman).not.toHaveBeenCalled();
+  expect(engineChanges()).toEqual([]);
   const saved = JSON.parse((await readPrivateText(fixture.recordPath))!.text);
   expect(saved.generation).toBe(3);
   expect(saved.containerPrunedAtUnixMs).toBeUndefined();
@@ -601,7 +636,7 @@ it("retains replaced-source approval when resuming after pruning without committ
       previousContainer: undefined,
     }),
   );
-  expect(ports.podman).not.toHaveBeenCalled();
+  expect(engineChanges()).toEqual([]);
 });
 
 it("does not restart a pruned container when fresh recreation fails", async () => {
@@ -613,7 +648,7 @@ it("does not restart a pruned container when fresh recreation fails", async () =
   await writeFile(fixture.recordPath, JSON.stringify(prunedRecord));
   ports.create.mockRejectedValueOnce(new Error("Fresh creation failed"));
   await expect(fixture.resumed.start()).rejects.toThrow("Fresh creation failed");
-  expect(ports.podman).not.toHaveBeenCalled();
+  expect(engineChanges()).toEqual([]);
   expect(JSON.parse((await readPrivateText(fixture.recordPath))!.text)).toEqual(prunedRecord);
 });
 
@@ -641,7 +676,12 @@ it("stops immediately before checkpointing a mount change and passes cancellatio
     15_000,
   ]);
   expect(ports.podman.mock.calls[1]).toEqual([
-    ["commit", "--include-volumes=false", "container-g2"],
+    [
+      "commit",
+      "--include-volumes=false",
+      "container-g2",
+      `${sessionImageName("session")}-checkpoint:g3`,
+    ],
     expect.any(AbortSignal),
   ]);
   expect(stages.indexOf("Stopping the previous devcontainer…")).toBeLessThan(
@@ -738,56 +778,120 @@ it("keeps the previous generation if the updated mount record cannot be saved", 
   }
 });
 
-it("prunes an expired session during startup without pruning the session being resumed", async () => {
+it("removes an abandoned session's container during startup without touching the session being resumed", async () => {
   const fixture = await resumeFixture();
-  const oldSessionId = "expired-session";
-  const oldContainer = "a".repeat(64);
-  const oldDirectory = join(fixture.resumed.directory, "..", sha256Hex(oldSessionId));
-  const inactiveSinceUnixMs = Date.now() - inactiveSessionRetentionMs - 1000;
-  const currentRecord = { ...JSON.parse(fixture.stored.text), inactiveSinceUnixMs };
-  await writeFile(fixture.recordPath, JSON.stringify(currentRecord));
-  await mkdir(oldDirectory);
-  await writeFile(
-    join(oldDirectory, "session.json"),
-    JSON.stringify({
-      ...currentRecord,
-      sessionId: oldSessionId,
-      environment: { ...currentRecord.environment, container: oldContainer },
-    }),
-  );
+  const abandonedSessionId = "abandoned-session";
+  const abandonedContainer = "a".repeat(64);
+  const resumedContainerId = "b".repeat(64);
   ports.podman.mockImplementation(async (args: string[]) => {
     if (args[0] === "ps") {
-      expect(args).toContain(`label=pi.sandbox.session=${oldSessionId}`);
-      return `${oldContainer}\n`;
-    }
-    if (args[0] === "inspect") {
       return JSON.stringify([
-        {
-          Id: oldContainer,
-          Config: { Labels: { "pi.sandbox.session": oldSessionId } },
-          State: { Running: false, Status: "exited" },
-        },
+        { Id: abandonedContainer, Labels: { "pi.sandbox.session": abandonedSessionId } },
+        { Id: resumedContainerId, Labels: { "pi.sandbox.session": "session" } },
       ]);
     }
     return "";
   });
   await fixture.resumed.start();
-  expect(ports.podman).toHaveBeenCalledWith(["rm", oldContainer]);
-  expect(ports.podman).not.toHaveBeenCalledWith(["rm", "container-g2"]);
+  expect(ports.podman).toHaveBeenCalledWith(["rm", "--force", "--time=0", abandonedContainer]);
+  expect(ports.podman).not.toHaveBeenCalledWith(["rm", "--force", "--time=0", resumedContainerId]);
   expect(fixture.resumed.environment.container).toBe("container-g2");
 });
 
-it("records inactivity once on shutdown and does not extend retention on repeated close", async () => {
+it("removes the container and session images when the session quits, and recreates on resume", async () => {
   const fixture = await resumeFixture();
   await fixture.resumed.start();
-  const beforeCloseUnixMs = Date.now();
+  const sessionImage = sessionImageName("session");
+  ports.podman.mockImplementation(async (args: string[]) =>
+    args[0] === "images" ? `${sessionImage}:latest\n${sessionImage}-checkpoint:g3\n` : "",
+  );
   await fixture.resumed.close();
-  const stored = (await readPrivateText(fixture.recordPath))!;
-  const inactiveSinceUnixMs = JSON.parse(stored.text).inactiveSinceUnixMs;
-  expect(inactiveSinceUnixMs).toBeGreaterThanOrEqual(beforeCloseUnixMs);
-  expect(inactiveSinceUnixMs).toBeLessThanOrEqual(Date.now());
-  await fixture.resumed.close();
-  expect(await readPrivateText(fixture.recordPath)).toEqual(stored);
+  expect(ports.podman).toHaveBeenCalledWith(["rm", "--force", "--time=0", "container-g2"]);
+  expect(ports.podman).toHaveBeenCalledWith(["rmi", `${sessionImage}:latest`]);
+  expect(ports.podman).toHaveBeenCalledWith(["rmi", `${sessionImage}-checkpoint:g3`]);
+  const stored = JSON.parse((await readPrivateText(fixture.recordPath))!.text);
+  expect(stored.containerPrunedAtUnixMs).toEqual(expect.any(Number));
+  expect(stored.mounts).toEqual(fixture.approvedMounts);
+  const nextResume = new SandboxSession({ ...fixture.resumed.options });
+  sessions.push(nextResume);
+  ports.create.mockClear();
+  await nextResume.start();
+  expect(ports.create).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ checkpointImage: undefined, generation: 3 }),
+  );
+});
+
+it("keeps the running container across reload and reattaches it without recreating", async () => {
+  const fixture = await resumeFixture();
+  await fixture.resumed.start();
+  await fixture.resumed.close("reload");
+  expect(engineChanges()).toEqual([]);
+  const reloaded = new SandboxSession({
+    ...fixture.resumed.options,
+    reattachRunningContainer: true,
+  });
+  sessions.push(reloaded);
+  ports.create.mockClear();
+  const inspectedContainer = {
+    Id: "container-g2",
+    Image: "node",
+    State: { Running: true },
+    Config: { Labels: { "pi.sandbox.session": "session" } },
+    HostConfig: {
+      Privileged: false,
+      NetworkMode: "bridge",
+      PidMode: "private",
+      SecurityOpt: ["no-new-privileges"],
+      Devices: [],
+    },
+    Mounts: [],
+  };
+  ports.podman.mockImplementation(async (args: string[]) =>
+    args[0] === "inspect" ? JSON.stringify([inspectedContainer]) : "",
+  );
+  await reloaded.start();
+  expect(ports.podman).toHaveBeenCalledWith(
+    ["inspect", "--type", "container", "container-g2"],
+    expect.any(AbortSignal),
+  );
+  expect(reloaded.environment.container).toBe("container-g2");
+});
+
+it("falls back to the normal resume when the reloaded container cannot be reattached", async () => {
+  const fixture = await resumeFixture();
+  await fixture.resumed.start();
+  await fixture.resumed.close("reload");
+  const reloaded = new SandboxSession({
+    ...fixture.resumed.options,
+    reattachRunningContainer: true,
+  });
+  sessions.push(reloaded);
+  ports.create.mockClear();
+  ports.podman.mockImplementation(async (args: string[]) => {
+    if (args[0] === "inspect") {
+      throw new Error("no such container");
+    }
+    return "";
+  });
+  await reloaded.start();
+  expect(ports.create).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ previousContainer: "container-g2", generation: 2 }),
+  );
+});
+
+it("takes over an owner lock left by an exited process", async () => {
+  const fixture = await resumeFixture();
+  const lockPath = join(fixture.resumed.directory, "owner.lock");
+  await writeFile(lockPath, JSON.stringify({ pid: 2 ** 22 + 12345 }));
+  await fixture.resumed.start();
+  expect(JSON.parse((await readPrivateText(lockPath))!.text)).toEqual({ pid: process.pid });
+});
+
+it("refuses a session whose owner lock belongs to a running process", async () => {
+  const fixture = await resumeFixture();
+  const lockPath = join(fixture.resumed.directory, "owner.lock");
+  await writeFile(lockPath, JSON.stringify({ pid: process.ppid }));
+  await expect(fixture.resumed.start()).rejects.toThrow(`owned by running process ${process.ppid}`);
 });
 
 it("does not roll back a successful mount change when superseded-container removal fails", async () => {
@@ -803,4 +907,5 @@ it("does not roll back a successful mount change when superseded-container remov
   expect(ports.podman).toHaveBeenCalledWith(["rm", "container-g2"]);
   expect(ports.podman).not.toHaveBeenCalledWith(["start", "container-g2"]);
   expect(fixture.resumed.generation).toBe(3);
+  ports.podman.mockResolvedValue("");
 });

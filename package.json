@@ -1,6 +1,6 @@
 {
   "name": "pi-extensions",
-  "version": "2.8.1",
+  "version": "2.9.0",
   "private": true,
   "description": "Paul Steele's Pi extensions",
   "type": "module",

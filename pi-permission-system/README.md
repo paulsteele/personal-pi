@@ -79,7 +79,7 @@ Legacy `auto` configuration requires migration through setup or an accepted Gene
 /sandbox on                    # Restore the devcontainer for this session
 ```
 
-The first layered startup asks once to save the global server/runtime catalog when missing. It does not ask which languages to install. Existing base definitions remain bases; private supplements are separate documents. Global tool updates affect future builds, not running sessions. A resumed session with changed tooling offers a rebuild with saved binds.
+The first layered startup asks once to save the global server/runtime catalog when missing. It does not ask which languages to install. Existing base definitions remain bases; private supplements are separate documents. Global tool updates affect future builds, not running sessions. A resumed session with changed tooling, or a changed base definition, offers a rebuild that reapplies the saved binds as they are.
 
 Settings → Sandbox provides manual editors for Global Container Base, Project Container Base, Project Host Commands, Global Sandbox Tools, Project Sandbox Tools, and Project Environment. Manual editors remain available even when the sandbox is unavailable and resolve private configuration paths from the current context's project identity without starting a container. `/sandbox setup global` and `/sandbox setup base` open the manual base editor directly, including during bootstrap. Manual edits do not restart the running sandbox; reload/rebuild adopts saved changes.
 
@@ -87,13 +87,25 @@ Both Sandbox Tools sections also offer **Add tool by name**. Enter a name with a
 
 Base and project-environment configuration remain manual; ask the main agent for help preparing those documents. Required development tools can still use the approved `request_sandbox_tool` workflow. Existing `modelAssistedSetup` fields are ignored when loading settings and omitted on the next save; `/sandbox setup model on|off` is unsupported.
 
+When startup fails in the TUI, a recovery menu offers:
+- *Retry startup*
+- *Rebuild (discard container state) and retry*
+- *Open* the configuration the error points to: the failing tool profile entry, a recipe's missing prerequisite, Project Environment for lifecycle failures, or the devcontainer definition otherwise
+- *Show the startup log path*
+- *Turn sandbox off for this session*
+- *Leave the sandbox unavailable*
+
+When a pinned catalog version is no longer available, the error names the profile file, the entry, and the versions this extension provides. If the pin is newer than the catalog, it suggests reloading or updating the extension. The menu also offers *Switch `<tool>` `<old>` → `<new>`*, which rewrites only that entry through the revision-checked publication and retries. RPC and headless modes keep the hard failure.
+
 In TUI mode, launch, reload/resume, mount recreation, and rebuilds show a full-screen animated progress console with elapsed time and a bounded tail of startup/build output. Usable terminals show a themed frame with current/previous stage, a labeled output pane, and live-follow/scrollback status; tiny terminals use a compact layout. The display reports real stage transitions rather than a guessed completion percentage. Use ↑/↓ or Page Up/Page Down to scroll, End to follow the latest output, and Esc to return to the thread while startup continues. The console steps aside for definition selection and sandbox authorization dialogs, then resumes unless dismissed. It closes automatically on success, failure, or shutdown. RPC and headless modes do not open a custom screen.
+
+Each session keeps its newest 25 startup logs. Diagnostics record `podman inspect` results as a one-line summary (target, byte count, short digest) instead of the full JSON. Built-in guest file operations use one long-lived guest filesystem process per container instead of a `podman exec` per call. A slow request times out on its own (10 seconds for path probes, 30 seconds otherwise) without stopping the server; a lost server restarts on the next request. Per-request timings go to `sessions/<session-id-hash>/guest-timing.jsonl`, which keeps one previous file after 5 MB. The permission review log rotates to `<name>.1` at 500 MB.
 
 Each top-level startup, resume, mount update, or rebuild saves a separate owner-only JSONL diagnostic log under `sessions/<session-id-hash>/startup-logs/` in the private sandbox storage root. `/sandbox logs` and `/sandbox status` show the latest path, including after a failed startup. Nested phases share the same log. Logs record timestamped stages and complete output chunks, including machine-readable CLI/Podman output that is hidden from the console; they are not clipped to terminal width or the display's bounded tail. Build output on screen retains steps, installation output, warnings, and failures while summarizing cache hits and omitting image-tag/hash lists. Logging also runs in RPC and headless modes. Log-storage failures warn without blocking sandbox operations.
 
 Sandbox setup and JSON/multiline Settings fields open private drafts in fullscreen `$EDITOR` rather than rendering configuration blocks in the TUI. Save and quit to return to Pi. Settings fields save immediately without an Apply button, including General Settings and legacy migration. Standalone `/sandbox setup` retains its publication confirmation for edited definitions and companion files. `$VISUAL` and then `vi` are fallbacks when `$EDITOR` is unset. GUI editors require a wait flag.
 
-Diagnostic logs are **not redacted**. They can include secrets from lifecycle output, image metadata, or the captured container environment. Inspect and redact before sharing; copy only the intended log into the checkout rather than mounting private sandbox authority storage. Logs are retained across attempts and require manual cleanup.
+Diagnostic logs and console output replace `containerEnv` and `remoteEnv` values and approved host environment-import values of four or more characters with `<redacted>` before writing. The container environment probe is logged as a variable count, not its values. Other secrets printed by lifecycle commands or present in image metadata are not detected. Sandboxed `read`, `ls`, `grep`, and `find` can read these logs, so treat undetected secrets in them as visible to the model. Inspect and redact before sharing; copy only the intended log into the checkout rather than mounting private sandbox authority storage. Logs are retained across attempts and require manual cleanup.
 
 A new Pi session gets a new container. Containerfile bases still invoke the reference CLI's cached build path; this is not a fresh install when layers are cached. Shared server/runtime and infrastructure images are reused by build identity. Runtime executable availability checks share one guest process, while runtime version and effective read-only mount checks remain enforced.
 
@@ -125,6 +137,8 @@ While off:
 When a required tool such as Bun is missing, the agent can use the model-only `request_sandbox_tool` tool instead of substituting another runtime or trying host execution. The request includes the tool name, pinned version, Linux-compatible install command as an argv array, expected executable, build prerequisites, reason, and optional installation-only environment values.
 
 In layered environments the request saves an approved recipe into the private project's `tools.json`, not the repository definition or global fallback. The preview identifies the write scope and rebuild consequences. The image is built before the private project's `tools.json` is updated; failed builds retain the prior file and container. Approved binds and runtime settings are preserved, but rebuilds discard container-local changes. Legacy non-layered callers retain active-definition installation behavior. The tool probes the executable as the runtime user before reporting success; install on the runtime PATH or use an absolute executable path.
+
+Before asking for approval, an unmanaged recipe's `prerequisites` are checked in the running sandbox with one `command -v` probe. A prerequisite that another profile tool provides (matched by tool id or executable name) is accepted and recorded as a dependency, so it is built first. Any other missing prerequisite refuses the request without saving anything, and tells the agent to request that prerequisite first.
 
 The installation progress screen remains open through runtime executable verification, and tool updates distinguish rebuild completion from probe completion. The probe times out after ten seconds; guest-process termination is limited to five additional seconds before closing the host Podman exec. If Podman is unresponsive, remote termination cannot be confirmed. A failed probe reports an error without undoing the saved recipe or successful rebuild.
 
@@ -174,6 +188,8 @@ The model-only `request_host_mount` tool accepts a host `path`, optional guest `
 
 Failed guest read-access checks report the resolved guest path, guest existence/readability, and whether the checked host path exists as a file, directory, or other entry. Approved mounts translate guest paths to their host sources; unmounted paths are checked at the same absolute host path. Host metadata failures report an unknown status rather than absence. These diagnostics inspect metadata only, never read host contents or grant access. The error instructs the model to call `request_host_mount` for an existing unmounted host file or directory, request read-only access, and retry after human approval; already-mounted paths point to permissions or missing-path troubleshooting instead.
 
+`read`, `ls`, `grep`, and `find` run on the host, with no mount, for absolute paths under four code-owned read-only roots: Pi's own package (README, docs, examples, resolved from the loaded `@earendil-works/pi-coding-agent`), session transcripts under `<agent dir>/sessions`, other extensions' `<agent dir>/extensions/<name>/config.json` files, and sandbox startup logs under `sessions/<session-id-hash>/startup-logs/` in the private sandbox storage root. The rest of the pi-permission-system private storage and `auth.json` are never included. `edit`, `write`, and `bash` never route to the host. Explicit tool and path denies still apply to routed reads.
+
 Reload and resume validate each approved source's canonical path, kind, and device/inode identity. If a regular file or directory at the same canonical path was replaced (for example, a configuration file saved atomically), startup asks for renewed approval. Approval retains its destination and access mode, checkpoints container-local state, and recreates the container with the replacement bind. Denial leaves stored authority unchanged and the sandbox unavailable. Missing sources, changed kinds, and redirected symlinks remain blocked.
 
 ## Project volumes
@@ -190,9 +206,19 @@ LSP installation belongs to sandbox provisioning. `/quality lsp setup` only conf
 
 Containers have readable names such as `pi-my-project-<session-suffix>-g2`, with project-root, startup-directory, session, and generation labels for Podman Desktop. Successful mount recreation and rebuilds remove the superseded container after replacement forwarders start and the updated session record is saved. Failed replacements retain the previous container for rollback; cleanup failures do not roll back a successful replacement.
 
-Shutdown stops containers and forwarding processes and records the start of the session's inactivity window. On sandbox startup, automatic cleanup removes stopped containers for sessions inactive for at least seven days, including their older generations. Legacy records use their last modification time until an inactivity timestamp is recorded. Cleanup skips any session with an ownership lock or a running/paused container; stale ownership locks require inspection rather than automatic deletion. No background cleanup runs while Pi is closed.
+### Container lifetime
 
-Pruning deletes container-local development state, not host bind files, conversation history, saved mount grants, definitions, or images. Resuming a pruned session recreates its container from the validated definition with the saved grants, revalidates mount sources, and runs creation hooks rather than restoring a checkpoint. Private checkpoint images and other unused images remain available for manual cleanup.
+- **`/reload`** leaves the running container in place. The reloaded extension reattaches it after re-inspecting its session label and isolation policy, without running `devcontainer up` or lifecycle hooks. Processes, `/tmp`, and other container-local state survive. When the container is gone, the definition changed, or an approved source was replaced, startup falls back to the normal resume path.
+- **Quit, new session, resume of another session, and fork** stop and remove the container, and remove this session's `localhost/pi-sandbox-*` image and mount-change checkpoint images. Outside `/reload` the container is disposable. Resuming the session later recreates it from the validated definition with the saved grants and volumes, and runs creation hooks. Shared `pi-project`/`pi-tool` layer and artifact images stay cached, so recreation reuses them.
+- **Startup cleanup** runs during "Pruning inactive sandbox sessions…":
+  - removes every `pi.sandbox.session`-labelled container whose session has no live owner, including orphans from startups that failed before saving a record;
+  - removes `pi-sandbox-*` images that belong to no live session;
+  - deletes failed-start session directories that have no saved record after seven days.
+  Cleanup is best-effort: failures are reported in the startup log and do not block startup.
+- A failed `devcontainer up` removes any container it created for that generation before reporting the error.
+- **Owner locks** record the owning Pi process ID. A lock left by a process that is no longer running is taken over automatically and noted in the startup log; a lock held by a running process still blocks the session.
+
+Removal deletes container-local development state, not host bind files, conversation history, saved mount grants, definitions, volumes, or shared images. Private checkpoint images can contain copied sensitive data and must never be published.
 
 ## Integration
 

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { dirname, relative, resolve } from "node:path";
-import type { LspCheckResult, LspServerStatus } from "./lsp-diagnostics.js";
+import type { LspCheckPhaseMs, LspCheckResult, LspServerStatus } from "./lsp-diagnostics.js";
 import {
 	loadLspProfile,
 	resolveLspProject,
@@ -294,6 +294,7 @@ export class SandboxLspManager {
 		signal: AbortSignal,
 		onStart?: () => void,
 	): Promise<LspCheckResult | undefined> {
+		const routingStartedAt = Date.now();
 		const sandbox = this.sandbox;
 		this.trusted = this.currentTrust?.() ?? this.trusted;
 		if (!this.trusted) {
@@ -419,6 +420,15 @@ export class SandboxLspManager {
 		const findings = [];
 		const hashes: Record<string, string> = {};
 		const startedAt = Date.now();
+		const phaseMs: LspCheckPhaseMs = { routing: startedAt - routingStartedAt, guestReads: 0, diagnostics: 0 };
+		const timePhase = async <T>(phase: keyof LspCheckPhaseMs, operation: () => Promise<T>): Promise<T> => {
+			const phaseStartedAt = Date.now();
+			try {
+				return await operation();
+			} finally {
+				phaseMs[phase] += Date.now() - phaseStartedAt;
+			}
+		};
 		const checkedWorkspaceRevision = this.epoch;
 		try {
 			for (const file of files) {
@@ -444,13 +454,20 @@ export class SandboxLspManager {
 					if (file.path !== routeRoot && !file.path.startsWith(`${routeRoot}/`)) {
 						continue;
 					}
-					const current = (await sandbox.session.filesystem.read(file.path, signal)).toString();
+					const readGuestSource = async () =>
+						(
+							await timePhase("guestReads", () => sandbox.session.filesystem.read(file.path, signal))
+						).toString();
+					const current = await readGuestSource();
 					if (current !== file.after) {
 						return { kind: "stale", reason: "Guest source changed before LSP check" };
 					}
-					const client = await this.client(route, signal);
-					findings.push(...(await client.check(file.path, language, current, signal)));
-					const afterCheck = (await sandbox.session.filesystem.read(file.path, signal)).toString();
+					const fileFindings = await timePhase("diagnostics", async () => {
+						const client = await this.client(route, signal);
+						return client.check(file.path, language, current, signal);
+					});
+					findings.push(...fileFindings);
+					const afterCheck = await readGuestSource();
 					if (afterCheck !== current || sandbox.session.generation !== this.containerGeneration) {
 						return { kind: "stale", reason: "Guest workspace changed during LSP diagnostics" };
 					}
@@ -470,6 +487,7 @@ export class SandboxLspManager {
 				generation: `${this.containerGeneration}:${randomUUID()}`,
 				workspaceRevision: this.epoch,
 				elapsedMs: Date.now() - startedAt,
+				phaseMs,
 			};
 		} catch (error) {
 			return {

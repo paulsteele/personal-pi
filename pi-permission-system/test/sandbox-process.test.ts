@@ -11,6 +11,10 @@ vi.mock("node:child_process", async (original) => ({
   spawn: ports.spawn,
 }));
 vi.mock("../src/sandbox/driver.ts", () => ({ podmanOutput: ports.podman }));
+vi.mock("../src/sandbox/tool-prerequisites.ts", async (original) => ({
+  ...(await original<typeof import("../src/sandbox/tool-prerequisites.ts")>()),
+  findMissingPrerequisites: async () => [],
+}));
 vi.mock("../src/sandbox/image-tools.ts", () => ({ planImageTools: ports.plan }));
 
 afterEach(() => {

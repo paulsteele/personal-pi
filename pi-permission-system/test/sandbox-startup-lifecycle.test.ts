@@ -155,3 +155,81 @@ it("contributes sandbox settings only while its session is running", async () =>
   await handlers.get("session_shutdown")!({}, ctx);
   expect(discoverSettingsSections({ events })).toEqual([]);
 });
+
+async function failedTuiStartupFixture(chosenRecovery: string) {
+  const agentDir = await mkdtemp(join(tmpdir(), "sandbox-startup-recovery-"));
+  directories.push(agentDir);
+  vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+  await publishPrivateText(
+    globalToolProfilePath(agentDir),
+    JSON.stringify(defaultToolProfile()),
+    undefined,
+  );
+  resolveDefinition.mockRejectedValueOnce(new Error("Invalid base definition"));
+  const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>();
+  const appendEntry = vi.fn();
+  sandboxExtension({
+    on: (name: string, handler: (event: unknown, ctx: unknown) => Promise<void>) =>
+      handlers.set(name, handler),
+    events: { emit() {}, on: () => () => {} },
+    registerTool() {},
+    registerCommand() {},
+    registerEntryRenderer() {},
+    appendEntry,
+  } as never);
+  const select = vi.fn(async (title: string, _options: string[]) =>
+    title.startsWith("Sandbox startup failed") ? chosenRecovery : "first/devcontainer.json",
+  );
+  const ctx = {
+    cwd: agentDir,
+    mode: "tui",
+    hasUI: true,
+    sessionManager: { getSessionId: () => "recovery-session", getBranch: () => [] },
+    ui: { select, notify: vi.fn(), setStatus: vi.fn(), custom: undefined },
+  };
+  return { handlers, select, appendEntry, ctx };
+}
+
+it("offers recovery choices in the TUI and can turn the sandbox off for the session", async () => {
+  const fixture = await failedTuiStartupFixture("Turn sandbox off for this session");
+  await fixture.handlers.get("session_start")!({ reason: "startup" }, fixture.ctx);
+  const recoveryPrompt = fixture.select.mock.calls.find(([title]) =>
+    String(title).startsWith("Sandbox startup failed"),
+  );
+  expect(recoveryPrompt?.[0]).toContain("Invalid base definition");
+  expect(recoveryPrompt?.[1]).toEqual(
+    expect.arrayContaining([
+      "Retry startup",
+      "Rebuild (discard container state) and retry",
+      "Turn sandbox off for this session",
+    ]),
+  );
+  expect(fixture.appendEntry).toHaveBeenCalledWith("sandbox:mode", { off: true });
+  expect(fixture.ctx.ui.setStatus).toHaveBeenCalledWith("sandbox", "sandbox: OFF");
+});
+
+it("retries startup when the operator chooses Retry", async () => {
+  const fixture = await failedTuiStartupFixture("Retry startup");
+  resolveDefinition.mockRejectedValueOnce(new Error("Still invalid"));
+  fixture.select.mockImplementation(async (title: string, _options: string[]) => {
+    if (!title.startsWith("Sandbox startup failed")) {
+      return "first/devcontainer.json";
+    }
+    return title.includes("Still invalid") ? "Leave the sandbox unavailable" : "Retry startup";
+  });
+  await fixture.handlers.get("session_start")!({ reason: "startup" }, fixture.ctx);
+  expect(resolveDefinition).toHaveBeenCalledTimes(2);
+  expect(fixture.appendEntry).not.toHaveBeenCalled();
+});
+
+it("keeps the hard failure without a recovery menu outside the TUI", async () => {
+  const fixture = await failedTuiStartupFixture("Turn sandbox off for this session");
+  await fixture.handlers.get("session_start")!(
+    { reason: "startup" },
+    { ...fixture.ctx, mode: "rpc" },
+  );
+  expect(
+    fixture.select.mock.calls.some(([title]) => String(title).startsWith("Sandbox startup failed")),
+  ).toBe(false);
+  expect(fixture.appendEntry).not.toHaveBeenCalled();
+});

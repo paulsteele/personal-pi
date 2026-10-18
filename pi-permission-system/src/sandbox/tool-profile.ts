@@ -4,6 +4,7 @@ import { parseTree, type Node as JsonNode, type ParseError } from "jsonc-parser"
 import { z } from "zod";
 import {
   catalogTool,
+  MissingCatalogVersionError,
   REQUIRED_LANGUAGE_SERVERS,
   STANDARD_TOOL_CATALOG,
   type CatalogTool,
@@ -123,15 +124,37 @@ export async function loadToolProfile(path: string): Promise<StoredToolProfile |
   };
 }
 
+export interface ToolProfilePaths {
+  global?: string;
+  project?: string;
+}
+
+function catalogToolInProfile(
+  id: string,
+  version: string,
+  catalog: readonly CatalogTool[],
+  profilePath: string | undefined,
+): CatalogTool {
+  try {
+    return catalogTool(id, version, catalog);
+  } catch (error) {
+    if (error instanceof MissingCatalogVersionError && profilePath) {
+      throw error.withProfilePath(profilePath);
+    }
+    throw error;
+  }
+}
+
 export function resolveToolProfiles(
   global: ToolProfile,
   project?: ToolProfile,
   catalog: readonly CatalogTool[] = STANDARD_TOOL_CATALOG,
+  profilePaths: ToolProfilePaths = {},
 ): ResolvedTool[] {
   const resolvedToolsById = new Map<string, ResolvedTool>();
   const profileLayers = [
-    { source: "global" as const, profile: global },
-    { source: "project" as const, profile: project },
+    { source: "global" as const, profile: global, path: profilePaths.global },
+    { source: "project" as const, profile: project, path: profilePaths.project },
   ];
   for (const profileLayer of profileLayers) {
     if (!profileLayer.profile) {
@@ -145,7 +168,9 @@ export function resolveToolProfiles(
     }
     for (const [id, entry] of Object.entries(profile.tools)) {
       const catalogEntry =
-        entry.kind === "catalog" ? catalogTool(id, entry.version, catalog) : undefined;
+        entry.kind === "catalog"
+          ? catalogToolInProfile(id, entry.version, catalog, profileLayer.path)
+          : undefined;
       const managedVersions = catalog.filter((tool) => tool.id === id).map((tool) => tool.version);
       if (entry.kind === "recipe" && managedVersions.length) {
         throw new Error(

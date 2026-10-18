@@ -1,4 +1,3 @@
-import { open, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveGitRepository } from "@paulsteele/pi-project-locations";
 import { resolveDefinition, type ResolvedDefinition } from "./definition.ts";
@@ -19,6 +18,11 @@ import {
 import { sandboxStorageRoot } from "./settings.ts";
 import { GuestFilesystem } from "./filesystem.ts";
 import {
+  GuestFilesystemTransport,
+  type GuestFilesystemTiming,
+} from "./guest-filesystem-transport.ts";
+import { createGuestTimingLog, guestTimingLogPath } from "./guest-timing-log.ts";
+import {
   runGuestProcess,
   processSupervisor as sharedProcessSupervisor,
   type GuestProcessOptions,
@@ -26,7 +30,9 @@ import {
 import { declaredMount, declaredWorkspaceMount } from "./declaration-mounts.ts";
 import { projectVolumeGrant, validateVolumeTopology, type VolumeGrant } from "./volumes.ts";
 import { dirname } from "node:path";
-import { containerIdentity } from "./container-identity.ts";
+import { containerIdentity, sessionCheckpointImageName } from "./container-identity.ts";
+import { validateCreatedContainer } from "./container-validation.ts";
+import { requireOwnerLock, type OwnerLock } from "./owner-lock.ts";
 import { startLoopbackForwarders, devcontainerPorts } from "./ports.ts";
 import {
   silentStartupProgress,
@@ -40,7 +46,7 @@ import {
   type ShellExecutionResult,
 } from "./host-command-runner.ts";
 import { sessionRecordSchema, type SandboxSessionRecord } from "./session-record.ts";
-import { pruneInactiveSessions, removeSupersededContainer } from "./prune.ts";
+import { pruneInactiveSessions, removeSessionImages, removeSupersededContainer } from "./prune.ts";
 import { SavedToolArtifactUnavailableError } from "./tool-image-mounts.ts";
 
 export type { SandboxSessionRecord } from "./session-record.ts";
@@ -76,6 +82,12 @@ async function stopSessionContainer(container: string, signal?: AbortSignal): Pr
   }
 }
 
+export type SandboxCloseMode = "dispose" | "reload";
+
+async function removeSessionContainer(container: string): Promise<void> {
+  await podmanOutput(["rm", "--force", "--time=0", container]);
+}
+
 async function restartPreviousContainer(previousContainer: string): Promise<void> {
   try {
     await podmanOutput(["start", previousContainer]);
@@ -90,7 +102,7 @@ export class SandboxSession {
   readonly filesystem: GuestFilesystem;
   private record?: SandboxSessionRecord;
   private recordRevision?: string;
-  private lock?: Awaited<ReturnType<typeof open>>;
+  private lock?: OwnerLock;
   private forwarders?: Awaited<ReturnType<typeof startLoopbackForwarders>>;
   private readonly lifetime = new AbortController();
   private executionGeneration = new AbortController();
@@ -111,6 +123,9 @@ export class SandboxSession {
       confirm: (preview: string, signal?: AbortSignal, toolCallId?: string) => Promise<boolean>;
       startupTimeoutMs?: number;
       buildTimeoutMs?: number;
+      reattachRunningContainer?: boolean;
+      discardSavedContainer?: boolean;
+      guestTiming?: (timing: GuestFilesystemTiming) => void;
       startup?: SandboxStartupDisplay;
       changed?: () => void;
       signal?: AbortSignal;
@@ -121,12 +136,25 @@ export class SandboxSession {
       "sessions",
       sha256Hex(options.sessionId),
     );
+    const recordGuestTiming = createGuestTimingLog(guestTimingLogPath(this.directory));
+    this.filesystemTransport = new GuestFilesystemTransport({
+      timing: (timing) => {
+        recordGuestTiming(timing);
+        options.guestTiming?.(timing);
+      },
+    });
     this.filesystem = new GuestFilesystem(
       () => this.environment,
       (processOptions) => this.execute(processOptions),
-      { mounts: () => this.mounts, volumes: () => this.volumes },
+      {
+        mounts: () => this.mounts,
+        volumes: () => this.volumes,
+        transport: this.filesystemTransport,
+      },
     );
   }
+
+  private readonly filesystemTransport: GuestFilesystemTransport;
 
   beforeContainerRetirement(listener: () => Promise<void>): () => void {
     this.retirementListeners.add(listener);
@@ -186,12 +214,12 @@ export class SandboxSession {
       AbortSignal.timeout(startupTimeoutMs + buildTimeoutMs),
     ]);
     await ensurePrivateDirectory(this.directory);
-    this.lock = await open(join(this.directory, "owner.lock"), "wx", 0o600).catch(() => {
-      throw new Error(
-        "This Pi session sandbox already has an owner; inspect stale locks explicitly",
+    this.lock = await requireOwnerLock(join(this.directory, "owner.lock"));
+    if (this.lock.replacedStaleOwnerPid !== undefined) {
+      progress.output(
+        `Replaced the stale sandbox owner lock left by exited process ${this.lock.replacedStaleOwnerPid}.\n`,
       );
-    });
-    await this.lock.writeFile(JSON.stringify({ pid: process.pid }));
+    }
     progress.stage("Pruning inactive sandbox sessions…");
     await pruneInactiveSessions({
       agentDir: this.options.agentDir,
@@ -200,7 +228,10 @@ export class SandboxSession {
     const stored = await readPrivateText(join(this.directory, "session.json"));
     let previousRecord: SandboxSessionRecord | undefined;
     if (stored) {
-      const record = sessionRecordSchema.parse(JSON.parse(stored.text));
+      const savedRecord = sessionRecordSchema.parse(JSON.parse(stored.text));
+      const record = this.options.discardSavedContainer
+        ? await this.discardSavedContainer(savedRecord, progress)
+        : savedRecord;
       if (
         record.sessionId !== this.options.sessionId ||
         record.startupDirectory !== this.options.resolved.startupDirectory
@@ -220,18 +251,21 @@ export class SandboxSession {
           throw new Error("Changed environment topology requires separate validation");
         }
         const priorBaseRevision = record.baseDefinitionRevision ?? record.definitionRevision;
-        if (priorBaseRevision !== this.options.resolved.baseRevision) {
-          throw new Error(
-            "Stored sandbox base definition changed; validate a new session before changing its topology",
-          );
-        }
+        const baseDefinitionChanged = priorBaseRevision !== this.options.resolved.baseRevision;
+        const changedSource = baseDefinitionChanged
+          ? "The devcontainer base definition"
+          : "Shared or project tooling";
         if (
           !(await this.options.confirm(
-            "Shared or project tooling changed. Rebuild this session with saved host binds? Container-local changes will be discarded.",
+            `${changedSource} changed. Rebuild this session with saved host binds? Container-local changes will be discarded.`,
             startupSignal,
           ))
         ) {
-          throw new Error("Tooling rebuild was not approved");
+          throw new Error(
+            baseDefinitionChanged
+              ? "Base definition rebuild was not approved"
+              : "Tooling rebuild was not approved",
+          );
         }
       }
       progress.stage("Validating saved host mounts…");
@@ -245,8 +279,15 @@ export class SandboxSession {
       this.record = record;
       this.recordRevision = stored.revision;
       this.recordPublished = true;
+      const reattachedRecord = await this.reattachReloadedContainer(
+        record,
+        mounts,
+        startupSignal,
+        progress,
+      );
       try {
-        this.record = await this.resumeContainer(record, mounts, startupSignal, progress);
+        this.record =
+          reattachedRecord ?? (await this.resumeContainer(record, mounts, startupSignal, progress));
       } catch (error) {
         if (!(error instanceof SavedToolArtifactUnavailableError)) {
           throw error;
@@ -417,6 +458,56 @@ export class SandboxSession {
     this.options.changed?.();
   }
 
+  private async discardSavedContainer(
+    record: SandboxSessionRecord,
+    progress: SandboxStartupProgress,
+  ): Promise<SandboxSessionRecord> {
+    progress.stage("Discarding the saved devcontainer for a fresh rebuild…");
+    await removeSessionContainer(record.environment.container).catch(() => {});
+    await removeSessionImages(this.options.sessionId, (text) => progress.output(text));
+    return { ...record, containerPrunedAtUnixMs: record.containerPrunedAtUnixMs ?? Date.now() };
+  }
+
+  private async reattachReloadedContainer(
+    record: SandboxSessionRecord,
+    mounts: MountGrant[],
+    signal: AbortSignal,
+    progress: SandboxStartupProgress,
+  ): Promise<SandboxSessionRecord | undefined> {
+    const sourcesUnchanged = mounts.every(
+      (mount, index) => mount.identity === record.mounts[index].identity,
+    );
+    const canReattach =
+      this.options.reattachRunningContainer === true &&
+      record.containerPrunedAtUnixMs === undefined &&
+      record.definitionRevision === this.options.resolved.revision &&
+      sourcesUnchanged;
+    if (!canReattach) {
+      return undefined;
+    }
+    progress.stage("Reattaching the running devcontainer after reload…");
+    try {
+      const inspection = await podmanOutput(
+        ["inspect", "--type", "container", record.environment.container],
+        signal,
+      );
+      validateCreatedContainer(
+        JSON.parse(inspection)[0],
+        this.options.sessionId,
+        mounts,
+        record.environment.toolImageMounts,
+        record.volumes ?? [],
+      );
+      return record;
+    } catch (error) {
+      signal.throwIfAborted();
+      progress.output(
+        `Could not reattach the running devcontainer; resuming it instead: ${String(error)}\n`,
+      );
+      return undefined;
+    }
+  }
+
   private async resumeContainer(
     record: SandboxSessionRecord,
     mounts: MountGrant[],
@@ -437,7 +528,7 @@ export class SandboxSession {
     try {
       if (containerWasPruned) {
         progress.output(
-          "Saved sandbox container was pruned after inactivity; recreating from its definition. Container-local changes are no longer available.\n",
+          "Previous sandbox container was disposed; recreating it from its definition. Container-local changes are not kept outside /reload.\n",
         );
       } else if (toolingChanged) {
         progress.stage("Stopping previous container for changed tooling…");
@@ -446,12 +537,11 @@ export class SandboxSession {
         progress.stage("Stopping the previous devcontainer…");
         await stopSessionContainer(record.environment.container, signal);
         progress.stage("Checkpointing container-local state before rebinding replaced sources…");
-        checkpointImage = (
-          await podmanOutput(
-            ["commit", "--include-volumes=false", record.environment.container],
-            signal,
-          )
-        ).trim();
+        checkpointImage = await this.commitCheckpointImageId(
+          record.environment.container,
+          generation,
+          signal,
+        );
       }
       signal.throwIfAborted();
       const environment = await createDevcontainer({
@@ -655,12 +745,13 @@ if record.exists():
       await stopSessionContainer(previous.environment.container, operationSignal);
       operationSignal.throwIfAborted();
       progress.stage("Checkpointing container-local state…");
-      const checkpoint = await podmanOutput(
-        ["commit", "--include-volumes=false", previous.environment.container],
+      const generation = previous.generation + 1;
+      const checkpoint = await this.commitCheckpointImageId(
+        previous.environment.container,
+        generation,
         operationSignal,
       );
       operationSignal.throwIfAborted();
-      const generation = previous.generation + 1;
       const environment = await createDevcontainer({
         resolved: this.options.resolved,
         cacheDirectory: join(sandboxStorageRoot(this.options.agentDir), "tool-cache"),
@@ -675,7 +766,7 @@ if record.exists():
         directory: join(this.directory, `generation-${generation}`),
         hostEnvironment: this.options.hostEnvironment,
         generation,
-        checkpointImage: checkpoint.trim(),
+        checkpointImage: checkpoint,
         signal: operationSignal,
         progress: (text) => progress.output(text),
         stage: (text) => progress.stage(text),
@@ -888,6 +979,7 @@ if record.exists():
   private async retireGeneration(): Promise<void> {
     this.drainingGeneration = true;
     this.executionGeneration.abort();
+    await this.filesystemTransport.close();
     const results = await Promise.allSettled(
       [...this.retirementListeners].map(async (listener) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -919,12 +1011,30 @@ if record.exists():
     }
   }
 
-  close(): Promise<void> {
-    this.closePromise ??= this.closeOwnedSession();
+  /**
+   * `reload` keeps the container running and hands ownership to the reloaded extension.
+   * `dispose` removes the container and this session's images; resume recreates them.
+   */
+  close(mode: SandboxCloseMode = "dispose"): Promise<void> {
+    this.closePromise ??= this.closeOwnedSession(mode);
     return this.closePromise;
   }
 
-  private async closeOwnedSession(): Promise<void> {
+  private async commitCheckpointImageId(
+    container: string,
+    generation: number,
+    signal: AbortSignal,
+  ): Promise<string> {
+    const checkpointImageName = sessionCheckpointImageName(this.options.sessionId, generation);
+    const commitOutput = await podmanOutput(
+      ["commit", "--include-volumes=false", container, checkpointImageName],
+      signal,
+    );
+    const checkpointImageId = commitOutput.trim();
+    return checkpointImageId;
+  }
+
+  private async closeOwnedSession(mode: SandboxCloseMode): Promise<void> {
     const cleanupErrors: unknown[] = [];
     const attemptCleanup = async (cleanupOperation: () => Promise<unknown>) => {
       try {
@@ -940,19 +1050,31 @@ if record.exists():
     await attemptCleanup(() => this.topologyQueue);
     await Promise.allSettled([...this.active]);
     await attemptCleanup(async () => this.forwarders?.close());
-    if (this.record) {
-      await attemptCleanup(() => stopSessionContainer(this.record!.environment.container));
+    const keepsContainerForReload = mode === "reload" && this.record && this.recordPublished;
+    if (this.record && !keepsContainerForReload) {
+      const container = this.record.environment.container;
+      await attemptCleanup(async () => {
+        await stopSessionContainer(container);
+        await removeSessionContainer(container);
+      });
+      await attemptCleanup(() => removeSessionImages(this.options.sessionId, () => {}));
     }
     const lock = this.lock;
     if (lock) {
       try {
-        if (this.record && this.recordPublished) {
-          this.record = { ...this.record, inactiveSinceUnixMs: Date.now() };
+        if (this.record && this.recordPublished && !keepsContainerForReload) {
+          const closedAtUnixMs = Date.now();
+          this.record = {
+            ...this.record,
+            inactiveSinceUnixMs: this.record.inactiveSinceUnixMs ?? closedAtUnixMs,
+            containerPrunedAtUnixMs: this.record.containerPrunedAtUnixMs ?? closedAtUnixMs,
+          };
           await attemptCleanup(() => this.persist());
         }
       } finally {
-        await attemptCleanup(() => lock.close());
-        await attemptCleanup(() => unlink(join(this.directory, "owner.lock")));
+        await attemptCleanup(() =>
+          keepsContainerForReload ? lock.handOffForReload() : lock.release(),
+        );
         this.lock = undefined;
       }
     }

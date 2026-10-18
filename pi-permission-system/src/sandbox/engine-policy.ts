@@ -43,6 +43,15 @@ function optionValue(
   return { name: argument, value, consumed: 2 };
 }
 
+const linuxPodmanRuntimeOptions: ReadonlyMap<string, string> = new Map([
+  ["--security-opt", "label=disable"],
+  ["--userns", "keep-id"],
+]);
+
+function isLinuxPodmanRuntimeOption(option: { name: string; value: string }): boolean {
+  return linuxPodmanRuntimeOptions.get(option.name) === option.value;
+}
+
 function requireOwnedObject(value: string, allowed: readonly string[], kind: string): void {
   if (!allowed.includes(value)) {
     throw new Error(`Engine ${kind} is outside the approved sandbox scope: ${value}`);
@@ -104,6 +113,9 @@ function validateRunArguments(args: string[], authority: EngineAuthority): strin
       ) {
         throw new Error("Container environment differs from its approved configuration");
       }
+    } else if (isLinuxPodmanRuntimeOption(option)) {
+      index += option.consumed;
+      continue;
     } else if (option.name === "-p" || option.name === "--publish") {
       const port = /^127\.0\.0\.1:(\d+):(\d+)$/.exec(option.value);
       if (!port || port[1] !== port[2] || !authority.ports.includes(Number(port[2]))) {

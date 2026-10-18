@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.9.0 — 2026-10-18
+
+- When a sandboxed LSP check takes 5 seconds or longer, report how long routing, guest file reads, and diagnostics each took.
+
 ## 2.6.0 — 2026-10-16
 
 - Keep one DRY baseline for the whole session. Each turn restages only files whose size or modification time changed, rescans in the running jscpd process, and exports only changed lexical index files. Profile/config changes, sandbox rebuilds, `/quality dry refresh`, and update failures rebuild from scratch.

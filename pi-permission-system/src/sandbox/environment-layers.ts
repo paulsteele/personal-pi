@@ -75,7 +75,10 @@ export async function resolveEnvironmentLayers(
     projectTools,
     projectEnvironment: environment?.environment ?? parseProjectEnvironment({ version: 1 }),
     sources,
-    tools: resolveToolProfiles(globalTools.profile, projectTools?.profile),
+    tools: resolveToolProfiles(globalTools.profile, projectTools?.profile, undefined, {
+      global: globalPath,
+      project: projectPath,
+    }),
   };
 }
 

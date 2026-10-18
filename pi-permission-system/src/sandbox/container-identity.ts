@@ -12,6 +12,32 @@ export function projectEngineSlug(projectRoot: string): string {
   );
 }
 
+export const SESSION_IMAGE_REPOSITORY_PREFIX = "localhost/pi-sandbox-";
+const sessionImageHashLength = 20;
+
+export function sessionImageHashPrefix(sessionId: string): string {
+  return sha256Hex(sessionId).slice(0, sessionImageHashLength);
+}
+
+export function sessionImageName(sessionId: string): string {
+  return `${SESSION_IMAGE_REPOSITORY_PREFIX}${sessionImageHashPrefix(sessionId)}`;
+}
+
+export function sessionCheckpointImageName(sessionId: string, generation: number): string {
+  return `${sessionImageName(sessionId)}-checkpoint:g${generation}`;
+}
+
+export function sessionHashPrefixOfImage(imageReference: string): string | undefined {
+  if (!imageReference.startsWith(SESSION_IMAGE_REPOSITORY_PREFIX)) {
+    return undefined;
+  }
+  const hashPrefix = imageReference.slice(
+    SESSION_IMAGE_REPOSITORY_PREFIX.length,
+    SESSION_IMAGE_REPOSITORY_PREFIX.length + sessionImageHashLength,
+  );
+  return /^[a-f0-9]{20}$/.test(hashPrefix) ? hashPrefix : undefined;
+}
+
 export function containerIdentity(options: {
   projectRoot: string;
   startupDirectory: string;

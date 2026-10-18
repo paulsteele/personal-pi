@@ -100,6 +100,19 @@ async function automaticFixture(
 	return { manager, sandbox, root, text, agentDir };
 }
 
+it("reports where a sandboxed LSP check spent its time", async () => {
+	const fixture = await automaticFixture();
+	await fixture.manager.start(fixture.root, true);
+	const result = await fixture.manager.check(
+		[{ path: "/workspace/app.py", after: fixture.text }],
+		new AbortController().signal,
+	);
+	expect(result).toMatchObject({
+		kind: "checked",
+		phaseMs: { routing: expect.any(Number), guestReads: expect.any(Number), diagnostics: expect.any(Number) },
+	});
+});
+
 it("checks a new project's Python file with no setup or saved profile", async () => {
 	const fixture = await automaticFixture();
 	await fixture.manager.start(fixture.root, true);

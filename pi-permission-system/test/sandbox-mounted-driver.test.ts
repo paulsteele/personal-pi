@@ -110,7 +110,7 @@ async function mountedDriverFixture(volumes: VolumeGrant[] = []) {
     callback(null, stdout, "");
     return {
       stdout: {
-        on: (_event: string, listener: (chunk: Buffer) => void) => listener(Buffer.from(stdout)),
+        on: (_event: string, listener: (chunk: string) => void) => listener(stdout),
       },
       stderr: { on() {} },
     };
@@ -182,7 +182,7 @@ it("restores saved artifact mounts before devcontainer lifecycle execution witho
   expect(runtimeChecks.some((args) => args.join(" ").includes("/proc/self/mountinfo"))).toBe(true);
 });
 
-it("reports real startup stages while keeping inspection JSON in diagnostics only", async () => {
+it("reports real startup stages and summarizes inspection output in diagnostics", async () => {
   const fixture = await mountedDriverFixture();
   const progress = vi.fn();
   const stage = vi.fn();
@@ -198,9 +198,54 @@ it("reports real startup stages while keeping inspection JSON in diagnostics onl
   ]);
   expect(progress).not.toHaveBeenCalled();
   expect(diagnostic).toHaveBeenCalledWith(
-    expect.stringContaining('podman inspect stdout: [{"Id":'),
+    expect.stringMatching(/^podman inspect \S+ \S+: \d+ bytes, sha256 [a-f0-9]{16}\n$/),
   );
+  expect(diagnostic).not.toHaveBeenCalledWith(expect.stringContaining('[{"Id":'));
   expect(fixture.engineCalls.filter((args) => args[0] === "inspect").length).toBeGreaterThan(0);
+});
+
+it("redacts definition environment values and omits the container environment dump from logs", async () => {
+  const fixture = await mountedDriverFixture();
+  const diagnostic = vi.fn();
+  const progress = vi.fn();
+  mocks.cli.mockImplementation(
+    async ({ args, progress: cliProgress, diagnostic: cliDiagnostic }) => {
+      if (args[0] === "up") {
+        cliProgress?.("postCreateCommand printed container-secret\n");
+        cliDiagnostic?.('devcontainer up stdout: {"containerEnv":{"API_KEY":"container-secret"}}');
+        return JSON.stringify({
+          outcome: "success",
+          containerId: fixture.details.Id,
+          remoteUser: "root",
+          remoteWorkspaceFolder: "/workspace",
+        });
+      }
+      return JSON.stringify({ PATH: "/usr/bin:/bin", API_KEY: "container-secret" });
+    },
+  );
+  await createDevcontainer({
+    ...fixture.options,
+    resolved: {
+      ...fixture.options.resolved,
+      definition: {
+        ...fixture.options.resolved.definition,
+        containerEnv: { API_KEY: "container-secret" },
+      },
+    },
+    diagnostic,
+    progress,
+  });
+  const environmentProbe = mocks.cli.mock.calls.find(([{ args }]) => args[0] === "exec")![0];
+  expect(environmentProbe.includeStdoutDiagnostic).toBe(false);
+  expect(progress).toHaveBeenCalledWith("postCreateCommand printed <redacted>\n");
+  expect(diagnostic).toHaveBeenCalledWith(
+    'devcontainer up stdout: {"containerEnv":{"API_KEY":"<redacted>"}}',
+  );
+  expect(diagnostic).toHaveBeenCalledWith(
+    "devcontainer exec stdout: container environment with 2 variables (values omitted)\n",
+  );
+  const loggedText = [...diagnostic.mock.calls, ...progress.mock.calls].flat().join("\n");
+  expect(loggedText).not.toContain("container-secret");
 });
 
 it("reports a missing saved artifact without starting a replacement container", async () => {

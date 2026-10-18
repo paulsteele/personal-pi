@@ -11,13 +11,13 @@ import { type ResolvedDefinition, validateHostEnvironmentImports } from "./defin
 import { readPrivateText } from "./storage.ts";
 import { startEngineAdapter } from "./engine-server.ts";
 import { type EngineAuthority } from "./engine-policy.ts";
-import { containerIdentity } from "./container-identity.ts";
+import { containerIdentity, sessionImageName } from "./container-identity.ts";
 import { validateCreatedContainer } from "./container-validation.ts";
 import { imageDetailsSchema, validateImageIsolation } from "./metadata-policy.ts";
 import { type MountGrant, mountArgument } from "./mounts.ts";
 import { ensureProjectVolume, volumeMountArgument, type VolumeGrant } from "./volumes.ts";
 import { devcontainerPorts } from "./ports.ts";
-import { canonicalPath, ensurePrivateDirectory, sha256Hex } from "./storage.ts";
+import { canonicalPath, ensurePrivateDirectory } from "./storage.ts";
 import { provisionEnvironmentImage, type ToolInventory } from "./tool-provisioning.ts";
 import {
   createToolBuildPorts,
@@ -34,9 +34,10 @@ import {
   verifyToolMountDestinations,
   type ToolImageMount,
 } from "./tool-image-mounts.ts";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ToolEngineOutput } from "./tool-build-runtime.ts";
 import type { ImageDetails } from "./metadata-policy.ts";
+import { redactSecretValues, secretEnvironmentValues } from "./log-redaction.ts";
 
 const execute = promisify(execFile);
 
@@ -53,17 +54,68 @@ export async function podmanOutput(
     timeout: timeoutMs,
     maxBuffer: 4 * 1024 * 1024,
   });
-  execution.child.stdout?.on("data", (chunk: Buffer) => {
+  const summarizesInspection = args[0] === "inspect";
+  const inspectionChunks: string[] = [];
+  execution.child.stdout?.on("data", (chunk: string | Buffer) => {
     const text = chunk.toString();
     progress?.(text);
+    if (summarizesInspection) {
+      inspectionChunks.push(text);
+      return;
+    }
     diagnostic?.(`podman ${args[0]} stdout: ${text}`);
   });
-  execution.child.stderr?.on("data", (chunk: Buffer) => {
+  execution.child.stdout?.on("end", () => {
+    if (summarizesInspection && inspectionChunks.length) {
+      diagnostic?.(inspectionDiagnostic(args, Buffer.from(inspectionChunks.join(""))));
+    }
+  });
+  execution.child.stderr?.on("data", (chunk: string | Buffer) => {
     const text = chunk.toString();
     progress?.(text);
     diagnostic?.(`podman ${args[0]} stderr: ${text}`);
   });
   return (await execution).stdout;
+}
+
+async function removeFailedGenerationContainers(options: {
+  run: ToolEngineOutput;
+  sessionId: string;
+  generation: number;
+  createdContainer?: string;
+  previousContainer?: string;
+}): Promise<void> {
+  const listedGenerationContainers = await options
+    .run([
+      "ps",
+      "--all",
+      "--no-trunc",
+      "--filter",
+      `label=pi.sandbox.session=${options.sessionId}`,
+      "--filter",
+      `label=pi.sandbox.generation=${options.generation}`,
+      "--format",
+      "{{.ID}}",
+    ])
+    .then((output) => output.split(/\s+/).filter((id) => /^[a-f0-9]{64}$/.test(id)))
+    .catch(() => []);
+  const failedContainers = new Set([
+    ...listedGenerationContainers,
+    ...(options.createdContainer ? [options.createdContainer] : []),
+  ]);
+  for (const container of failedContainers) {
+    if (container === options.previousContainer) {
+      continue;
+    }
+    await options.run(["rm", "--force", "--time=0", container]).catch(() => {});
+  }
+}
+
+function inspectionDiagnostic(args: string[], output: Buffer): string {
+  const target = args.at(-1) ?? "";
+  const kind = args.includes("--type") ? args[args.indexOf("--type") + 1] : "object";
+  const digest = createHash("sha256").update(output).digest("hex").slice(0, 16);
+  return `podman inspect ${kind} ${target}: ${output.length} bytes, sha256 ${digest}\n`;
 }
 
 function shellQuote(value: string): string {
@@ -123,6 +175,17 @@ export async function createDevcontainer(options: {
   checkpointInventory?: ToolInventory;
   checkpointToolImageMounts?: ToolImageMount[];
 }): Promise<PreparedEnvironment> {
+  const secretValues = secretEnvironmentValues({
+    definition: options.resolved.definition,
+    hostEnvironment: options.hostEnvironment,
+  });
+  const redactReport = (report?: (text: string) => void) =>
+    report && ((text: string) => report(redactSecretValues(text, secretValues)));
+  options = {
+    ...options,
+    progress: redactReport(options.progress),
+    diagnostic: redactReport(options.diagnostic),
+  };
   const stage = (text: string) => {
     if (options.stage) {
       options.stage(text);
@@ -196,7 +259,7 @@ export async function createDevcontainer(options: {
   const volumeMountArguments = options.volumes.map(volumeMountArgument);
   const approvedMountArguments = [...options.mounts.map(mountArgument), ...volumeMountArguments];
   definition.mounts = [...options.mounts.slice(1).map(mountArgument), ...volumeMountArguments];
-  const imageName = `localhost/pi-sandbox-${sha256Hex(options.sessionId).slice(0, 20)}`;
+  const imageName = sessionImageName(options.sessionId);
   const authority: EngineAuthority = {
     label,
     containerName: identity.name,
@@ -338,7 +401,7 @@ export async function createDevcontainer(options: {
     "--user-data-folder",
     join(options.directory, "cli"),
   ];
-  const run = async (args: string[]) => {
+  const run = async (args: string[], { includeStdoutDiagnostic = true } = {}) => {
     const isBuild = args[0] === "build";
     const buildOutput =
       isBuild && options.progress ? new StartupBuildOutput(options.progress) : undefined;
@@ -350,6 +413,7 @@ export async function createDevcontainer(options: {
         signal: options.signal,
         progress: buildOutput ? (text) => buildOutput.write(text) : options.progress,
         diagnostic: options.diagnostic,
+        includeStdoutDiagnostic,
         timeoutMs: isBuild ? options.buildTimeoutMs : options.startupTimeoutMs,
       });
     } finally {
@@ -540,24 +604,30 @@ export async function createDevcontainer(options: {
       options.volumes,
     );
     stage("Loading container environment…");
-    const remoteEnvironmentOutput = await run([
-      "exec",
-      "--workspace-folder",
-      options.resolved.startupDirectory,
-      "--config",
-      options.resolved.path,
-      "--override-config",
-      snapshot,
-      "--container-id",
-      result.containerId,
-      "--docker-path",
-      adapterPath,
-      "--",
-      "python3",
-      "-c",
-      "import json\nimport os\n\nenvironment = dict(os.environ)\nprint(json.dumps(environment))",
-    ]);
+    const remoteEnvironmentOutput = await run(
+      [
+        "exec",
+        "--workspace-folder",
+        options.resolved.startupDirectory,
+        "--config",
+        options.resolved.path,
+        "--override-config",
+        snapshot,
+        "--container-id",
+        result.containerId,
+        "--docker-path",
+        adapterPath,
+        "--",
+        "python3",
+        "-c",
+        "import json\nimport os\n\nenvironment = dict(os.environ)\nprint(json.dumps(environment))",
+      ],
+      { includeStdoutDiagnostic: false },
+    );
     const remoteEnvironment = JSON.parse(remoteEnvironmentOutput) as Record<string, string>;
+    options.diagnostic?.(
+      `devcontainer exec stdout: container environment with ${Object.keys(remoteEnvironment).length} variables (values omitted)\n`,
+    );
     if (toolInventory) {
       stage("Verifying provisioned runtime executables…");
       await verifyRuntimeInventory({
@@ -582,9 +652,13 @@ export async function createDevcontainer(options: {
       ...(toolImageMounts !== undefined ? { toolImageMounts } : {}),
     };
   } catch (error) {
-    if (createdContainer && createdContainer !== options.previousContainer) {
-      await toolEngine(["stop", createdContainer]).catch(() => {});
-    }
+    await removeFailedGenerationContainers({
+      run: toolEngine,
+      sessionId: options.sessionId,
+      generation: options.generation ?? 1,
+      createdContainer,
+      previousContainer: options.previousContainer,
+    });
     throw error;
   } finally {
     await adapter.close();

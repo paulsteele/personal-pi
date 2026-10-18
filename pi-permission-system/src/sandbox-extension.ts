@@ -5,11 +5,12 @@ import { evaluateSafety, type GuardPathFact, type SafetyContext } from "./auto/s
 import { guestToHost } from "./sandbox/mounts.ts";
 import {
   getAgentDir,
+  getPackageDir,
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { editConfigDraft } from "@paulsteele/pi-shared-ui";
+import { editConfigDraft, openConfigFile } from "@paulsteele/pi-shared-ui";
 import { ApprovalQueue } from "./approval-queue.ts";
 import { awaitSandboxWork } from "./sandbox/cancellation.ts";
 import { createDelegatedReviewService, REVIEW_SERVICE_CHANNEL } from "./delegated-review.ts";
@@ -21,8 +22,18 @@ import {
 } from "./prompt/entries.ts";
 import { presentPermissionPrompt } from "./prompt/component.ts";
 import { emitUiPrompt, emitDecision } from "./permission-events.ts";
-import { SandboxSession } from "./sandbox/session.ts";
-import { selectDefinition, resolveDefinition } from "./sandbox/definition.ts";
+import { SandboxSession, type SandboxCloseMode } from "./sandbox/session.ts";
+import {
+  resolveSandboxProject,
+  selectDefinition,
+  resolveDefinition,
+} from "./sandbox/definition.ts";
+import { projectEnvironmentPath } from "./sandbox/project-environment.ts";
+import {
+  startupRecoveryActions,
+  switchProfileToolVersion,
+  type StartupRecoveryAction,
+} from "./sandbox/startup-recovery.ts";
 import { configuredEnvironmentSourcePaths } from "./sandbox/environment-layers.ts";
 import {
   loadSandboxSettings,
@@ -50,6 +61,7 @@ import {
   defaultToolProfile,
   globalToolProfilePath,
   parseToolProfile,
+  projectToolProfilePath,
   resolveToolProfiles,
 } from "./sandbox/tool-profile.ts";
 import { publishPrivateText, readPrivateText, sha256Hex } from "./sandbox/storage.ts";
@@ -96,7 +108,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     type: "boolean",
     description: "Run built-in tools on the host for this session (sandbox escape hatch)",
   });
-  registerSandboxTools(pi, getSession, isHostMode);
+  registerSandboxTools(pi, getSession, isHostMode, getAgentDir());
   registerSandboxToolRequests(pi, getSession);
   let unregisterSettings: (() => void) | undefined;
 
@@ -155,20 +167,21 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     });
   }
 
-  async function retire(): Promise<void> {
+  async function retire(closeMode: SandboxCloseMode = "dispose"): Promise<void> {
     startup.dispose();
     generation++;
     approvals.dispose();
     startupAbort?.abort();
     await pendingStartup?.catch(() => {});
     const previous = session ?? pendingCandidate;
+    const previousCloseMode = previous === session ? closeMode : "dispose";
     session = undefined;
     pendingCandidate = undefined;
     const cleanupErrors: unknown[] = [];
     for (const cleanup of [
       () => delegated?.dispose(),
       () => reviewerSandboxes?.dispose(),
-      () => previous?.close(),
+      () => previous?.close(previousCloseMode),
     ]) {
       try {
         await cleanup();
@@ -187,7 +200,70 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     }
   }
 
-  async function start(ctx: ExtensionContext): Promise<void> {
+  let recoveryAfterFailure: { error: unknown; definitionPath: string | undefined } | undefined;
+
+  async function chooseStartupRecovery(
+    ctx: ExtensionContext,
+    error: unknown,
+    definitionPath: string | undefined,
+  ): Promise<StartupRecoveryAction | undefined> {
+    const project = await resolveSandboxProject(ctx.cwd, getAgentDir()).catch(() => undefined);
+    const actions = startupRecoveryActions(error, {
+      globalToolsPath: globalToolProfilePath(getAgentDir()),
+      projectToolsPath: project ? projectToolProfilePath(getAgentDir(), project) : undefined,
+      projectEnvironmentPath: project ? projectEnvironmentPath(getAgentDir(), project) : undefined,
+      definitionPath,
+      hasStartupLog: startup.latestLogPath !== undefined,
+    });
+    const chosenLabel = await ctx.ui.select(
+      `Sandbox startup failed\n${String(error)}`,
+      actions.map((action) => action.label),
+    );
+    return actions.find((action) => action.label === chosenLabel);
+  }
+
+  async function recoverFromStartupFailure(
+    ctx: ExtensionContext,
+    error: unknown,
+    definitionPath: string | undefined,
+  ): Promise<void> {
+    for (;;) {
+      const action = await chooseStartupRecovery(ctx, error, definitionPath);
+      if (!action || action.kind === "dismiss") {
+        return;
+      }
+      switch (action.kind) {
+        case "retry": {
+          await start(ctx, "recovery");
+          return;
+        }
+        case "rebuild": {
+          await start(ctx, "recovery-rebuild");
+          return;
+        }
+        case "switch-tool-version": {
+          await switchProfileToolVersion(action.error);
+          await start(ctx, "recovery");
+          return;
+        }
+        case "open-config": {
+          await openConfigFile(ctx, action.path);
+          await start(ctx, "recovery");
+          return;
+        }
+        case "show-log": {
+          ctx.ui.notify(`Latest sandbox diagnostic log:\n${startup.latestLogPath}`, "info");
+          continue;
+        }
+        case "sandbox-off": {
+          await enterHostMode(ctx);
+          return;
+        }
+      }
+    }
+  }
+
+  async function start(ctx: ExtensionContext, startReason?: string): Promise<void> {
     await retire();
     context = ctx;
     approvals = new ApprovalQueue();
@@ -195,6 +271,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     const owner = generation;
     const startupController = new AbortController();
     startupAbort = startupController;
+    let attemptedDefinitionPath: string | undefined;
     try {
       pendingStartup = startup.run(
         "Starting devcontainer",
@@ -254,6 +331,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
               startupController.signal,
             );
           }
+          attemptedDefinitionPath = selected.path;
           progress.stage(`Resolving devcontainer definition: ${selected.path}`);
           const resolved = await resolveDefinition({
             selected,
@@ -278,6 +356,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
               confirm(preview, toolCallId, operationSignal),
             startupTimeoutMs: settings.settings.sandbox.startupTimeoutMs,
             buildTimeoutMs: settings.settings.sandbox.buildTimeoutMs,
+            reattachRunningContainer: startReason === "reload",
+            discardSavedContainer: startReason === "recovery-rebuild",
             startup,
             signal: startupController.signal,
             changed: () => {
@@ -517,11 +597,19 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         ports: [],
         error: unavailable,
       });
+      if (ctx.mode === "tui" && ctx.hasUI) {
+        recoveryAfterFailure = { error, definitionPath: attemptedDefinitionPath };
+      }
     } finally {
       if (startupAbort === startupController) {
         pendingStartup = undefined;
         startupAbort = undefined;
       }
+    }
+    const recovery = recoveryAfterFailure;
+    recoveryAfterFailure = undefined;
+    if (recovery && owner === generation) {
+      await recoverFromStartupFailure(ctx, recovery.error, recovery.definitionPath);
     }
   }
 
@@ -568,7 +656,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     enterSandboxedMode,
   };
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     unregisterSettings ??= registerSandboxSettings(pi, getAgentDir(), getSession, modeControl);
     mode = resolveSandboxMode({
       branch: ctx.sessionManager.getBranch?.() ?? [],
@@ -579,12 +667,12 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
       await runOnHost(ctx);
       return;
     }
-    await start(ctx);
+    await start(ctx, event?.reason);
   });
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event) => {
     unregisterSettings?.();
     unregisterSettings = undefined;
-    await retire();
+    await retire(event?.reason === "reload" ? "reload" : "dispose");
     publisher.dispose();
   });
   pi.on("session_tree", async (_event, ctx) => {
@@ -613,6 +701,13 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     event.systemPromptOptions.cwd = current.environment.workspace;
     const hostCommandGuidance = `Project host-command rules at ${hostCommands.path}: ${JSON.stringify(hostCommands.rules)}. Matching literal executable invocations run natively on the host with any arguments and the host environment; guest Bash retains sequencing, pipes, redirects, and argument expansion. Host cwd must map inside this project. Only explicit command-prefix environment assignments are forwarded, excluding shell/runtime lookup variables. Host scripts and their children are trusted native execution, not container-isolated. Only statically matched command names route to the host; dynamic executable names, function definitions and their calls, and commands inside opaque shell strings run in the container. Use direct commands and project-relative arguments when native routing is needed.`;
     const trustedToolGuidance = `Trusted host tools do not receive additional sandbox prompts: pi-web-access provides web_search, source_check, fetch_content, and get_search_content; @plannotator/pi-extension provides plannotator, plannotator_submit_plan, and plannotator_mark_done; @juicesharp/rpiv-ask-user-question provides ask_user_question. Their internal file, subprocess, credential, and network operations are not container-isolated.`;
+    const piResourceGuidance = [
+      `read, ls, grep, and find access Pi package files without a mount: ${getPackageDir()} (README, docs, examples).`,
+      `Session transcripts are available without a mount: ${join(getAgentDir(), "sessions")}.`,
+      `Extension config files are available without a mount: ${join(getAgentDir(), "extensions", "<name>", "config.json")}, except pi-permission-system.`,
+      `Sandbox startup logs are available without a mount: ${join(sandboxStorageRoot(getAgentDir()), "sessions", "<session-id-hash>", "startup-logs")}; /sandbox logs shows the latest path.`,
+      "Do not request mounts for these paths.",
+    ].join(" ");
     const mountGuidance = `Writable binds expose real host data; secret protection is best-effort and Internet access permits uploads. Guest cwd: ${current.environment.workspace}. Approved mounts: ${JSON.stringify(current.mounts.map(({ source, destination, access }) => ({ source, destination, access })))}. Use request_host_mount to request more host access; only the operator can approve it.`;
     const toolInstallationGuidance = `When a required development tool is missing, use request_sandbox_tool to propose a pinned installation into the active definition rather than silently substituting another runtime or using host tools. Installation requires operator approval and rebuilds the container. Layered installs are saved privately for this project; shared tools are configured separately, and repository base definitions are not rewritten.`;
     event.systemPromptOptions.sections.sandbox = [
@@ -621,6 +716,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
       trustedToolGuidance,
       "Explicit tool denies still apply.",
       mountGuidance,
+      piResourceGuidance,
       toolInstallationGuidance,
       "No automatic host fallback or sandbox-off mode exists.",
     ].join(" ");
@@ -704,7 +800,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
       if (args.trim() === "logs") {
         ctx.ui.notify(
           startup.latestLogPath
-            ? `Latest sandbox diagnostic log:\n${startup.latestLogPath}\nMay contain secrets from lifecycle output or container environment. Inspect and redact before sharing.`
+            ? `Latest sandbox diagnostic log:\n${startup.latestLogPath}\nConfigured environment values are redacted, but lifecycle output may still contain secrets. Inspect and redact before sharing.`
             : "No sandbox diagnostic log is available for this runtime.",
           "info",
         );

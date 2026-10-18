@@ -2,6 +2,7 @@ import { lstat, mkdir, mkdtemp, realpath, rm, utimes, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
+import { sessionImageName } from "../src/sandbox/container-identity.ts";
 import { inactiveSessionRetentionMs, pruneInactiveSessions } from "../src/sandbox/prune.ts";
 import { type SandboxSessionRecord } from "../src/sandbox/session-record.ts";
 import { readPrivateText, sha256Hex } from "../src/sandbox/storage.ts";
@@ -10,8 +11,9 @@ const podman = vi.hoisted(() => vi.fn());
 vi.mock("../src/sandbox/driver.ts", () => ({ podmanOutput: podman }));
 const directories: string[] = [];
 const nowUnixMs = Date.UTC(2026, 9, 9);
-const latestContainer = "a".repeat(64);
-const supersededContainer = "b".repeat(64);
+const exitedProcessPid = 2 ** 22 + 12345;
+const abandonedContainer = "a".repeat(64);
+const liveContainer = "b".repeat(64);
 
 afterEach(async () => {
   vi.resetAllMocks();
@@ -20,11 +22,12 @@ afterEach(async () => {
   }
 });
 
-async function pruningFixture(inactiveForMs = inactiveSessionRetentionMs) {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "sandbox-prune-")));
-  directories.push(root);
-  const agentDir = join(root, "agent");
-  const sessionId = "old-session";
+interface EngineState {
+  containers: Array<{ id: string; sessionId: string }>;
+  images: string[];
+}
+
+async function sessionDirectory(agentDir: string, sessionId: string): Promise<string> {
   const directory = join(
     agentDir,
     "extensions",
@@ -33,193 +36,164 @@ async function pruningFixture(inactiveForMs = inactiveSessionRetentionMs) {
     sha256Hex(sessionId),
   );
   await mkdir(directory, { recursive: true });
-  const hostSource = join(root, "host-file.txt");
-  await writeFile(hostSource, "Host files must survive container pruning");
-  const record: SandboxSessionRecord = {
+  return directory;
+}
+
+function sessionRecord(sessionId: string, startupDirectory: string): SandboxSessionRecord {
+  return {
     version: 1,
     sessionId,
-    startupDirectory: root,
+    startupDirectory,
     definitionRevision: "definition",
     generation: 2,
-    inactiveSinceUnixMs: nowUnixMs - inactiveForMs,
-    mounts: [
-      {
-        source: hostSource,
-        destination: "/host-file.txt",
-        access: "ro",
-        identity: "1:2",
-        kind: "file",
-      },
-    ],
+    mounts: [],
     environment: {
-      container: latestContainer,
+      container: abandonedContainer,
       image: "image",
       user: "root",
       workspace: "/workspace",
       configuration: {},
     },
   };
-  const recordPath = join(directory, "session.json");
-  await writeFile(recordPath, JSON.stringify(record));
+}
+
+async function pruningFixture(engine: EngineState) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "sandbox-prune-")));
+  directories.push(root);
+  const agentDir = join(root, "agent");
   const report = vi.fn();
   podman.mockImplementation(async (args: string[]) => {
     if (args[0] === "ps") {
-      return `${latestContainer}\n${supersededContainer}\n`;
+      expect(args.slice(-2)).toEqual(["--format", "json"]);
+      return JSON.stringify(
+        engine.containers.map(({ id, sessionId }) => ({
+          Id: id,
+          Labels: { "pi.sandbox.session": sessionId, "pi.sandbox.generation": "1" },
+        })),
+      );
     }
-    if (args[0] === "inspect") {
-      return JSON.stringify([
-        {
-          Id: args[3],
-          Config: { Labels: { "pi.sandbox.session": sessionId } },
-          State: { Running: false, Status: "exited" },
-        },
-      ]);
+    if (args[0] === "images") {
+      return engine.images.map((image) => `${image}\n`).join("");
     }
     return "";
   });
   return {
+    root,
     agentDir,
-    directory,
-    recordPath,
-    record,
-    hostSource,
     report,
     prune: () => pruneInactiveSessions({ agentDir, nowUnixMs, report }),
   };
 }
 
-it("removes all stopped generations at seven days and retains authority and host files", async () => {
-  const fixture = await pruningFixture();
+it("removes containers of sessions without a live owner and marks their records disposed", async () => {
+  const fixture = await pruningFixture({
+    containers: [{ id: abandonedContainer, sessionId: "abandoned-session" }],
+    images: [],
+  });
+  const directory = await sessionDirectory(fixture.agentDir, "abandoned-session");
+  const recordPath = join(directory, "session.json");
+  const record = sessionRecord("abandoned-session", fixture.root);
+  await writeFile(recordPath, JSON.stringify(record));
   await fixture.prune();
-  expect(podman).toHaveBeenCalledWith([
-    "ps",
-    "--all",
-    "--no-trunc",
-    "--filter",
-    "label=pi.sandbox.session=old-session",
-    "--format",
-    "{{.ID}}",
-  ]);
-  expect(podman).toHaveBeenCalledWith(["rm", latestContainer]);
-  expect(podman).toHaveBeenCalledWith(["rm", supersededContainer]);
-  expect(JSON.parse((await readPrivateText(fixture.recordPath))!.text)).toEqual({
-    ...fixture.record,
+  expect(podman).toHaveBeenCalledWith(["rm", "--force", "--time=0", abandonedContainer]);
+  expect(JSON.parse((await readPrivateText(recordPath))!.text)).toEqual({
+    ...record,
+    inactiveSinceUnixMs: nowUnixMs,
     containerPrunedAtUnixMs: nowUnixMs,
   });
-  expect((await readPrivateText(fixture.hostSource))!.text).toBe(
-    "Host files must survive container pruning",
-  );
-  await expect(lstat(join(fixture.directory, "owner.lock"))).rejects.toMatchObject({
-    code: "ENOENT",
+  await expect(lstat(join(directory, "owner.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("removes orphaned containers whose failed start never saved a session record", async () => {
+  const fixture = await pruningFixture({
+    containers: [{ id: abandonedContainer, sessionId: "failed-start-session" }],
+    images: [],
   });
-});
-
-it("keeps a session inactive for less than seven days", async () => {
-  const fixture = await pruningFixture(inactiveSessionRetentionMs - 1);
+  await sessionDirectory(fixture.agentDir, "failed-start-session");
   await fixture.prune();
-  expect(podman).not.toHaveBeenCalled();
-  expect(JSON.parse((await readPrivateText(fixture.recordPath))!.text)).toEqual(fixture.record);
+  expect(podman).toHaveBeenCalledWith(["rm", "--force", "--time=0", abandonedContainer]);
 });
 
-it("does not inspect or prune a session with an ownership lock, even if the lock looks stale", async () => {
-  const fixture = await pruningFixture();
-  const lockPath = join(fixture.directory, "owner.lock");
-  await writeFile(lockPath, '{"pid":99999999}');
+it("keeps the container and images of a session whose owner process is running", async () => {
+  const liveImage = `${sessionImageName("live-session")}:latest`;
+  const fixture = await pruningFixture({
+    containers: [{ id: liveContainer, sessionId: "live-session" }],
+    images: [liveImage],
+  });
+  const directory = await sessionDirectory(fixture.agentDir, "live-session");
+  await writeFile(join(directory, "owner.lock"), JSON.stringify({ pid: process.pid }));
   await fixture.prune();
-  expect(podman).not.toHaveBeenCalled();
-  expect((await readPrivateText(lockPath))!.text).toBe('{"pid":99999999}');
+  expect(podman).not.toHaveBeenCalledWith(["rm", "--force", "--time=0", liveContainer]);
+  expect(podman).not.toHaveBeenCalledWith(["rmi", liveImage]);
 });
 
-it.each([
-  { Running: true, Status: "running" },
-  { Running: false, Status: "paused" },
-])("keeps every generation when one container is not stopped: $Status", async (state) => {
-  const fixture = await pruningFixture();
+it("treats an owner lock left by an exited process as abandoned", async () => {
+  const fixture = await pruningFixture({
+    containers: [{ id: abandonedContainer, sessionId: "crashed-session" }],
+    images: [],
+  });
+  const directory = await sessionDirectory(fixture.agentDir, "crashed-session");
+  await writeFile(join(directory, "owner.lock"), JSON.stringify({ pid: exitedProcessPid }));
+  await fixture.prune();
+  expect(podman).toHaveBeenCalledWith(["rm", "--force", "--time=0", abandonedContainer]);
+});
+
+it("removes session and checkpoint images that belong to no live session", async () => {
+  const abandonedImage = `${sessionImageName("abandoned-session")}:latest`;
+  const abandonedCheckpoint = `${sessionImageName("abandoned-session")}-checkpoint:g3`;
+  const liveImage = `${sessionImageName("live-session")}:latest`;
+  const fixture = await pruningFixture({
+    containers: [],
+    images: [abandonedImage, abandonedCheckpoint, liveImage, "localhost/pi-project:shared"],
+  });
+  const liveDirectory = await sessionDirectory(fixture.agentDir, "live-session");
+  await writeFile(join(liveDirectory, "owner.lock"), JSON.stringify({ pid: process.pid }));
+  await fixture.prune();
+  expect(podman).toHaveBeenCalledWith(["rmi", abandonedImage]);
+  expect(podman).toHaveBeenCalledWith(["rmi", abandonedCheckpoint]);
+  expect(podman).not.toHaveBeenCalledWith(["rmi", liveImage]);
+  expect(podman).not.toHaveBeenCalledWith(["rmi", "localhost/pi-project:shared"]);
+});
+
+it("deletes failed-start directories without a record after seven days", async () => {
+  const fixture = await pruningFixture({ containers: [], images: [] });
+  const expired = await sessionDirectory(fixture.agentDir, "expired-failed-start");
+  const recent = await sessionDirectory(fixture.agentDir, "recent-failed-start");
+  const expiredAt = new Date(nowUnixMs - inactiveSessionRetentionMs);
+  await utimes(expired, expiredAt, expiredAt);
+  const recentAt = new Date(nowUnixMs - inactiveSessionRetentionMs + 1000);
+  await utimes(recent, recentAt, recentAt);
+  await fixture.prune();
+  await expect(lstat(expired)).rejects.toMatchObject({ code: "ENOENT" });
+  expect((await lstat(recent)).isDirectory()).toBe(true);
+});
+
+it("keeps a saved session record even when its container was removed", async () => {
+  const fixture = await pruningFixture({ containers: [], images: [] });
+  const directory = await sessionDirectory(fixture.agentDir, "resumable-session");
+  const recordPath = join(directory, "session.json");
+  await writeFile(recordPath, JSON.stringify(sessionRecord("resumable-session", fixture.root)));
+  const expiredAt = new Date(nowUnixMs - inactiveSessionRetentionMs);
+  await utimes(directory, expiredAt, expiredAt);
+  await fixture.prune();
+  expect(await readPrivateText(recordPath)).toBeDefined();
+});
+
+it("reports a failed removal and continues with image cleanup", async () => {
+  const abandonedImage = `${sessionImageName("abandoned-session")}:latest`;
+  const fixture = await pruningFixture({
+    containers: [{ id: abandonedContainer, sessionId: "abandoned-session" }],
+    images: [abandonedImage],
+  });
+  await sessionDirectory(fixture.agentDir, "abandoned-session");
+  const listings = podman.getMockImplementation()!;
   podman.mockImplementation(async (args: string[]) => {
-    if (args[0] === "ps") {
-      return `${latestContainer}\n${supersededContainer}\n`;
+    if (args[0] === "rm") {
+      throw new Error("Container removal failed");
     }
-    return JSON.stringify([
-      {
-        Id: args[3],
-        Config: { Labels: { "pi.sandbox.session": "old-session" } },
-        State: args[3] === supersededContainer ? state : { Running: false, Status: "exited" },
-      },
-    ]);
-  });
-  await fixture.prune();
-  expect(podman.mock.calls.filter(([args]) => args[0] === "rm")).toEqual([]);
-  expect(JSON.parse((await readPrivateText(fixture.recordPath))!.text)).toEqual(fixture.record);
-});
-
-it("uses the record modification time for sessions saved before inactivity timestamps existed", async () => {
-  const fixture = await pruningFixture();
-  const { inactiveSinceUnixMs: _inactiveSinceUnixMs, ...legacyRecord } = fixture.record;
-  await writeFile(fixture.recordPath, JSON.stringify(legacyRecord));
-  const lastSaved = new Date(nowUnixMs - inactiveSessionRetentionMs);
-  await utimes(fixture.recordPath, lastSaved, lastSaved);
-  await fixture.prune();
-  expect(podman).toHaveBeenCalledWith(["rm", latestContainer]);
-  expect(JSON.parse((await readPrivateText(fixture.recordPath))!.text).inactiveSinceUnixMs).toBe(
-    lastSaved.getTime(),
-  );
-});
-
-it("refuses a container whose inspected session label does not match", async () => {
-  const fixture = await pruningFixture();
-  podman.mockResolvedValueOnce(`${latestContainer}\n`).mockResolvedValueOnce(
-    JSON.stringify([
-      {
-        Id: latestContainer,
-        Config: { Labels: { "pi.sandbox.session": "another-session" } },
-        State: { Running: false, Status: "exited" },
-      },
-    ]),
-  );
-  await fixture.prune();
-  expect(podman.mock.calls.filter(([args]) => args[0] === "rm")).toEqual([]);
-  expect(fixture.report).toHaveBeenCalledWith(expect.stringContaining("another session"));
-});
-
-it("retries failed removals on a later sweep without losing the fresh-resume marker", async () => {
-  const fixture = await pruningFixture();
-  podman.mockImplementationOnce(async () => `${latestContainer}\n`);
-  podman.mockImplementationOnce(async () =>
-    JSON.stringify([
-      {
-        Id: latestContainer,
-        Config: { Labels: { "pi.sandbox.session": "old-session" } },
-        State: { Running: false, Status: "exited" },
-      },
-    ]),
-  );
-  podman.mockImplementationOnce(async () => {
-    expect(
-      JSON.parse((await readPrivateText(fixture.recordPath))!.text).containerPrunedAtUnixMs,
-    ).toBe(nowUnixMs);
-    throw new Error("Container removal failed");
+    return listings(args);
   });
   await fixture.prune();
   expect(fixture.report).toHaveBeenCalledWith(expect.stringContaining("Container removal failed"));
-  expect(
-    JSON.parse((await readPrivateText(fixture.recordPath))!.text).containerPrunedAtUnixMs,
-  ).toBe(nowUnixMs);
-  podman.mockClear();
-  await fixture.prune();
-  expect(podman).toHaveBeenCalledWith(["rm", latestContainer]);
-});
-
-it("skips malformed records without preventing another session from being pruned", async () => {
-  const fixture = await pruningFixture();
-  const malformedDirectory = join(fixture.directory, "..", "c".repeat(64));
-  await mkdir(malformedDirectory);
-  await writeFile(join(malformedDirectory, "session.json"), "invalid JSON");
-  await fixture.prune();
-  expect(podman).toHaveBeenCalledWith(["rm", latestContainer]);
-  expect(fixture.report).toHaveBeenCalledWith(
-    expect.stringContaining("Could not prune sandbox session"),
-  );
-  await expect(lstat(join(malformedDirectory, "owner.lock"))).rejects.toMatchObject({
-    code: "ENOENT",
-  });
+  expect(podman).toHaveBeenCalledWith(["rmi", abandonedImage]);
 });

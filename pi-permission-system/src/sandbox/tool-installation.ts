@@ -6,6 +6,27 @@ import type { SandboxSession } from "./session.ts";
 import { silentStartupProgress, type SandboxStartupProgress } from "./startup-ui.ts";
 import { managedCatalogTool } from "./tool-catalog.ts";
 import { globalToolProfilePath, projectToolProfilePath } from "./tool-profile.ts";
+import {
+  findMissingPrerequisites,
+  MissingPrerequisitesError,
+  prerequisiteProviderIds,
+} from "./tool-prerequisites.ts";
+
+async function requirePrerequisites(
+  session: SandboxSession,
+  request: SandboxToolRequest,
+  signal: AbortSignal,
+): Promise<void> {
+  const missingInImage = await findMissingPrerequisites(session, request.prerequisites, signal);
+  const profileTools = session.options.resolved.layers?.tools ?? [];
+  const unprovided = missingInImage.filter((prerequisite) => {
+    const hasProfileProvider = prerequisiteProviderIds([prerequisite], profileTools).length > 0;
+    return !hasProfileProvider;
+  });
+  if (unprovided.length) {
+    throw new MissingPrerequisitesError(request.tool, unprovided);
+  }
+}
 
 const installArgument = Type.String({ minLength: 1, maxLength: 4096 });
 export const sandboxToolRequestParameters = Type.Object({
@@ -35,6 +56,10 @@ export async function requestSandboxTool(
     : undefined;
   const version = managedTool?.version ?? request.version;
   const executable = managedTool?.executable ?? request.executable;
+  if (!managedTool) {
+    report(`Checking ${request.tool} prerequisites in the sandbox image…`);
+    await requirePrerequisites(session, request, signal);
+  }
   report(`Preparing ${request.tool} (${version}) image installation…`);
   const installations = [
     {
