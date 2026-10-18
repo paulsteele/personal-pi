@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.9.1 — 2026-10-18
+
+- Show Git file changes (added, changed, removed) and line changes (added, removed) inside the Activity race track. Untracked files count as added.
+
 ## 2.6.0 — 2026-10-16
 
 - Show the DRY scan `warning` (directories that look vendored or generated) under Attention, keeping the message's line breaks for both warnings and errors.

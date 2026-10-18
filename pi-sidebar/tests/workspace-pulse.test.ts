@@ -38,6 +38,9 @@ describe("createWorkspacePulseRefresh", () => {
 		snapshot: {
 			trackedFiles: 0,
 			untrackedFiles: 0,
+			filesAdded: 0,
+			filesModified: 0,
+			filesDeleted: 0,
 			linesAdded: 0,
 			linesRemoved: 0,
 			binaryFiles: 0,
@@ -145,6 +148,9 @@ describe("inspectWorkspacePulse", () => {
 			snapshot: {
 				trackedFiles: 0,
 				untrackedFiles: 0,
+				filesAdded: 0,
+				filesModified: 0,
+				filesDeleted: 0,
 				linesAdded: 0,
 				linesRemoved: 0,
 				binaryFiles: 0,
@@ -190,6 +196,9 @@ describe("inspectWorkspacePulse", () => {
 			snapshot: {
 				trackedFiles: 5,
 				untrackedFiles: 1,
+				filesAdded: 1,
+				filesModified: 5,
+				filesDeleted: 0,
 				linesAdded: 18,
 				linesRemoved: 6,
 				binaryFiles: 1,

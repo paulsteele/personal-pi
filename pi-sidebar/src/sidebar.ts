@@ -409,6 +409,8 @@ const TRACK_GLYPHS = {
 	finish: "󰈼", // md-flag-checkered
 	ttft: "󰔛", // md-timer-outline
 	tps: "󰓅", // md-speedometer
+	files: "󰈙", // md-file-document
+	lines: "󰊢", // md-git
 } as const;
 
 function centeredTrackContent(content: string, width: number, fill: string): string {
@@ -527,8 +529,27 @@ function qualityTrackCounts(quality: QualityReviewCounts | undefined, palette: A
 	)}`;
 }
 
+function gitChangeTrackRow(workspace: WorkspacePulseData, palette: AtelierPalette, width: number): string {
+	const { snapshot } = workspace;
+	const files = [
+		palette.paint("added", `+${finiteCount(snapshot.filesAdded)}`),
+		palette.paint("warning", `~${finiteCount(snapshot.filesModified)}`),
+		palette.paint("error", `-${finiteCount(snapshot.filesDeleted)}`),
+	].join(" ");
+	const lines = [
+		palette.paint("added", `+${finiteCount(snapshot.linesAdded)}`),
+		palette.paint("error", `-${finiteCount(snapshot.linesRemoved)}`),
+	].join(" ");
+	const content = `${palette.paint("dim", TRACK_GLYPHS.files)} ${files} ${palette.paint("dim", "·")} ${palette.paint(
+		"dim",
+		TRACK_GLYPHS.lines,
+	)} ${lines}`;
+	return `${palette.paint("dim", "│ ")}${centeredTrackContent(content, width - 4, " ")}${palette.paint("dim", " │")}`;
+}
+
 function activityTrackRows(
 	activity: RunActivitySnapshot,
+	workspace: WorkspacePulseData | undefined,
 	quality: QualityReviewCounts | undefined,
 	palette: AtelierPalette,
 	theme: ThemeLike,
@@ -597,6 +618,7 @@ function activityTrackRows(
 			palette,
 			safeWidth - 4,
 		)}${palette.paint("dim", " │")}`,
+		...(workspace ? [gitChangeTrackRow(workspace, palette, safeWidth)] : []),
 		trackRail("bottom", qualityTrackCounts(quality, palette), safeWidth, palette, bottomLeft, bottomRight),
 	];
 }
@@ -754,7 +776,17 @@ function activityBandRows(
 		}
 		rows.push(centeredTrackContent(palette.paint("accent", line), leadWidth, " "));
 	}
-	rows.push(...activityTrackRows(activity, snapshot.qualityHeader, palette, theme, leadWidth, now));
+	rows.push(
+		...activityTrackRows(
+			activity,
+			workspacePulseData(snapshot.workspacePulse),
+			snapshot.qualityHeader,
+			palette,
+			theme,
+			leadWidth,
+			now,
+		),
+	);
 	if (section === "header") {
 		return rows;
 	}

@@ -4,12 +4,17 @@ import nodePath from "node:path";
 export interface WorkspacePulseSnapshot {
 	trackedFiles: number;
 	untrackedFiles: number;
+	filesAdded: number;
+	filesModified: number;
+	filesDeleted: number;
 	linesAdded: number;
 	linesRemoved: number;
 	binaryFiles: number;
 	submodules: number;
 	conflicts: number;
 }
+
+type FileChangeKind = "filesAdded" | "filesModified" | "filesDeleted";
 
 export interface WorkspacePulseData {
 	root: string;
@@ -131,6 +136,9 @@ export function createWorkspacePulseRefresh(options: WorkspacePulseRefreshOption
 const EMPTY_SNAPSHOT: WorkspacePulseSnapshot = {
 	trackedFiles: 0,
 	untrackedFiles: 0,
+	filesAdded: 0,
+	filesModified: 0,
+	filesDeleted: 0,
 	linesAdded: 0,
 	linesRemoved: 0,
 	binaryFiles: 0,
@@ -164,8 +172,21 @@ interface ParsedStatus {
 	unborn: boolean;
 	trackedFiles: number;
 	untrackedFiles: number;
+	fileChanges: Record<FileChangeKind, number>;
 	conflicts: number;
 	submodulePaths: Set<string>;
+}
+
+/** Classifies a porcelain v2 `XY` code relative to HEAD; conflicts count as modified. */
+function fileChangeKind(recordKind: string, xy: string): FileChangeKind {
+	if (recordKind === "u") {
+		return "filesModified";
+	}
+	if (xy.includes("D")) {
+		return "filesDeleted";
+	}
+	const stagedAsNewPath = xy[0] === "A" || xy[0] === "C";
+	return stagedAsNewPath ? "filesAdded" : "filesModified";
 }
 
 function parseStatus(output: string): ParsedStatus {
@@ -174,6 +195,7 @@ function parseStatus(output: string): ParsedStatus {
 		unborn: false,
 		trackedFiles: 0,
 		untrackedFiles: 0,
+		fileChanges: { filesAdded: 0, filesModified: 0, filesDeleted: 0 },
 		conflicts: 0,
 		submodulePaths: new Set(),
 	};
@@ -195,6 +217,7 @@ function parseStatus(output: string): ParsedStatus {
 		}
 		if (record.startsWith("? ")) {
 			parsed.untrackedFiles += 1;
+			parsed.fileChanges.filesAdded += 1;
 			continue;
 		}
 		const kind = record[0];
@@ -202,6 +225,7 @@ function parseStatus(output: string): ParsedStatus {
 		parsed.trackedFiles += 1;
 		if (kind === "u") parsed.conflicts += 1;
 		const fields = record.split(" ");
+		parsed.fileChanges[fileChangeKind(kind, fields[1] ?? "")] += 1;
 		const submodule = fields[2] ?? "";
 		const pathIndex = kind === "u" ? 10 : kind === "2" ? 9 : 8;
 		const path = fields.slice(pathIndex).join(" ");
@@ -314,6 +338,7 @@ async function inspectWorkspacePulseUnchecked(
 			...EMPTY_SNAPSHOT,
 			trackedFiles: parsedStatus.trackedFiles,
 			untrackedFiles: parsedStatus.untrackedFiles,
+			...parsedStatus.fileChanges,
 			conflicts: parsedStatus.conflicts,
 			submodules: parsedStatus.submodulePaths.size,
 			...numstat,

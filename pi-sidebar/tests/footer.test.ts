@@ -45,6 +45,9 @@ const state: FooterState = {
 			snapshot: {
 				trackedFiles: 1,
 				untrackedFiles: 2,
+				filesAdded: 2,
+				filesModified: 1,
+				filesDeleted: 0,
 				linesAdded: 182,
 				linesRemoved: 47,
 				binaryFiles: 0,

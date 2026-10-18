@@ -59,6 +59,9 @@ const state: AtelierState = {
 			snapshot: {
 				trackedFiles: 5,
 				untrackedFiles: 2,
+				filesAdded: 3,
+				filesModified: 3,
+				filesDeleted: 1,
 				linesAdded: 182,
 				linesRemoved: 47,
 				binaryFiles: 0,
@@ -1046,6 +1049,15 @@ describe("legacy two-region compositor migration fixtures", () => {
 			expect(bottom).toMatch(/^╰─.*─╯$/);
 			expect(`${top}${middle}${bottom}`).not.toMatch(/[]/);
 		}
+	});
+
+	it("renders git file and line changes inside the race track", () => {
+		const rows = contentRows(renderSidebarLines(snapshot(), theme, 44, 36, false));
+		const dashboard = rows.findIndex((row) => row.includes("READY · ┃ 󰄋 ┃"));
+		const gitChanges = rows.findIndex((row) => /^│\s+󰈙 \+3 ~3 -1 · 󰊢 \+182 -47\s+│$/.test(row));
+		const trackBottom = rows.findIndex((row) => row.startsWith("╰─"));
+		expect(gitChanges).toBe(dashboard + 1);
+		expect(trackBottom).toBe(gitChanges + 1);
 	});
 
 	it("renders deterministic live run activity", () => {

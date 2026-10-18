@@ -21,6 +21,9 @@ const cleanInspection = {
 	snapshot: {
 		trackedFiles: 0,
 		untrackedFiles: 0,
+		filesAdded: 0,
+		filesModified: 0,
+		filesDeleted: 0,
 		linesAdded: 0,
 		linesRemoved: 0,
 		binaryFiles: 0,
