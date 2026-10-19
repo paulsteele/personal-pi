@@ -17,8 +17,8 @@ class Terminal(NamedTuple):
     descriptor: int
     output: bytearray
 
-root, permission_system, quality, sidebar, observer = sys.argv[1:]
-for entry_path in [permission_system, quality, sidebar, observer]:
+root, devcontainer_sandbox, quality, sidebar, observer = sys.argv[1:]
+for entry_path in [devcontainer_sandbox, quality, sidebar, observer]:
     if not os.path.isfile(entry_path):
         raise RuntimeError("Missing smoke extension entry: " + entry_path)
 event_log = os.path.join(root, "events.jsonl")
@@ -64,7 +64,7 @@ def launch():
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 160, 0, 0))
     child = subprocess.Popen(["pi", "--offline", "--no-session", "--no-extensions", "--no-skills",
                               "--no-prompt-templates", "--no-themes", "--no-context-files", "--approve",
-                              "--tui-mode", "fullscreen", "-e", permission_system, "-e", quality, "-e", sidebar, "-e", observer],
+                              "--tui-mode", "fullscreen", "-e", devcontainer_sandbox, "-e", quality, "-e", sidebar, "-e", observer],
                              cwd=os.path.join(root, "project"), env=environment,
                              stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
     os.close(slave)

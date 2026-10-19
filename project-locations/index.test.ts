@@ -168,8 +168,12 @@ it("preserves existing PR and LSP private profile path layouts", () => {
 		projectStoragePath("/agent/extensions/code-quality", { kind: "projects", id }, "lsp-profile-draft.json"),
 	).toBe(`/agent/extensions/code-quality/projects/${id}/lsp-profile-draft.json`);
 	expect(
-		projectStoragePath("/agent/extensions/pi-permission-system", project, "devcontainer/devcontainer.json"),
-	).toBe(`/agent/extensions/pi-permission-system/repos/${id}/devcontainer/devcontainer.json`);
+		projectStoragePath(
+			"/agent/extensions/pi-devcontainer-sandbox",
+			project,
+			"devcontainer/devcontainer.json",
+		),
+	).toBe(`/agent/extensions/pi-devcontainer-sandbox/repos/${id}/devcontainer/devcontainer.json`);
 });
 
 it.each(["", "/outside.json", "../outside.json", "../../outside.json", "a\0b", "a\\b", "."])(

@@ -1,0 +1,76 @@
+{
+  "name": "@paulsteele/pi-devcontainer-sandbox",
+  "version": "2.11.0",
+  "private": true,
+  "description": "Mandatory Podman devcontainer tools and host mount approvals",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "permissions",
+    "sandbox"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "FORK.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "schemas/permissions.schema.json",
+    "schemas/sandbox-settings.schema.json"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:mounted-tools": "bun scripts/verify-mounted-tools.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome lint .",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "check:pack": "node scripts/verify-pack.mjs",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm test && npm run check:pack"
+  },
+  "dependencies": {
+    "@paulsteele/pi-shared-ui": "workspace:*",
+    "@devcontainers/cli": "0.89.0",
+    "@paulsteele/pi-project-locations": "workspace:*",
+    "jsonc-parser": "3.3.1",
+    "tree-sitter-bash": "0.25.1",
+    "web-tree-sitter": "0.26.12",
+    "zod": "4.4.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.4",
+    "@earendil-works/pi-ai": "1.3.0",
+    "@earendil-works/pi-coding-agent": "1.3.0",
+    "@earendil-works/pi-tui": "1.3.0",
+    "@types/node": "24.12.4",
+    "typebox": "1.3.7",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/paulsteele/personal-pi.git",
+    "directory": "pi-devcontainer-sandbox"
+  },
+  "bugs": {
+    "url": "https://github.com/paulsteele/personal-pi/issues"
+  },
+  "homepage": "https://github.com/paulsteele/personal-pi/tree/main/pi-devcontainer-sandbox"
+}

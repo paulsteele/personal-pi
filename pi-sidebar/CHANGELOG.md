@@ -100,7 +100,7 @@
 ## 1.0.0 — 2026-08-27
 
 - Remove randomized Maxis-style activity phrases; the Sidebar and fallback footer now report only `READY` or `WORKING`.
-- Merge auto-mode and permission-system observations into the Activity timeline: spaced Nerd Font policy/robot/human badges pack into the relevant tool row, repeated routine allows collapse to counted badges, exception details and overflow use follow-up rows, distinct source colors remain, and standalone checks stay visible for uncorrelated skill/forwarded requests.
+- Merge auto-mode and permission observations into the Activity timeline: spaced Nerd Font policy/robot/human badges pack into the relevant tool row, repeated routine allows collapse to counted badges, exception details and overflow use follow-up rows, distinct source colors remain, and standalone checks stay visible for uncorrelated skill/forwarded requests.
 - Retain the latest 12 completed tools across agent runs in one session, and render bounded denial/unsure reasons without a separate Auto Mode sidebar panel.
 - Maintain this package as a local source fork of upstream 0.8.2.
 - Render the fullscreen Sidebar as a real selectable pane and keep selections bounded to their originating pane.

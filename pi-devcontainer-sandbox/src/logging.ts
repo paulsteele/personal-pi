@@ -1,0 +1,57 @@
+import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { dirname } from "node:path";
+import {
+  OWNER_ONLY_DIRECTORY_MODE,
+  OWNER_ONLY_FILE_MODE,
+  restrictExistingPathToOwner,
+} from "./log-file-permissions.ts";
+import { redactedJsonStringify } from "./log-redaction.ts";
+
+const MAX_FIELD = 1_000;
+function cap(value: unknown): unknown {
+  if (typeof value === "string")
+    return value.length > MAX_FIELD ? `${value.slice(0, MAX_FIELD)}…` : value;
+  if (Array.isArray(value)) return value.map(cap);
+  if (value && typeof value === "object" && !Array.isArray(value))
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, cap(child)]));
+  return value;
+}
+
+export const REVIEW_LOG_ROTATION_BYTES = 500 * 1024 * 1024;
+
+export class ReviewLogger {
+  constructor(
+    private readonly path: string,
+    private readonly rotationBytes = REVIEW_LOG_ROTATION_BYTES,
+  ) {}
+
+  /** Keeps one previous log as `<path>.1` once the current log reaches the rotation size. */
+  private rotateWhenFull(): void {
+    const currentBytes = statSync(this.path, { throwIfNoEntry: false })?.size ?? 0;
+    if (currentBytes >= this.rotationBytes) {
+      renameSync(this.path, `${this.path}.1`);
+    }
+  }
+
+  review(event: string, details: Record<string, unknown> = {}): void {
+    try {
+      mkdirSync(dirname(this.path), { recursive: true, mode: OWNER_ONLY_DIRECTORY_MODE });
+      this.rotateWhenFull();
+      restrictExistingPathToOwner(dirname(this.path), OWNER_ONLY_DIRECTORY_MODE);
+      restrictExistingPathToOwner(this.path, OWNER_ONLY_FILE_MODE);
+      const bounded = cap(details) as Record<string, unknown>;
+      const line = redactedJsonStringify({
+        timestamp: new Date().toISOString(),
+        extension: "@paulsteele/pi-devcontainer-sandbox",
+        event,
+        ...bounded,
+      });
+      if (line) {
+        appendFileSync(this.path, `${line}\n`, { encoding: "utf8", mode: OWNER_ONLY_FILE_MODE });
+        restrictExistingPathToOwner(this.path, OWNER_ONLY_FILE_MODE);
+      }
+    } catch {
+      /* logging cannot weaken enforcement */
+    }
+  }
+}

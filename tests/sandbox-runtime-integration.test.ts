@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { isAuditedSandboxTool } from "../pi-permission-system/src/sandbox/gate.ts";
+import { isAuditedSandboxTool } from "../pi-devcontainer-sandbox/src/sandbox/gate.ts";
 
 async function retireSandboxFixture(
   session: Pick<Awaited<ReturnType<typeof createAgentSession>>["session"], "extensionRunner" | "sessionId">,
@@ -81,7 +81,7 @@ test("real Pi tool ownership recognizes sandbox reader overrides", async () => {
   let dispose: (() => void) | undefined;
   try {
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
-    const sandboxExtensionPath = join(import.meta.dir, "../pi-permission-system/src/index.ts");
+    const sandboxExtensionPath = join(import.meta.dir, "../pi-devcontainer-sandbox/src/index.ts");
     const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, additionalExtensionPaths: [sandboxExtensionPath] });
     await resourceLoader.reload();
     const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: null, modelsStorePath: join(agentDir, "models.json"), refreshOnCreate: false });

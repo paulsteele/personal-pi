@@ -561,7 +561,7 @@ export default function prReview(pi: ExtensionAPI): void {
 			}
 			if (outcome.path) {
 				try {
-					// Optional permission-system integration: only this saved report, only
+					// Optional devcontainer-sandbox integration: only this saved report, only
 					// this session, before either command or tool publishes its handoff.
 					pi.events.emit("permissions:allow_session_files", {
 						version: 1,

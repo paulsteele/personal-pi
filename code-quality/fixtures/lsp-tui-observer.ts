@@ -14,7 +14,7 @@ export default function observeLspSmoke(pi: ExtensionAPI): void {
 		const commands = pi.getCommands().map((command) => command.name);
 		const sidebarLoaded = commands.includes("sidebar") && commands.includes("plugin-settings");
 		if (!sidebarLoaded || !commands.includes("sandbox")) {
-			throw new Error("Smoke requires the Sidebar and mandatory Permission System entries");
+			throw new Error("Smoke requires the Sidebar and mandatory Devcontainer Sandbox entries");
 		}
 		appendFileSync(output, `${JSON.stringify({ kind: "started", pid: process.pid, sidebarLoaded })}\n`);
 	});

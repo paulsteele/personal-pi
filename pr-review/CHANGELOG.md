@@ -55,14 +55,14 @@
 
 - Remove Plannotator version restrictions from discovery and the isolated viewer host. Accept any loaded release while retaining package identity, required assets/server API, isolation, and browser-response validation.
 
-- Require the loaded Permission System for source-consuming reviews/setup and route capture, worker tools, inline source and derived-result transfers through the normal live policy/classifier/human pipeline. Keep PR read-only and retain its current worker engine; no generic runtime or bundled permission copy.
+- Require the loaded Devcontainer Sandbox for source-consuming reviews/setup and route capture, worker tools, inline source and derived-result transfers through the normal live policy/classifier/human pipeline. Keep PR read-only and retain its current worker engine; no generic runtime or bundled permission copy.
 - Isolate turn-local classifier reuse, queue parent approvals, expose permission wait/retry states, and recheck report/viewer/parent output. Deferred excluded source retains snapshot identity; denied searches and required context are explicit, and source/body caches never grant access.
 
 - Add Human Readability as a fifth mandatory whole-change baseline, covering high-level intent, accurate names, intent-revealing functions rather than temporal narration, and reviewable diff hunks. Require concrete, independently verified comprehension problems rather than cosmetic preferences; support optional profile supplements without requiring a new baseline entry.
 
 ## 1.1.2
 
-- Register the exact saved report with Pi Permission System for current-session external-directory access before command/tool handoff. Never grant the reports directory or persist permission configuration; cancelled, retired, or unsaved results grant nothing.
+- Register the exact saved report with Pi Devcontainer Sandbox for current-session external-directory access before command/tool handoff. Never grant the reports directory or persist permission configuration; cancelled, retired, or unsaved results grant nothing.
 - Reserve serialized assignment and JSON framing in the overall inline budget before packing shared documents; retain smaller evidence when shared documents do not fit and avoid empty-prefix overhead for near-limit assignments.
 - Reuse deterministic shared background/document prefixes while keeping reviewer assignments ahead of diffs, including paged tasks and compaction. Remove duplicated reading lists and architecture focus without narrowing review scope.
 - Preserve cache token counts, cost components, and first/continuation/compaction usage aggregates through task diagnostics, reports, and parent-tool usage; label older missing metrics unavailable. Give logical workers stable, separate routing IDs without changing retention defaults.

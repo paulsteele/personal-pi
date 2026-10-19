@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createSandboxPublisher } from "../pi-permission-system/src/sandbox/events.ts";
+import { createSandboxPublisher } from "../pi-devcontainer-sandbox/src/sandbox/events.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const manifest = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")) as {
@@ -15,7 +15,7 @@ const expectedExtensions = [
   "./claude-skills/index.ts",
   "./code-blocks/index.ts",
   "./desktop-notifications/index.ts",
-  "./pi-permission-system/src/index.ts",
+  "./pi-devcontainer-sandbox/src/index.ts",
   "./code-quality/index.ts",
   "./progress-observer/index.ts",
   "./pr-review/index.ts",
@@ -58,13 +58,13 @@ describe("Pi package integration", () => {
       "claude-skills",
       "code-blocks",
       "desktop-notifications",
-      "pi-permission-system",
+      "pi-devcontainer-sandbox",
       "code-quality",
       "progress-observer",
       "pr-review",
       "pi-sidebar",
     ]);
-    expect(manifest.pi.extensions.indexOf("./pi-permission-system/src/index.ts")).toBeLessThan(
+    expect(manifest.pi.extensions.indexOf("./pi-devcontainer-sandbox/src/index.ts")).toBeLessThan(
       manifest.pi.extensions.indexOf("./pi-sidebar/extensions/index.ts"),
     );
     expect(manifest.pi.extensions.indexOf("./progress-observer/index.ts")).toBeLessThan(

@@ -346,7 +346,7 @@ export function openReviewPermissions(
 	if (candidates.length !== 1 || service?.version !== 1 || typeof service.open !== "function")
 		throw new PermissionBlocked(
 			"unavailable",
-			"PR review requires the loaded compatible Permission System extension. Load it and /reload.",
+			"PR review requires the loaded compatible Devcontainer Sandbox extension. Load it and /reload.",
 		);
 	const id = randomUUID();
 	// Slash commands can run before before_agent_start populated the owner's skill catalogue.

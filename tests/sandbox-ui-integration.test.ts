@@ -7,7 +7,7 @@ import {
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { isAuditedHostUiTool } from "../pi-permission-system/src/sandbox/gate.ts";
+import { isAuditedHostUiTool } from "../pi-devcontainer-sandbox/src/sandbox/gate.ts";
 
 const fixtureQuestionnaire = `import { Type } from "typebox";
 export default function(pi) {
@@ -42,7 +42,7 @@ test("real Pi recognizes package-owned questionnaire UI and permits it without a
     });
     const resourceLoader = new DefaultResourceLoader({
       cwd, agentDir, settingsManager, noSkills: true, noPromptTemplates: true, noThemes: true,
-      additionalExtensionPaths: [join(import.meta.dir, "../pi-permission-system/src/index.ts")],
+      additionalExtensionPaths: [join(import.meta.dir, "../pi-devcontainer-sandbox/src/index.ts")],
     });
     await resourceLoader.reload();
     const modelRuntime = await ModelRuntime.create({

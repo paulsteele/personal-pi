@@ -150,7 +150,7 @@ export class SandboxDryManager {
 			const node = inventory.find((entry) => entry.id === "node-runtime");
 			if (!tool || !node) {
 				throw new Error(
-					`DRY requires managed jscpd 5.4.1 and node-runtime. Add {"jscpd":{"kind":"catalog","version":"5.4.1"}} to ${join(this.agentDir, "extensions", "pi-permission-system", "global", "tools.json")} using Sandbox Tools or /sandbox setup global tools, then reload and approve rebuild.`,
+					`DRY requires managed jscpd 5.4.1 and node-runtime. Add {"jscpd":{"kind":"catalog","version":"5.4.1"}} to ${join(this.agentDir, "extensions", "pi-devcontainer-sandbox", "global", "tools.json")} using Sandbox Tools or /sandbox setup global tools, then reload and approve rebuild.`,
 				);
 			}
 			this.executable = tool.executable;

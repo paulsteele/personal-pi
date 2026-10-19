@@ -19,7 +19,7 @@ The loaded extension requires the mandatory sandbox service before host capture.
 - `/pr --base REF` — merge-base through the working tree.
 - Add `--committed-only` to an explicit commit/base scope to use HEAD.
 
-For local development in another checkout, start Pi there with `pi -e /absolute/path/to/pi-extensions/pr-review/index.ts` and the compatible Permission System extension loaded; this loads the existing local PR entry without installing a package. This repository's development settings load it automatically here after `/reload`. Global release deployment is a separate action, not performed by this feature.
+For local development in another checkout, start Pi there with `pi -e /absolute/path/to/pi-extensions/pr-review/index.ts` and the compatible Devcontainer Sandbox extension loaded; this loads the existing local PR entry without installing a package. This repository's development settings load it automatically here after `/reload`. Global release deployment is a separate action, not performed by this feature.
 
 Setup is complete after `/pr setup approve` activates the saved draft. Interactive setup opens `profile-draft.json` fullscreen in `$EDITOR`; save and quit to return to Pi. The full path is also printed for manual editing. Non-TUI setup prints the path without launching an editor. The Settings tab saves each accepted preference edit immediately, even before a reviewer is selected. Settings-based repository setup/edit/regenerate actions validate and activate the profile when its editor exits successfully; there is no separate approval button in Settings. Standalone `/pr setup` commands retain `/pr setup approve`. Choosing a model alone does not activate a profile. Subsequent code, README, manifest, lockfile, or convention changes **do not require setup again**. Old profiles stay compatible; captured current code/docs take precedence over historical profile descriptions.
 
@@ -41,7 +41,7 @@ A reviewer can explicitly report a blocker for Retry/Cancel; unrelated workers c
 
 ## Permission integration
 
-Source-consuming setup and reviews require the **already-loaded local Permission System extension** and
+Source-consuming setup and reviews require the **already-loaded local Devcontainer Sandbox extension** and
 its existing global config. There is no bundled fallback, PR-specific policy file, or general subagent
 runtime. Status/model selection and source-free setup edit/approve remain available without the service.
 
@@ -142,7 +142,7 @@ Everything created by the harness is under `getAgentDir()/extensions/pr-review/`
 
 The root is ignored by Git and files use private permissions. An existing runtime ignore file may contain only `*` plus blank lines/comments; rules that re-include private files are refused. Checkout-local storage and Git-tracked runtime files are refused. Publication uses an exclusive lock and atomic compare-and-swap; a stale lock is reported rather than guessed away. No project config, worker transcripts, provider credentials, or custom generated commands are written. **Captured source can now be written temporarily under the private runtime root**, never the checkout or report/session payload. This replaces the previous in-memory-only capture guarantee. Reports retain compact task metrics/coverage and may contain evidence excerpts; treat both temporary captures and reports as sensitive despite permissions and best-effort report redaction. Model transcripts are not persisted. Only the last five sanitized activity events per task are included in the live diagnostic journal.
 
-When the local Pi Permission System extension is loaded, a finished `/pr` or `pr_review` registers the
+When the local Pi Devcontainer Sandbox extension is loaded, a finished `/pr` or `pr_review` registers the
 **exact saved report file** for external-directory access in the current session before publishing its
 result. Exact-result retrieval checks live source permissions without granting arbitrary private-file access.
 This does not allow the reports directory, other runs/repositories, profiles, snapshots, or viewer data.

@@ -1054,7 +1054,7 @@ it("blocks retrieval when the compatible permission service disappears", async (
 			undefined,
 			h.ctx,
 		),
-	).rejects.toThrow("requires the loaded compatible Permission System");
+	).rejects.toThrow("requires the loaded compatible Devcontainer Sandbox");
 });
 
 it.each([

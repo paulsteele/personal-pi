@@ -73,7 +73,7 @@ test("host loader resolves TypeBox subpaths and loads the extension entry point"
 
 test("installed Pi loader loads the shared permission owner without starting a session", async () => {
 	const loader = createHostLoader(piPackageDir);
-	const module = await loader.import(join(here, "..", "pi-permission-system", "src", "index.ts"));
+	const module = await loader.import(join(here, "..", "pi-devcontainer-sandbox", "src", "index.ts"));
 	const commands = [];
 	module.default({
 		events: { on: () => () => {}, emit() {} },
@@ -175,10 +175,10 @@ test("installed Pi focus handling yields both PR status and setup phases to perm
 	const { createWorkUI } = await loader.import(join(here, "work-ui.ts"));
 	const { TaskStore } = await loader.import(join(here, "tasks.ts"));
 	const { presentPermissionPrompt } = await loader.import(
-		join(here, "..", "pi-permission-system", "src", "prompt", "component.ts"),
+		join(here, "..", "pi-devcontainer-sandbox", "src", "prompt", "component.ts"),
 	);
 	const { buildPermissionPromptPayload } = await loader.import(
-		join(here, "..", "pi-permission-system", "src", "prompt", "payload.ts"),
+		join(here, "..", "pi-devcontainer-sandbox", "src", "prompt", "payload.ts"),
 	);
 	const renderers = new Set([tuiModule.TuiAltScreen, tuiModule.TuiMainScreen, tuiModule.TUI].filter(Boolean));
 	assert.ok(renderers.size, "Installed Pi must expose a renderer for the focus probe");

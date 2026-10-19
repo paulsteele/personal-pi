@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import permissionSystem from "../pi-permission-system/src/permission-system.ts";
+import permissionSystem from "../pi-devcontainer-sandbox/src/permission-system.ts";
 import prReview from "../pr-review/index.ts";
 import { fixture, put, testDraft } from "../pr-review/test-fixtures.ts";
 import { uiHarness } from "../pr-review/ui.test.helpers.ts";
@@ -158,7 +158,7 @@ for (const cancelStage of [undefined, "setup:discovery", "setup:profile"]) {
 			await put(repo.root, "AGENTS.md", "Repository guidance fixture\n");
 			await put(
 				agentDir,
-				"extensions/pi-permission-system/config.json",
+				"extensions/pi-devcontainer-sandbox/config.json",
 				JSON.stringify({
 					permission: { "*": "allow", read: "ask" },
 					auto: { provider: "fake", model: "test", enabledByDefault: false },

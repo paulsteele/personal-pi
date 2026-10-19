@@ -11,7 +11,7 @@ import {
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { isAuthorizedHostTool } from "../pi-permission-system/src/sandbox/gate.ts";
+import { isAuthorizedHostTool } from "../pi-devcontainer-sandbox/src/sandbox/gate.ts";
 
 const fixturePlanSubmission = `import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -53,7 +53,7 @@ for (const manifestEntry of ["./", "./index.ts"]) {
       });
       const resourceLoader = new DefaultResourceLoader({
         cwd, agentDir, settingsManager, noSkills: true, noPromptTemplates: true, noThemes: true,
-        additionalExtensionPaths: [join(import.meta.dir, "../pi-permission-system/src/index.ts")],
+        additionalExtensionPaths: [join(import.meta.dir, "../pi-devcontainer-sandbox/src/index.ts")],
       });
       await resourceLoader.reload();
       const modelRuntime = await ModelRuntime.create({

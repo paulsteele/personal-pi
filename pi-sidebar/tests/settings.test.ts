@@ -9,7 +9,7 @@ import { createSidebarSettings } from "../src/settings.js";
 import { registerSettingsSection, type SettingsSection } from "@paulsteele/pi-shared-ui";
 import { buildSidebarSnapshot, createSidebarComponent, renderSandboxContent } from "../src/sidebar.js";
 import { parseSandboxState } from "../src/sandbox-state.js";
-import { createSandboxPublisher } from "../../pi-permission-system/src/sandbox/events.js";
+import { createSandboxPublisher } from "../../pi-devcontainer-sandbox/src/sandbox/events.js";
 
 const directories: string[] = [];
 afterEach(async () => {

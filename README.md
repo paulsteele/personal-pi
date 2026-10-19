@@ -9,7 +9,7 @@ Pi loads the entries in this deliberate order:
 1. `claude-skills` — exposes trusted project `.claude/skills` directories.
 2. `code-blocks` — renders copyable fenced code blocks.
 3. `desktop-notifications` — provides actionable terminal-window notifications.
-4. `pi-permission-system` — mandatory Podman devcontainer tools and host mount approvals.
+4. `pi-devcontainer-sandbox` — mandatory Podman devcontainer tools and host mount approvals.
 5. `code-quality` — post-edit diagnostics, indexed DRY and readability gates with bounded corrections and human arbitration.
 6. `progress-observer` — passive side-model progress inference.
 7. `pr-review` — code-owned reviews with private generated repo context and Plannotator findings.
@@ -17,14 +17,14 @@ Pi loads the entries in this deliberate order:
 
 The non-extension `project-locations` workspace shares worktree-aware profile locations across PR, LSP, and sandbox setup. The non-extension `shared-ui` workspace provides the common PR/settings frame, overlay lifecycle, and plugin-owned settings flows.
 
-Permission System and Progress Observer load before Sidebar so their replayable event state is available when Sidebar subscribes. Desktop Notifications remains the sole notification owner.
+Devcontainer Sandbox and Progress Observer load before Sidebar so their replayable event state is available when Sidebar subscribes. Desktop Notifications remains the sole notification owner.
 
 ## Install
 
 After the public repository and release tag exist:
 
 ```sh
-pi install https://github.com/paulsteele/personal-pi@v2.10.0
+pi install https://github.com/paulsteele/personal-pi@v2.11.0
 ```
 
 The dotfiles repository normally records the same pinned source in `~/.pi/agent/settings.json`, so Pi installs a missing user package automatically at startup when online. The public HTTPS URL requires no SSH alias or repository credentials.
@@ -110,11 +110,11 @@ To roll back, restore the previous tag in settings and run the same command. Pin
 
 ## Runtime configuration
 
-Source and dependencies live in Pi's managed git checkout. Runtime Permission System policy and logs remain outside it:
+Source and dependencies live in Pi's managed git checkout. Runtime Devcontainer Sandbox policy and logs remain outside it:
 
-- config: `~/.pi/agent/extensions/pi-permission-system/config.json`
-- global devcontainer: `~/.pi/agent/extensions/pi-permission-system/global/devcontainer.json`
-- private project definitions and session authority: `~/.pi/agent/extensions/pi-permission-system/`
+- config: `~/.pi/agent/extensions/pi-devcontainer-sandbox/config.json`
+- global devcontainer: `~/.pi/agent/extensions/pi-devcontainer-sandbox/global/devcontainer.json`
+- private project definitions and session authority: `~/.pi/agent/extensions/pi-devcontainer-sandbox/`
 - code quality config: `~/.pi/agent/extensions/code-quality/config.json` (select the reviewer with `/quality-model`; no default model)
 - progress observer config: `~/.pi/agent/extensions/progress-observer/config.json`
 - PR review settings/profiles/reports: `~/.pi/agent/extensions/pr-review/`
@@ -128,7 +128,7 @@ Sandbox setup commands:
 
 All five LSPs are built into reusable tool images and added to the generated devcontainer without modifying repository definitions. Local devcontainer definitions are also supported. Container Base, Sandbox Tools, and Project Environment settings use manual editors; the extension does not generate model proposals. Ask the main agent for configuration help or an approved `request_sandbox_tool` installation. Saved settings take effect on reload/rebuild.
 
-`request_host_mount` asks the operator for more host access. Sandboxing has no off switch or automatic host fallback. Authorize exact scripts or named executables through Settings → Sandbox → Project Host Commands, or by editing the private `host-commands.json` file. Saving the file or accepting an edit in Settings is the authorization; there is no Apply button or separate approval command. Matching invocations run natively with any arguments; the surrounding Bash shell stays in the container. Web and Plannotator package tools also retain their explicitly authorized host execution. See [`pi-permission-system/README.md`](pi-permission-system/README.md) for limits, migration, and setup.
+`request_host_mount` asks the operator for more host access. Sandboxing has no off switch or automatic host fallback. Authorize exact scripts or named executables through Settings → Sandbox → Project Host Commands, or by editing the private `host-commands.json` file. Saving the file or accepting an edit in Settings is the authorization; there is no Apply button or separate approval command. Matching invocations run natively with any arguments; the surrounding Bash shell stays in the container. Web and Plannotator package tools also retain their explicitly authorized host execution. See [`pi-devcontainer-sandbox/README.md`](pi-devcontainer-sandbox/README.md) for limits, migration, and setup.
 
 PR review methodology and personal-global rules are versioned here in `pr-review/prompts/`; only generated repo semantics and runtime settings live in Pi config. Run `/pr setup` to create a private context draft, inspect it, then run `/pr setup approve` to activate it before the first review. Use `/pr model` to choose the independent model and `/pr` to review changes. Existing approved context is reused; `/pr setup regenerate` explicitly creates a replacement draft that also requires inspection and `/pr setup approve`. Verified findings open in the already-loaded Plannotator UI without a version allowlist; submitted feedback goes to the main agent without a second fix-selection screen. The harness never installs or updates Plannotator. See [`pr-review/README.md`](pr-review/README.md) for compatibility, privacy, scope, and verification details.
 
@@ -146,4 +146,4 @@ The Hammerspoon bridge remains machine configuration in the dotfiles repository 
 
 ## Provenance and license
 
-Original repository code is MIT licensed; see [`LICENSE`](LICENSE). The `pi-sidebar` and `pi-permission-system` directories are source-owned forks with their own retained MIT license and detailed upstream provenance in each `FORK.md`.
+Original repository code is MIT licensed; see [`LICENSE`](LICENSE). The `pi-sidebar` and `pi-devcontainer-sandbox` directories are source-owned forks with their own retained MIT license and detailed upstream provenance in each `FORK.md`.

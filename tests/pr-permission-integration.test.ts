@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import permissionSystem from "../pi-permission-system/src/permission-system.ts";
+import permissionSystem from "../pi-devcontainer-sandbox/src/permission-system.ts";
 import { createReviewDashboard, trackPermissionPrompts } from "../pr-review/dashboard.ts";
 import { TaskStore } from "../pr-review/tasks.ts";
 import { uiHarness } from "../pr-review/ui.test.helpers.ts";
@@ -60,7 +60,7 @@ test("a visible PR dashboard yields to the real permission controls before recei
 	let permission: Promise<unknown> | undefined;
 	try {
 		process.env.PI_CODING_AGENT_DIR = agentDir;
-		const configDir = join(agentDir, "extensions", "pi-permission-system");
+		const configDir = join(agentDir, "extensions", "pi-devcontainer-sandbox");
 		await mkdir(configDir, { recursive: true });
 		await writeFile(
 			join(configDir, "config.json"),

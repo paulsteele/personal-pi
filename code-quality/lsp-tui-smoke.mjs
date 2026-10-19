@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const entries = {
-	permissionSystem: fileURLToPath(new URL("../pi-permission-system/src/index.ts", import.meta.url)),
+	devcontainerSandbox: fileURLToPath(new URL("../pi-devcontainer-sandbox/src/index.ts", import.meta.url)),
 	codeQuality: fileURLToPath(new URL("./index.ts", import.meta.url)),
 	sidebarExtension: fileURLToPath(new URL("../pi-sidebar/extensions/index.ts", import.meta.url)),
 	observerFixture: fileURLToPath(new URL("./fixtures/lsp-tui-observer.ts", import.meta.url)),
@@ -36,7 +36,7 @@ execFileSync(
 	[
 		fileURLToPath(new URL("./fixtures/lsp-tui-smoke.py", import.meta.url)),
 		directory,
-		entries.permissionSystem,
+		entries.devcontainerSandbox,
 		entries.codeQuality,
 		entries.sidebarExtension,
 		entries.observerFixture,
