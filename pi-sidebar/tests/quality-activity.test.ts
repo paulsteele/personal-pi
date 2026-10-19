@@ -98,6 +98,39 @@ it("shows configured shared LSP names and states alongside the analyzer", () => 
 	}
 });
 
+it("colors ready tools green and degraded tools red", () => {
+	const qualityHeader = parseQualityHeader({
+		version: 1,
+		sessionId: "session",
+		phase: "ready",
+		revision: 1,
+		modelId: "test/reviewer",
+		lsp: [
+			{ id: "roslyn", name: "roslyn", root: ".", phase: "ready", clients: 1 },
+			{ id: "gopls", name: "gopls", root: ".", phase: "failed", clients: 1 },
+		],
+	});
+	if (!qualityHeader) throw new Error("Expected configured quality header");
+	const snapshot = buildSidebarSnapshot({
+		state: createInertAtelierState(null),
+		cwd: "/repo",
+		branchEntryCount: 0,
+		extensionStatuses: [],
+		qualityHeader,
+	});
+	const darkTheme: Parameters<typeof renderActivityLines>[1] = {
+		name: "dark",
+		fg: (_: string, text: string) => text,
+		bold: (text: string) => text,
+		italic: (text: string) => text,
+	};
+	const text = renderActivityLines(snapshot, darkTheme, 100, 12, true, 100).join("\n");
+	const green = "\u001b[38;2;134;239;172m";
+	const red = "\u001b[38;2;255;93;115m";
+	expect(text).toContain(`${green}● ready\u001b[39m`);
+	expect(text).toContain(`${red}✕ failed\u001b[39m`);
+});
+
 it("validates standalone header data without requiring a tool call", () => {
 	const header = { version: 1, sessionId: "session", phase: "ready", revision: 1, modelId: "test/reviewer" };
 	expect(parseQualityHeader(header)).toEqual({
@@ -159,12 +192,13 @@ it.each([28, 44])("shows all track counts at %s columns in every phase", (width)
 			},
 		});
 		const lines = renderActivityLines(snapshot, theme, width, 12, false, 100);
+		const upperRail = lines.find((line) => line.startsWith("│ ╭"))!;
 		const lowerRail = lines.find((line) => line.startsWith("│ ╰"))!;
-		expect(lowerRail).toMatch(/─ 󰅴 17 3✕ ─/);
+		expect(upperRail).toMatch(/✕ (· )?󰅴 17 3✕ ─/);
 		expect(lowerRail).not.toContain("󰚩");
 		expect(lowerRail).not.toContain("󰀄");
 		const coloredRail = renderActivityLines(snapshot, { ...theme, name: "dark" }, width, 12, true, 100).find(
-			(line) => line.includes("╰"),
+			(line) => line.includes("╭"),
 		)!;
 		expect(coloredRail).toContain("\u001b[38;2;255;93;115m3✕\u001b[39m");
 		if (phase === "running") {

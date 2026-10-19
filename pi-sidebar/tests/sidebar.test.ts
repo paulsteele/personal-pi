@@ -892,9 +892,9 @@ describe("legacy two-region compositor migration fixtures", () => {
 		expect(rows).not.toContain("PROGRESS");
 		expect(rows).not.toContain("ACTIVITY");
 		expect(rows[0]).toBe("Observer unavailable");
-		expect(rows).toContainEqual(expect.stringMatching(/^│ 󰔛 ~\s+READY · ┃ 󰄋 ┃\s+~ 󰓅 │$/));
-		expect(rows).toContainEqual(expect.stringMatching(/^╭─+ 0✓ · 0✕ ─+╮$/));
-		expect(rows).toContainEqual(expect.stringMatching(/^╰─+ 󰅴 0 0✕ ─+╯$/));
+		expect(rows).toContainEqual(expect.stringMatching(/^│  󰔛 ~\s+READY · ┃ 󰄋 ┃\s+~ 󰓅  │$/));
+		expect(rows).toContainEqual(expect.stringMatching(/^╭─+ 0✓ · 0✕ · 󰅴 0 0✕ ─+╮$/));
+		expect(rows).toContainEqual(expect.stringMatching(/^╰─+ 󰈙 \+3 ~3 -1 · 󰊢 \+182 -47 ─+╯$/));
 		for (const absent of ["RUN", "AGENT", "CTX", "GIT", "SESSION", "USE", "PLAN", "ALERTS"]) {
 			expect(rows).not.toContain(absent);
 		}
@@ -1042,7 +1042,7 @@ describe("legacy two-region compositor migration fixtures", () => {
 			expect(top).toContain(item.top[0]);
 			expect(top).toContain(item.top[1]);
 			expect(top).toMatch(/^╭─.*2✓ · 1✕.*─╮$/);
-			expect(middle).toMatch(/^│ 󰔛 ~\s+Turn \d+ · 19s\s+~ 󰓅 │$/);
+			expect(middle).toMatch(/^│  󰔛 ~\s+Turn \d+ · 19s\s+~ 󰓅  │$/);
 			expect(middle).not.toMatch(/[]/);
 			expect(bottom).toContain(item.bottom[0]);
 			expect(bottom).toContain(item.bottom[1]);
@@ -1051,13 +1051,26 @@ describe("legacy two-region compositor migration fixtures", () => {
 		}
 	});
 
-	it("renders git file and line changes inside the race track", () => {
+	it("renders git file and line changes on the bottom rail of the race track", () => {
 		const rows = contentRows(renderSidebarLines(snapshot(), theme, 44, 36, false));
 		const dashboard = rows.findIndex((row) => row.includes("READY · ┃ 󰄋 ┃"));
-		const gitChanges = rows.findIndex((row) => /^│\s+󰈙 \+3 ~3 -1 · 󰊢 \+182 -47\s+│$/.test(row));
-		const trackBottom = rows.findIndex((row) => row.startsWith("╰─"));
-		expect(gitChanges).toBe(dashboard + 1);
-		expect(trackBottom).toBe(gitChanges + 1);
+		const gitChangesRail = rows.findIndex((row) => /^╰─+ 󰈙 \+3 ~3 -1 · 󰊢 \+182 -47 ─+╯$/.test(row));
+		expect(gitChangesRail).toBe(dashboard + 1);
+	});
+
+	it("aligns the response gauges with the turn indicators", () => {
+		const rows = contentRows(
+			renderSidebarLines(withActivity(activeActivity()), theme, 44, 36, false, 20_000),
+		);
+		const top = rows.find((row) => row.startsWith("╭─")) ?? "";
+		const dashboard = rows.find((row) => row.includes("Turn 3 · 19s")) ?? "";
+		const bottom = rows.find((row) => row.startsWith("╰─")) ?? "";
+		const ttftColumn = visibleWidth(dashboard.slice(0, dashboard.indexOf("󰔛")));
+		const tpsColumn = visibleWidth(dashboard.slice(0, dashboard.indexOf("󰓅")));
+		expect(visibleWidth(top.slice(0, top.indexOf("󰲤")))).toBe(ttftColumn);
+		expect(visibleWidth(bottom.slice(0, bottom.indexOf("󰲧")))).toBe(ttftColumn);
+		expect(visibleWidth(top.slice(0, top.indexOf("󰲣")))).toBe(tpsColumn);
+		expect(visibleWidth(bottom.slice(0, bottom.indexOf("󰲡")))).toBe(tpsColumn);
 	});
 
 	it("renders deterministic live run activity", () => {
@@ -1065,7 +1078,7 @@ describe("legacy two-region compositor migration fixtures", () => {
 			renderSidebarLines(withActivity(activeActivity()), theme, 44, 36, false, 20_000),
 		);
 		expect(rows).toContainEqual(expect.stringMatching(/^╭─ 󰲤 .*2✓ · 1✕.* 󰲣 ─╮$/));
-		expect(rows).toContainEqual(expect.stringMatching(/^│ 󰔛 ~\s+Turn 3 · 19s\s+~ 󰓅 │$/));
+		expect(rows).toContainEqual(expect.stringMatching(/^│  󰔛 ~\s+Turn 3 · 19s\s+~ 󰓅  │$/));
 		expect(rows).toContainEqual(expect.stringMatching(/^╰─ 󰲧 .* 󰲡 ─╯$/));
 		expect(rows).toEqual(
 			expect.arrayContaining([
@@ -1086,17 +1099,17 @@ describe("legacy two-region compositor migration fixtures", () => {
 		});
 		const rows = contentRows(renderSidebarLines(autoSnapshot, theme, 44, 36, false, 20_000));
 		const dashboard = rows.findIndex(
-			(row) => row.startsWith("│ 󰔛 ~") && row.includes("Turn 3 · 19s") && row.endsWith("~ 󰓅 │"),
+			(row) => row.startsWith("│  󰔛 ~") && row.includes("Turn 3 · 19s") && row.endsWith("~ 󰓅  │"),
 		);
 		const auto = rows.findIndex((row) => row.trim() === "⏵⏵ auto · reviewer");
-		const trackTop = rows.findIndex((row) => row.startsWith("╭─"));
-		const counts = rows.findIndex((row) => row.startsWith("╰─") && row.includes("󰅴 0 0✕"));
+		const trackTopWithCounts = rows.findIndex((row) => row.startsWith("╭─") && row.includes("󰅴 0 0✕"));
+		const trackBottom = rows.findIndex((row) => row.startsWith("╰─"));
 		const firstTool = rows.findIndex((row) => /^read\s+src\/state\.ts/.test(row));
 		expect(dashboard).toBeGreaterThan(-1);
-		expect(auto).toBeLessThan(trackTop);
-		expect(trackTop).toBeLessThan(dashboard);
-		expect(dashboard).toBeLessThan(counts);
-		expect(counts).toBeLessThan(firstTool);
+		expect(auto).toBeLessThan(trackTopWithCounts);
+		expect(trackTopWithCounts).toBeLessThan(dashboard);
+		expect(dashboard).toBeLessThan(trackBottom);
+		expect(trackBottom).toBeLessThan(firstTool);
 	});
 
 	it("renders spaced Nerd Font permission badges inline and keeps exception reasons below", () => {
@@ -1272,7 +1285,7 @@ describe("legacy two-region compositor migration fixtures", () => {
 				2_000,
 			),
 		);
-		expect(ttftOnly).toContainEqual(expect.stringMatching(/^│ 󰔛 820ms\s+Turn 1 · 1s\s+~ 󰓅 │$/));
+		expect(ttftOnly).toContainEqual(expect.stringMatching(/^│  󰔛 820ms\s+Turn 1 · 1s\s+~ 󰓅  │$/));
 
 		const estimated = contentRows(
 			renderSidebarLines(
@@ -1292,7 +1305,7 @@ describe("legacy two-region compositor migration fixtures", () => {
 				2_000,
 			),
 		);
-		expect(estimated).toContainEqual(expect.stringMatching(/^│ 󰔛 820ms\s+RUNNING · 1s\s+~42\.3 󰓅 │$/));
+		expect(estimated).toContainEqual(expect.stringMatching(/^│  󰔛 820ms\s+RUNNING · 1s\s+~42\.3 󰓅  │$/));
 
 		const completed = contentRows(
 			renderSidebarLines(
@@ -1313,14 +1326,14 @@ describe("legacy two-region compositor migration fixtures", () => {
 				5_000,
 			),
 		);
-		expect(completed).toContainEqual(expect.stringMatching(/^│ 󰔛 1\.4s\s+FINISH · 4s\s+47\.3 󰓅 │$/));
+		expect(completed).toContainEqual(expect.stringMatching(/^│  󰔛 1\.4s\s+FINISH · 4s\s+47\.3 󰓅  │$/));
 		expect(completed).toContainEqual(expect.stringMatching(/^╭─ 󰈼 .*0✓ · 0✕.* 󰈼 ─╮$/));
 	});
 
 	it("always renders idle placeholders and preserves settled activity", () => {
 		const idleRows = contentRows(renderSidebarLines(snapshot(), theme, 44, 36, false, 20_000));
 		expect(idleRows).not.toContain("ACTIVITY");
-		expect(idleRows).toContainEqual(expect.stringMatching(/^│ 󰔛 ~\s+READY · ┃ 󰄋 ┃\s+~ 󰓅 │$/));
+		expect(idleRows).toContainEqual(expect.stringMatching(/^│  󰔛 ~\s+READY · ┃ 󰄋 ┃\s+~ 󰓅  │$/));
 
 		const settledRows = contentRows(
 			renderSidebarLines(
@@ -1351,7 +1364,7 @@ describe("legacy two-region compositor migration fixtures", () => {
 			),
 		);
 		expect(settledRows).toContainEqual(expect.stringMatching(/^╭─ 󰈼 .*0✓ · 1✕.* 󰈼 ─╮$/));
-		expect(settledRows).toContainEqual(expect.stringMatching(/^│ 󰔛 ~\s+ISSUES · 6s\s+~ 󰓅 │$/));
+		expect(settledRows).toContainEqual(expect.stringMatching(/^│  󰔛 ~\s+ISSUES · 6s\s+~ 󰓅  │$/));
 		expect(settledRows).not.toContain("Turn 4 · settled 6s");
 		expect(settledRows).toEqual(
 			expect.arrayContaining([expect.stringMatching(/^edit\s+src\/sidebar\.ts\s+failed 2s$/)]),
@@ -1386,7 +1399,7 @@ describe("legacy two-region compositor migration fixtures", () => {
 		expect(idleWithRecent).toEqual(
 			expect.arrayContaining([expect.stringMatching(/^bash\s+npm test\s+done 1s$/)]),
 		);
-		expect(idleWithRecent).toContainEqual(expect.stringMatching(/^╭─+ 1✓ · 0✕ ─+╮$/));
+		expect(idleWithRecent).toContainEqual(expect.stringMatching(/^╭─+ 1✓ · 0✕ · 󰅴 0 0✕ ─+╮$/));
 
 		const idleWithActive = contentRows(
 			renderSidebarLines(
@@ -1429,7 +1442,7 @@ describe("legacy two-region compositor migration fixtures", () => {
 			),
 		);
 		expect(idleWithCounts).not.toContain("ACTIVITY");
-		expect(idleWithCounts).toContainEqual(expect.stringMatching(/^╭─+ 0✓ · 2✕ ─+╮$/));
+		expect(idleWithCounts).toContainEqual(expect.stringMatching(/^╭─+ 0✓ · 2✕ · 󰅴 0 0✕ ─+╮$/));
 	});
 
 	it("keeps active tools before recent tools and preserves parallel start order", () => {

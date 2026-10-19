@@ -529,7 +529,7 @@ function qualityTrackCounts(quality: QualityReviewCounts | undefined, palette: A
 	)}`;
 }
 
-function gitChangeTrackRow(workspace: WorkspacePulseData, palette: AtelierPalette, width: number): string {
+function gitChangeTrackContent(workspace: WorkspacePulseData, palette: AtelierPalette): string {
 	const { snapshot } = workspace;
 	const files = [
 		palette.paint("added", `+${finiteCount(snapshot.filesAdded)}`),
@@ -540,11 +540,10 @@ function gitChangeTrackRow(workspace: WorkspacePulseData, palette: AtelierPalett
 		palette.paint("added", `+${finiteCount(snapshot.linesAdded)}`),
 		palette.paint("error", `-${finiteCount(snapshot.linesRemoved)}`),
 	].join(" ");
-	const content = `${palette.paint("dim", TRACK_GLYPHS.files)} ${files} ${palette.paint("dim", "·")} ${palette.paint(
+	return `${palette.paint("dim", TRACK_GLYPHS.files)} ${files} ${palette.paint("dim", "·")} ${palette.paint(
 		"dim",
 		TRACK_GLYPHS.lines,
 	)} ${lines}`;
-	return `${palette.paint("dim", "│ ")}${centeredTrackContent(content, width - 4, " ")}${palette.paint("dim", " │")}`;
 }
 
 function activityTrackRows(
@@ -576,10 +575,13 @@ function activityTrackRows(
 	const turn = activeTurn as keyof typeof TURN_GLYPHS | undefined;
 	const completed = finiteCount(activity.completedCount);
 	const failed = finiteCount(activity.failedCount);
-	const aggregate = `${palette.paint("ready", `${completed}✓`)} ${palette.paint("dim", "·")} ${palette.paint(
-		"error",
-		`${failed}✕`,
-	)}`;
+	const completedCount = palette.paint("ready", `${completed}✓`);
+	const failedCount = palette.paint("error", `${failed}✕`);
+	const separator = palette.paint("dim", "·");
+	const aggregate = `${completedCount} ${separator} ${failedCount}`;
+	const qualityCounts = qualityTrackCounts(quality, palette);
+	const aggregateWithQuality = `${aggregate} ${separator} ${qualityCounts}`;
+	const compactAggregateWithQuality = `${completedCount} ${failedCount} ${qualityCounts}`;
 	const duration =
 		activity.phase === "settled"
 			? formatDuration(activity.durationMs ?? Math.max(0, now - (activity.startedAt ?? now)))
@@ -610,16 +612,29 @@ function activityTrackRows(
 	}
 
 	return [
-		trackRail("top", aggregate, safeWidth, palette, topLeft, topRight),
-		`${palette.paint("dim", "│ ")}${trackDashboardRow(
+		trackRail(
+			"top",
+			[aggregateWithQuality, compactAggregateWithQuality, aggregate],
+			safeWidth,
+			palette,
+			topLeft,
+			topRight,
+		),
+		`${palette.paint("dim", "│  ")}${trackDashboardRow(
 			activity,
 			status,
 			statusRole,
 			palette,
-			safeWidth - 4,
-		)}${palette.paint("dim", " │")}`,
-		...(workspace ? [gitChangeTrackRow(workspace, palette, safeWidth)] : []),
-		trackRail("bottom", qualityTrackCounts(quality, palette), safeWidth, palette, bottomLeft, bottomRight),
+			safeWidth - 6,
+		)}${palette.paint("dim", "  │")}`,
+		trackRail(
+			"bottom",
+			workspace ? gitChangeTrackContent(workspace, palette) : "",
+			safeWidth,
+			palette,
+			bottomLeft,
+			bottomRight,
+		),
 	];
 }
 
@@ -678,6 +693,16 @@ function progressRows(snapshot: SidebarSnapshot, palette: AtelierPalette, width:
 	}
 	if (observer.message) rows.push(...wrapTextWithAnsi(palette.paint("dim", observer.message), width));
 	return rows;
+}
+
+function toolReadinessRole(phase: string): PaletteRole {
+	if (phase === "ready") {
+		return "added";
+	}
+	if (phase === "failed" || phase === "unavailable") {
+		return "error";
+	}
+	return "accent";
 }
 
 function activityBandRows(
@@ -749,10 +774,13 @@ function activityBandRows(
 			unconfigured: "○",
 		};
 		const serverLabels = (quality.lsp ?? []).map((server) => {
-			const symbol = phaseSymbols[server.phase];
 			const sharing = server.clients > 1 ? ` ×${server.clients}` : "";
 			const name = server.id === server.name ? server.name : `${server.id} (${server.name})`;
-			return `${name} ${symbol} ${server.queued ? "queued" : server.phase}${sharing}`;
+			const readiness = `${phaseSymbols[server.phase]} ${server.queued ? "queued" : server.phase}`;
+			return `${palette.paint("accent", `${name} `)}${palette.paint(
+				toolReadinessRole(server.phase),
+				readiness,
+			)}${palette.paint("accent", sharing)}`;
 		});
 		if (quality.dry) {
 			const toolSymbol =
@@ -760,21 +788,29 @@ function activityBandRows(
 			const scanSymbol =
 				quality.dry.scanPhase === "ready" ? "●" : quality.dry.scanPhase === "unavailable" ? "✕" : "⟳";
 			serverLabels.push(
-				`jscpd ${toolSymbol} ${quality.dry.toolPhase}`,
-				`scan ${scanSymbol} ${quality.dry.scanPhase}`,
+				`${palette.paint("accent", "jscpd ")}${palette.paint(
+					toolReadinessRole(quality.dry.toolPhase),
+					`${toolSymbol} ${quality.dry.toolPhase}`,
+				)}`,
+				`${palette.paint("accent", "scan ")}${palette.paint(
+					toolReadinessRole(quality.dry.scanPhase),
+					`${scanSymbol} ${quality.dry.scanPhase}`,
+				)}`,
 			);
 		}
-		let line = header;
+		const separator = palette.paint("accent", " · ");
+		let line = palette.paint("accent", header);
 		for (const label of serverLabels) {
-			const candidateLine = `${line} · ${label}`;
+			const candidateLine = `${line}${separator}${label}`;
 			const fitsCurrentLine = visibleWidth(candidateLine) <= leadWidth;
-			if (fitsCurrentLine) line = candidateLine;
-			else {
-				rows.push(centeredTrackContent(palette.paint("accent", line), leadWidth, " "));
+			if (fitsCurrentLine) {
+				line = candidateLine;
+			} else {
+				rows.push(centeredTrackContent(line, leadWidth, " "));
 				line = truncateToWidth(`  ${label}`, leadWidth);
 			}
 		}
-		rows.push(centeredTrackContent(palette.paint("accent", line), leadWidth, " "));
+		rows.push(centeredTrackContent(line, leadWidth, " "));
 	}
 	rows.push(
 		...activityTrackRows(

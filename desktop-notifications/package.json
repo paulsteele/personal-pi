@@ -1,6 +1,6 @@
 {
   "name": "@paulsteele/pi-desktop-notifications",
-  "version": "2.9.1",
+  "version": "2.10.0",
   "private": true,
   "description": "Actionable desktop notifications for Pi",
   "type": "module",

@@ -244,7 +244,7 @@ it("offers missing-artifact rebuild approval during startup without needing a re
   expect(fixture.resumed.environment.container).toBe("container-g3");
 });
 
-it("does not save denied port authority or reuse it on the next startup", async () => {
+it("forwards declared loopback ports without asking for approval", async () => {
   const fixture = await resumeFixture();
   const options = {
     ...fixture.resumed.options,
@@ -254,27 +254,16 @@ it("does not save denied port authority or reuse it on the next startup", async 
       definition: { image: "node", forwardPorts: [3000] },
     },
   };
-  const deniedStartup = new SandboxSession(options);
-  sessions.push(deniedStartup);
-  fixture.confirm.mockResolvedValue(false);
-  await expect(deniedStartup.start()).rejects.toThrow("port forwarding was not approved");
-  await deniedStartup.close();
-  expect(await readPrivateText(join(deniedStartup.directory, "session.json"))).toBeUndefined();
-  expect(fixture.confirm).toHaveBeenCalledWith(
-    expect.stringContaining("3000"),
-    expect.any(AbortSignal),
-  );
   fixture.confirm.mockClear();
-  fixture.confirm.mockResolvedValue(true);
-  const approvedStartup = new SandboxSession(options);
-  sessions.push(approvedStartup);
-  await approvedStartup.start();
-  expect(fixture.confirm).toHaveBeenCalledWith(
-    expect.stringContaining("3000"),
-    expect.any(AbortSignal),
-  );
+  fixture.confirm.mockResolvedValue(false);
+  ports.forward.mockClear();
+  const startup = new SandboxSession(options);
+  sessions.push(startup);
+  await startup.start();
+  expect(fixture.confirm).not.toHaveBeenCalled();
+  expect(ports.forward).toHaveBeenCalledWith(expect.objectContaining({ ports: [3000] }));
   expect(
-    JSON.parse((await readPrivateText(join(approvedStartup.directory, "session.json")))!.text)
+    JSON.parse((await readPrivateText(join(startup.directory, "session.json")))!.text)
       .approvedPorts,
   ).toEqual([3000]);
 });

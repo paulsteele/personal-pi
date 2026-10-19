@@ -408,21 +408,9 @@ export class SandboxSession {
       };
     }
     const declaredPorts = devcontainerPorts(this.options.resolved.definition.forwardPorts ?? []);
-    const requiresPortApproval = declaredPorts.some(
-      (port) => !this.record?.approvedPorts?.includes(port),
-    );
-    if (requiresPortApproval) {
-      const approvedPortForwarding = await this.options.confirm(
-        `Expose these devcontainer ports on host loopback only? ${declaredPorts.join(", ")}`,
-        startupSignal,
-      );
-      if (!approvedPortForwarding) {
-        throw new Error("Loopback port forwarding was not approved");
-      }
-    }
     startupSignal.throwIfAborted();
     progress.stage(
-      declaredPorts.length ? "Starting approved port forwarders…" : "Saving ready devcontainer…",
+      declaredPorts.length ? "Starting loopback port forwarders…" : "Saving ready devcontainer…",
     );
     this.record = {
       ...this.record!,

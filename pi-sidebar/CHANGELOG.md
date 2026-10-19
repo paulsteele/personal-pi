@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.10.0 — 2026-10-18
+
+- Move Git file and line changes onto the bottom rail of the Activity race track, and move quality check counts onto the top rail beside the completed and failed counts.
+- Align the time-to-first-token and tokens-per-second icons vertically with the turn indicators.
+- Color tool readiness in the quality header: ready LSP servers, jscpd, and scan states are green; failed or unavailable states are red.
+
 ## 2.9.1 — 2026-10-18
 
 - Show Git file changes (added, changed, removed) and line changes (added, removed) inside the Activity race track. Untracked files count as added.

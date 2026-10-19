@@ -111,7 +111,7 @@ A new Pi session gets a new container. Containerfile bases still invoke the refe
 
 Application tools such as Bun belong in the base or project supplement; private language-server installations generally should not be duplicated in the base. Review recipes before removing them because application builds may depend on those tools.
 
-Selected devcontainer definitions load without an approval prompt, including in new sessions or after definition changes. Definition validation remains mandatory; loading a definition does not authorize additional host binds or host initialization. Standalone setup drafts still require approval before writing configuration. `initializeCommand` follows the spec's host semantics and needs fresh one-shot operator approval every time it executes. Headless, cancelled, denied, or stale initialization is blocked. Host environment imports must be explicitly allowlisted. Declared ports require approval and are loopback-only.
+Selected devcontainer definitions load without an approval prompt, including in new sessions or after definition changes. Definition validation remains mandatory; loading a definition does not authorize additional host binds or host initialization. Standalone setup drafts still require approval before writing configuration. `initializeCommand` follows the spec's host semantics and needs fresh one-shot operator approval every time it executes. Headless, cancelled, denied, or stale initialization is blocked. Host environment imports must be explicitly allowlisted. Declared ports are forwarded automatically without approval and are bound to host loopback only.
 
 ## Sandbox-off escape hatch
 

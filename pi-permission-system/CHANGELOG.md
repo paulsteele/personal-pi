@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.10.0 — 2026-10-18
+
+- Forward declared devcontainer `forwardPorts` without an approval prompt. Forwarders remain bound to host loopback only.
+
 ## 2.9.0 — 2026-10-18
 
 - Keep the running container across `/reload` and reattach it without `devcontainer up` or lifecycle hooks. Quit, new session, resume elsewhere, and fork now remove the container plus this session's `pi-sandbox-*` and checkpoint images; resuming later recreates the container from the definition with saved grants and volumes.
