@@ -787,7 +787,7 @@ it("removes an abandoned session's container during startup without touching the
   expect(fixture.resumed.environment.container).toBe("container-g2");
 });
 
-it("removes the container and session images when the session quits, and recreates on resume", async () => {
+it("removes the container and checkpoints but keeps the session image when the session quits, and recreates on resume", async () => {
   const fixture = await resumeFixture();
   await fixture.resumed.start();
   const sessionImage = sessionImageName("session");
@@ -796,7 +796,7 @@ it("removes the container and session images when the session quits, and recreat
   );
   await fixture.resumed.close();
   expect(ports.podman).toHaveBeenCalledWith(["rm", "--force", "--time=0", "container-g2"]);
-  expect(ports.podman).toHaveBeenCalledWith(["rmi", `${sessionImage}:latest`]);
+  expect(ports.podman).not.toHaveBeenCalledWith(["rmi", `${sessionImage}:latest`]);
   expect(ports.podman).toHaveBeenCalledWith(["rmi", `${sessionImage}-checkpoint:g3`]);
   const stored = JSON.parse((await readPrivateText(fixture.recordPath))!.text);
   expect(stored.containerPrunedAtUnixMs).toEqual(expect.any(Number));

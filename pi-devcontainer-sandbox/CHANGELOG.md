@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.12.0 — 2026-10-19
+
+- Keep the session's built `pi-sandbox-*` image when Pi quits, so reopening the session recreates the container without rebuilding. Quit still removes the container and this session's checkpoint images.
+- Startup cleanup keeps `pi-sandbox-*` images of sessions closed less than seven days ago and removes them afterwards. Checkpoint images of sessions without a live owner are still removed.
+
 ## 2.11.0 — 2026-10-18
 
 - Rename the extension to `pi-devcontainer-sandbox` (`@paulsteele/pi-devcontainer-sandbox`). The entry point is now `pi-devcontainer-sandbox/src/index.ts`.

@@ -155,6 +155,34 @@ it("removes session and checkpoint images that belong to no live session", async
   expect(podman).not.toHaveBeenCalledWith(["rmi", "localhost/pi-project:shared"]);
 });
 
+it("keeps the session image of a recently closed session so reopening reuses its build", async () => {
+  const closedImage = `${sessionImageName("closed-session")}:latest`;
+  const closedCheckpoint = `${sessionImageName("closed-session")}-checkpoint:g3`;
+  const fixture = await pruningFixture({ containers: [], images: [closedImage, closedCheckpoint] });
+  const directory = await sessionDirectory(fixture.agentDir, "closed-session");
+  const closedRecord = {
+    ...sessionRecord("closed-session", fixture.root),
+    inactiveSinceUnixMs: nowUnixMs - inactiveSessionRetentionMs + 1000,
+  };
+  await writeFile(join(directory, "session.json"), JSON.stringify(closedRecord));
+  await fixture.prune();
+  expect(podman).not.toHaveBeenCalledWith(["rmi", closedImage]);
+  expect(podman).toHaveBeenCalledWith(["rmi", closedCheckpoint]);
+});
+
+it("removes the session image of a session closed for seven days", async () => {
+  const expiredImage = `${sessionImageName("expired-session")}:latest`;
+  const fixture = await pruningFixture({ containers: [], images: [expiredImage] });
+  const directory = await sessionDirectory(fixture.agentDir, "expired-session");
+  const expiredRecord = {
+    ...sessionRecord("expired-session", fixture.root),
+    inactiveSinceUnixMs: nowUnixMs - inactiveSessionRetentionMs,
+  };
+  await writeFile(join(directory, "session.json"), JSON.stringify(expiredRecord));
+  await fixture.prune();
+  expect(podman).toHaveBeenCalledWith(["rmi", expiredImage]);
+});
+
 it("deletes failed-start directories without a record after seven days", async () => {
   const fixture = await pruningFixture({ containers: [], images: [] });
   const expired = await sessionDirectory(fixture.agentDir, "expired-failed-start");

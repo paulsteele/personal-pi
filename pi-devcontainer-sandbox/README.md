@@ -209,10 +209,10 @@ Containers have readable names such as `pi-my-project-<session-suffix>-g2`, with
 ### Container lifetime
 
 - **`/reload`** leaves the running container in place. The reloaded extension reattaches it after re-inspecting its session label and isolation policy, without running `devcontainer up` or lifecycle hooks. Processes, `/tmp`, and other container-local state survive. When the container is gone, the definition changed, or an approved source was replaced, startup falls back to the normal resume path.
-- **Quit, new session, resume of another session, and fork** stop and remove the container, and remove this session's `localhost/pi-sandbox-*` image and mount-change checkpoint images. Outside `/reload` the container is disposable. Resuming the session later recreates it from the validated definition with the saved grants and volumes, and runs creation hooks. Shared `pi-project`/`pi-tool` layer and artifact images stay cached, so recreation reuses them.
+- **Quit, new session, resume of another session, and fork** stop and remove the container and this session's mount-change checkpoint images. Outside `/reload` the container is disposable. The session's built `localhost/pi-sandbox-*` image stays cached, so resuming the session later recreates the container from the validated definition with the saved grants and volumes without rebuilding, and runs creation hooks. Shared `pi-project`/`pi-tool` layer and artifact images also stay cached.
 - **Startup cleanup** runs during "Pruning inactive sandbox sessions…":
   - removes every `pi.sandbox.session`-labelled container whose session has no live owner, including orphans from startups that failed before saving a record;
-  - removes `pi-sandbox-*` images that belong to no live session;
+  - removes checkpoint images of sessions without a live owner, and `pi-sandbox-*` images of sessions that have no live owner and have been closed for seven days (or never saved a record);
   - deletes failed-start session directories that have no saved record after seven days.
   Cleanup is best-effort: failures are reported in the startup log and do not block startup.
 - A failed `devcontainer up` removes any container it created for that generation before reporting the error.

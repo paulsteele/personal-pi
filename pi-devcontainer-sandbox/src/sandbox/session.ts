@@ -46,7 +46,12 @@ import {
   type ShellExecutionResult,
 } from "./host-command-runner.ts";
 import { sessionRecordSchema, type SandboxSessionRecord } from "./session-record.ts";
-import { pruneInactiveSessions, removeSessionImages, removeSupersededContainer } from "./prune.ts";
+import {
+  pruneInactiveSessions,
+  removeSessionCheckpointImages,
+  removeSessionImages,
+  removeSupersededContainer,
+} from "./prune.ts";
 import { SavedToolArtifactUnavailableError } from "./tool-image-mounts.ts";
 
 export type { SandboxSessionRecord } from "./session-record.ts";
@@ -1045,7 +1050,7 @@ if record.exists():
         await stopSessionContainer(container);
         await removeSessionContainer(container);
       });
-      await attemptCleanup(() => removeSessionImages(this.options.sessionId, () => {}));
+      await attemptCleanup(() => removeSessionCheckpointImages(this.options.sessionId, () => {}));
     }
     const lock = this.lock;
     if (lock) {

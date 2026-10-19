@@ -23,8 +23,16 @@ export function sessionImageName(sessionId: string): string {
   return `${SESSION_IMAGE_REPOSITORY_PREFIX}${sessionImageHashPrefix(sessionId)}`;
 }
 
+const checkpointRepositorySuffix = "-checkpoint";
+
 export function sessionCheckpointImageName(sessionId: string, generation: number): string {
-  return `${sessionImageName(sessionId)}-checkpoint:g${generation}`;
+  return `${sessionImageName(sessionId)}${checkpointRepositorySuffix}:g${generation}`;
+}
+
+export function isSessionCheckpointImage(imageReference: string): boolean {
+  const tagSeparator = imageReference.lastIndexOf(":");
+  const repository = tagSeparator < 0 ? imageReference : imageReference.slice(0, tagSeparator);
+  return repository.endsWith(checkpointRepositorySuffix);
 }
 
 export function sessionHashPrefixOfImage(imageReference: string): string | undefined {

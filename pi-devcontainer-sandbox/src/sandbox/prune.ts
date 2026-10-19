@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { podmanOutput } from "./driver.ts";
 import {
+  isSessionCheckpointImage,
   sessionHashPrefixOfImage,
   sessionImageHashPrefix,
   SESSION_IMAGE_REPOSITORY_PREFIX,
@@ -108,14 +109,26 @@ async function removeImages(
   }
 }
 
+async function listImagesOfSession(sessionId: string): Promise<SessionImage[]> {
+  const hashPrefix = sessionImageHashPrefix(sessionId);
+  const images = await listSessionImages();
+  return images.filter((image) => image.sessionHashPrefix === hashPrefix);
+}
+
 export async function removeSessionImages(
   sessionId: string,
   report: (text: string) => void,
 ): Promise<void> {
-  const hashPrefix = sessionImageHashPrefix(sessionId);
-  const images = await listSessionImages();
+  await removeImages(await listImagesOfSession(sessionId), report);
+}
+
+export async function removeSessionCheckpointImages(
+  sessionId: string,
+  report: (text: string) => void,
+): Promise<void> {
+  const images = await listImagesOfSession(sessionId);
   await removeImages(
-    images.filter((image) => image.sessionHashPrefix === hashPrefix),
+    images.filter((image) => isSessionCheckpointImage(image.reference)),
     report,
   );
 }
@@ -198,16 +211,61 @@ async function removeAbandonedContainers(options: {
   }
 }
 
-async function removeAbandonedSessionImages(options: {
+async function wasActiveWithinRetention(directory: string, nowUnixMs: number): Promise<boolean> {
+  const stored = await readPrivateText(join(directory, "session.json"));
+  if (!stored) {
+    return false;
+  }
+  const record = sessionRecordSchema.parse(JSON.parse(stored.text));
+  const inactiveForMs = nowUnixMs - (record.inactiveSinceUnixMs ?? nowUnixMs);
+  return inactiveForMs < inactiveSessionRetentionMs;
+}
+
+async function resumableSessionHashes(options: {
+  sessionsDirectory: string;
+  sessionHashes: readonly string[];
   liveHashes: ReadonlySet<string>;
+  nowUnixMs: number;
+  report: (text: string) => void;
+}): Promise<string[]> {
+  const resumable: string[] = [];
+  for (const sessionHash of options.sessionHashes) {
+    if (options.liveHashes.has(sessionHash)) {
+      continue;
+    }
+    try {
+      const directory = join(options.sessionsDirectory, sessionHash);
+      if (await wasActiveWithinRetention(directory, options.nowUnixMs)) {
+        resumable.push(sessionHash);
+      }
+    } catch (error) {
+      options.report(`Could not read sandbox session ${sessionHash}: ${String(error)}\n`);
+    }
+  }
+  return resumable;
+}
+
+async function removeAbandonedSessionImages(options: {
+  sessionsDirectory: string;
+  sessionHashes: readonly string[];
+  liveHashes: ReadonlySet<string>;
+  nowUnixMs: number;
   report: (text: string) => void;
 }): Promise<void> {
   const liveHashes = [...options.liveHashes];
-  const belongsToLiveSession = (image: SessionImage) =>
-    liveHashes.some((hash) => hash.startsWith(image.sessionHashPrefix));
+  const resumableHashes = await resumableSessionHashes(options);
+  const imageBelongsToAnySession = (sessionHashes: readonly string[], image: SessionImage) =>
+    sessionHashes.some((hash) => hash.startsWith(image.sessionHashPrefix));
+  const isStillUseful = (image: SessionImage) => {
+    if (imageBelongsToAnySession(liveHashes, image)) {
+      return true;
+    }
+    const checkpointsAreDiscardedOnClose = isSessionCheckpointImage(image.reference);
+    return !checkpointsAreDiscardedOnClose && imageBelongsToAnySession(resumableHashes, image);
+  };
   const images = await listSessionImages();
   await removeImages(
-    images.filter((image) => !belongsToLiveSession(image)),
+    images.filter((image) => !isStillUseful(image)),
     options.report,
   );
 }
@@ -265,7 +323,14 @@ export async function pruneInactiveSessions(options: {
   const liveHashes = await liveSessionHashes(sessionsDirectory, sessionHashes);
   const sweeps = [
     () => removeAbandonedContainers({ sessionsDirectory, liveHashes, nowUnixMs, ...options }),
-    () => removeAbandonedSessionImages({ liveHashes, report: options.report }),
+    () =>
+      removeAbandonedSessionImages({
+        sessionsDirectory,
+        sessionHashes,
+        liveHashes,
+        nowUnixMs,
+        report: options.report,
+      }),
     () =>
       removeExpiredFailedStartDirectories({
         sessionsDirectory,
