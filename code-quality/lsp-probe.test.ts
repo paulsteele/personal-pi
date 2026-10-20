@@ -2,9 +2,32 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import type { Diagnostic } from "vscode-languageserver-protocol";
 import { LspProbe } from "./lsp-probe.js";
+
+it("cleans up its process group without external process-listing commands", async () => {
+	const root = await mkdtemp(join(tmpdir(), "quality-lsp-probe-cleanup-"));
+	const probe = new LspProbe(
+		{
+			name: "no-process-listing",
+			command: process.execPath,
+			args: [fileURLToPath(new URL("./fixtures/lsp-probe-server.mjs", import.meta.url))],
+		},
+		root,
+	);
+	try {
+		await probe.initialize();
+		vi.stubEnv("PATH", "");
+		await probe.stop();
+		expect(probe.child.exitCode).toBe(0);
+		await probe.stop();
+	} finally {
+		vi.unstubAllEnvs();
+		await probe.stop();
+		await rm(root, { recursive: true, force: true });
+	}
+});
 
 it.each([1, 2, 3, 4, undefined])(
 	"retains severity %s despite an earlier empty clearing notification",

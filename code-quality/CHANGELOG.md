@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.13.0 — 2026-10-20
+
+- Keep failed DRY baseline servers available until an error reply is flushed, retirement is requested, or the request deadline expires. Prevent startup failures from racing socket teardown.
+- Use isolated, deadline-bounded Git fixtures for worktree and discovery tests instead of inheriting developer identity, signing, hooks, or Git environment overrides.
+- Remove the LSP compatibility probe's dependency on `ps` during process-group cleanup.
+
 ## 2.9.0 — 2026-10-18
 
 - When a sandboxed LSP check takes 5 seconds or longer, report how long routing, guest file reads, and diagnostics each took.

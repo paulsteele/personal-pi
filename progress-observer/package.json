@@ -1,6 +1,6 @@
 {
 	"name": "@paulsteele/pi-progress-observer",
-	"version": "2.12.0",
+	"version": "2.13.0",
 	"private": true,
 	"description": "Passive side-model progress summaries for Pi",
 	"type": "module",
@@ -16,6 +16,7 @@
 		"config.ts",
 		"events.ts",
 		"index.ts",
+		"milestones.ts",
 		"observer.ts",
 		"scheduler.ts",
 		"CHANGELOG.md",

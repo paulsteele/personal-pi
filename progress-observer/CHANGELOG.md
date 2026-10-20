@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.13.0 — 2026-10-20
+
+- Replace activity recaps with supervision briefs covering the stable goal, meaningful changes, stated approach, verification limits, and attention items; allow supported uncertainty.
+- Omit uninformative rows from supervision briefs.
+- Pin original/recent user constraints, distinguish new records using the last successful observation boundary, and retain both ends of tool-result excerpts.
+- Refresh on debounced verification, failure, clarification, and final-settlement milestones, with turn/age cadence as a fallback.
+- Publish version 2 state while preserving the last successful timestamp on failures.
+
 ## 2.0.0 — 2026-10-12
 
 - Contribute a Progress Observer settings section for model, enablement, cadence, timeout, and freshness; Apply updates the live scheduler through validated configuration.

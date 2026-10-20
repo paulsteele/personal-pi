@@ -654,6 +654,25 @@ function wrappedProgressValue(
 	);
 }
 
+function supervisionSections(summary: NonNullable<ProgressObserverSnapshot["summary"]>) {
+	return [
+		{ label: "Goal", value: summary.goal, role: "primary" },
+		{ label: "Attention", value: summary.attention, role: "warning" },
+		{ label: "Now", value: summary.current, role: "primary" },
+		{ label: "Changed", value: summary.changed, role: "added" },
+		{ label: "Approach", value: summary.approach, role: "primary" },
+		{ label: "Verified", value: summary.verification, role: "primary" },
+		{ label: "Next", value: summary.next, role: "primary" },
+	] satisfies Array<{ label: string; value: string | undefined; role: PaletteRole }>;
+}
+
+function observationTimestamp(observer: ProgressObserverSnapshot): string | undefined {
+	if (observer.updatedAt === undefined) {
+		return undefined;
+	}
+	return `Checked at ${new Date(observer.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
+}
+
 function progressRows(snapshot: SidebarSnapshot, palette: AtelierPalette, width: number): string[] {
 	const observer = snapshot.progressObserver;
 	const rows: string[] = [];
@@ -681,17 +700,19 @@ function progressRows(snapshot: SidebarSnapshot, palette: AtelierPalette, width:
 	const heading = palette.paint(role, `${status} · ${display(observer.modelId)}`);
 	rows.push(centeredTrackContent(heading, width, " "));
 	if (observer.summary) {
-		rows.push(...wrappedProgressValue("Now", observer.summary.current, width, palette));
-		if (observer.summary.next)
-			rows.push(...wrappedProgressValue("Next", observer.summary.next, width, palette));
-		if (observer.summary.blockers)
-			rows.push(...wrappedProgressValue("Blockers", observer.summary.blockers, width, palette, "warning"));
-		rows.push(
-			...wrappedProgressValue("Goal", observer.summary.goal, width, palette),
-			...wrappedProgressValue("Done", observer.summary.progress, width, palette),
-		);
+		for (const section of supervisionSections(observer.summary)) {
+			if (section.value) {
+				rows.push(...wrappedProgressValue(section.label, section.value, width, palette, section.role));
+			}
+		}
 	}
-	if (observer.message) rows.push(...wrapTextWithAnsi(palette.paint("dim", observer.message), width));
+	const timestamp = observationTimestamp(observer);
+	if (timestamp) {
+		rows.push(...wrapTextWithAnsi(palette.paint("dim", timestamp), width));
+	}
+	if (observer.message) {
+		rows.push(...wrapTextWithAnsi(palette.paint("dim", observer.message), width));
+	}
 	return rows;
 }
 
@@ -1030,21 +1051,20 @@ export function renderSummaryContent(
 		...wrapTextWithAnsi(palette.paint("dim", display(observer.modelId)), width),
 		"",
 	);
+	const timestamp = observationTimestamp(observer);
+	if (timestamp) {
+		rows.push(...wrapTextWithAnsi(palette.paint("dim", timestamp), width), "");
+	}
 	if (observer.summary) {
-		const summary = observer.summary;
-		const sections: Array<{ label: string; value: string | undefined; role: PaletteRole }> = [
-			{ label: "NOW", value: summary.current, role: "primary" },
-			{ label: "NEXT", value: summary.next, role: "primary" },
-			{ label: "BLOCKERS", value: summary.blockers, role: "warning" },
-			{ label: "GOAL", value: summary.goal, role: "primary" },
-			{ label: "DONE", value: summary.progress, role: "added" },
-		];
-		for (const summaryField of sections) {
+		for (const summaryField of supervisionSections(observer.summary)) {
 			if (!summaryField.value) {
 				continue;
 			}
 			rows.push(
-				palette.paint(summaryField.role === "warning" ? "warning" : "muted", summaryField.label),
+				palette.paint(
+					summaryField.role === "warning" ? "warning" : "muted",
+					summaryField.label.toUpperCase(),
+				),
 				...wrapTextWithAnsi(
 					palette.paint(summaryField.role, sanitize(summaryField.value)),
 					Math.max(1, width - 2),

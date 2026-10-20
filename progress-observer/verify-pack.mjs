@@ -1,15 +1,8 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 
-const expected = new Set([
-	"CHANGELOG.md",
-	"README.md",
-	"config.ts",
-	"events.ts",
-	"index.ts",
-	"observer.ts",
-	"package.json",
-	"scheduler.ts",
-]);
+const manifest = JSON.parse(readFileSync(new URL("package.json", import.meta.url), "utf8"));
+const expected = new Set(["package.json", ...manifest.files]);
 const result = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
 	cwd: new URL(".", import.meta.url),
 	encoding: "utf8",

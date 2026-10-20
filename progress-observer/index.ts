@@ -14,6 +14,7 @@ import { fileSettingsDraft } from "@paulsteele/pi-shared-ui/storage";
 import { createObserverPublisher } from "./events.js";
 import { buildObservationPrompt, observe } from "./observer.js";
 import { createObserverScheduler, type ObserverScheduler } from "./scheduler.js";
+import { isObservationMilestone } from "./milestones.js";
 
 interface Runtime {
 	ctx: ExtensionContext;
@@ -48,16 +49,18 @@ export default function progressObserver(pi: ExtensionAPI): void {
 						message: `Observer model unavailable: ${modelId(next.config)}`,
 					};
 				}
-				const prompt = buildObservationPrompt(next.ctx.sessionManager, previous);
-				return observe({
+				const entryId = next.ctx.sessionManager.getLeafId();
+				const observationState = next.ctx.isIdle() ? "idle" : "working";
+				const prompt = buildObservationPrompt(next.ctx.sessionManager, previous, observationState);
+				const result = await observe({
 					piSessionId,
 					caller: next.ctx.modelRegistry,
 					model,
 					prompt,
 					config: next.config,
-					...(previous ? { previous } : {}),
 					signal,
 				});
+				return result.kind === "success" && entryId ? { ...result, entryId } : result;
 			},
 		});
 		next = { ctx, config, scheduler, publisher, configValid: Boolean(loaded.config) };
@@ -145,11 +148,32 @@ export default function progressObserver(pi: ExtensionAPI): void {
 		}
 	});
 
-	pi.on("turn_end", (_event, ctx) => {
+	const milestone = (ctx: ExtensionContext): void => {
 		const active = current(ctx);
 		active.ctx = ctx;
-		if (ctx.mode === "tui" && active.configValid) {
-			active.scheduler.turnEnded(ctx.sessionManager.getLeafId() ?? `turn:${_event.turnIndex}`);
+		const revision = ctx.sessionManager.getLeafId();
+		if (ctx.mode === "tui" && active.configValid && revision) {
+			const milestoneKey = ctx.isIdle() ? `${revision}:idle` : revision;
+			active.scheduler.milestone(milestoneKey);
+		}
+	};
+
+	pi.on("turn_end", (event, ctx) => {
+		const active = current(ctx);
+		active.ctx = ctx;
+		if (ctx.mode !== "tui" || !active.configValid) {
+			return;
+		}
+		const revision = ctx.sessionManager.getLeafId() ?? `turn:${event.turnIndex}`;
+		active.scheduler.turnEnded(revision);
+		if (isObservationMilestone(event)) {
+			active.scheduler.milestone(revision);
+		}
+	});
+	pi.on("agent_settled", (_event, ctx) => milestone(ctx));
+	pi.on("tool_execution_start", (event, ctx) => {
+		if (event.toolName === "ask_user_question") {
+			milestone(ctx);
 		}
 	});
 	pi.on("session_tree", (_event, ctx) => {

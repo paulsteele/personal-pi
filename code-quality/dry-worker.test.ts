@@ -1,6 +1,8 @@
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
+import { runFixtureGit } from "../tests/git-fixture.js";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createConnection } from "node:net";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { DEFAULT_DRY_PROFILE } from "./dry-profile.js";
@@ -68,9 +70,8 @@ async function gitRepository(
 		await mkdir(join(repo, path, ".."), { recursive: true });
 		await writeFile(join(repo, path), text);
 	}
-	const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
-	git("init", "--quiet");
-	git("add", "--", ...Object.keys(tracked));
+	await runFixtureGit(repo, ["init", "--quiet"]);
+	await runFixtureGit(repo, ["add", "--", ...Object.keys(tracked)]);
 }
 it("does not discover tracked or untracked files under top-level and nested project exclusions", async () => {
 	const h = await fixture();
@@ -276,6 +277,72 @@ it("answers a waiting baseline request with the corpus error before the server e
 		await workerProcessClosed;
 	}
 });
+it("delivers a baseline failure even when the client connects before submitting its request", async () => {
+	const h = await fixture();
+	const failure = corpus.corpusError({ kind: "corpus_too_large", limit: 1024, total: 2004, directories: [] });
+	let rejectCapture!: (error: Error) => void;
+	const capture = new Promise<never>((_resolve, reject) => {
+		rejectCapture = reject;
+	});
+	const serverClosed = mcp
+		.serveBaseline(h.options, () => capture)
+		.then(
+			() => undefined,
+			(error: Error) => error,
+		);
+	const socket = createConnection(join(h.options.directory, "baseline.sock"));
+	const connected = new Promise<void>((resolve, reject) => {
+		socket.once("connect", resolve);
+		socket.once("error", reject);
+	});
+	const response = new Promise<string>((resolve, reject) => {
+		let reply = "";
+		socket.on("data", (bytes) => {
+			reply += bytes;
+		});
+		socket.once("end", () => resolve(reply));
+		socket.once("error", reject);
+	});
+	try {
+		await connected;
+		rejectCapture(failure);
+		await capture.catch(() => {});
+		socket.write(`${JSON.stringify({ operation: "baseline" })}\n`);
+		expect(JSON.parse(await response)).toEqual({ error: String(failure) });
+		expect(await serverClosed).toBe(failure);
+	} finally {
+		socket.destroy();
+	}
+});
+
+it("retains an early capture failure until the first baseline request arrives", async () => {
+	const h = await fixture();
+	const failure = new Error("Capture failed before readiness");
+	const capture = Promise.reject(failure);
+	const serverClosed = mcp
+		.serveBaseline(h.options, () => capture)
+		.then(
+			() => undefined,
+			(error: Error) => error,
+		);
+	await capture.catch(() => {});
+	await expect(mcp.queryBaseline({ ...h.options, operation: "baseline" })).rejects.toThrow(
+		"Capture failed before readiness",
+	);
+	expect(await serverClosed).toBe(failure);
+});
+
+it("retires a failed baseline at its request deadline when no client connects", async () => {
+	const h = await fixture();
+	const failure = new Error("Capture failed without a waiting client");
+	await expect(
+		mcp.serveBaseline({ ...h.options, timeoutMs: 20 }, () => Promise.reject(failure)),
+	).rejects.toBe(failure);
+	await expect(readFile(join(h.options.directory, "baseline.sock"))).rejects.toMatchObject({
+		code: "ENOENT",
+	});
+});
+
 it("rejects unsafe or out-of-range snippet results", async () => {
 	const manifest = { files: [{ path: "existing.ts", lines: 3 }] };
 	const query = { path: "new.ts", code: "a\nb" };

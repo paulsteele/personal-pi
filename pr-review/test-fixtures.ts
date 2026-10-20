@@ -1,9 +1,8 @@
-import { execFile } from "node:child_process";
+import { runFixtureGit } from "../tests/git-fixture.js";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { promisify } from "node:util";
 import { BUDGETS } from "./config.js";
 import { resolveRepo } from "./git.js";
 import type { Config, Draft, Repo, Scope } from "./types.js";
@@ -82,7 +81,6 @@ export function capture(
 ) {
 	return captureSource(repo, scope, config, testAccess(), exclusions, signal);
 }
-const exec = promisify(execFile);
 export const testConfig = {
 	schemaVersion: 1,
 	provider: "fake",
@@ -100,21 +98,7 @@ export const testDraft: Draft = {
 	exclusions: [],
 };
 export async function testGit(root: string, ...args: string[]): Promise<string> {
-	return (
-		await exec(
-			"git",
-			[
-				"-c",
-				"core.hooksPath=/dev/null",
-				"-c",
-				"user.name=Test",
-				"-c",
-				"user.email=test@example.invalid",
-				...args,
-			],
-			{ cwd: root },
-		)
-	).stdout;
+	return runFixtureGit(root, args);
 }
 export async function put(root: string, path: string, content: string | Buffer): Promise<void> {
 	await mkdir(dirname(join(root, path)), { recursive: true });

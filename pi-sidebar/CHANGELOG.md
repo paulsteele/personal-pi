@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.13.0 — 2026-10-20
+
+- Render version 2 Progress Observer supervision briefs with Goal first, prioritized Attention, and optional Now, Changed, Approach, Verified, and Next sections.
+- Show the last successful observation time, including when an update fails and leaves the summary stale.
+
 ## 2.10.0 — 2026-10-18
 
 - Move Git file and line changes onto the bottom rail of the Activity race track, and move quality check counts onto the top rail beside the completed and failed counts.

@@ -1,8 +1,7 @@
-import { execFile } from "node:child_process";
+import { runFixtureGit } from "../tests/git-fixture.js";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import { afterEach, expect, it } from "vitest";
 import {
 	approveLspDraft,
@@ -125,20 +124,10 @@ it("resolves configured non-Git ancestors and routes to the deepest matching wor
 
 it("shares the PR-style identity across Git worktrees but keeps physical roots distinct", async () => {
 	const { cwd, directory, agentDir } = await projectFixture();
-	const git = (args: string[]) => promisify(execFile)("git", args, { cwd });
-	await git(["init", "-q"]);
-	await git([
-		"-c",
-		"user.email=test@example.com",
-		"-c",
-		"user.name=Test",
-		"commit",
-		"--allow-empty",
-		"-qm",
-		"initial",
-	]);
+	await runFixtureGit(cwd, ["init", "-q"]);
+	await runFixtureGit(cwd, ["commit", "--allow-empty", "-qm", "initial"]);
 	const worktree = join(directory, "worktree");
-	await git(["worktree", "add", "-b", "other", worktree]);
+	await runFixtureGit(cwd, ["worktree", "add", "-b", "other", worktree]);
 	const main = await resolveLspProject(cwd, agentDir);
 	const other = await resolveLspProject(worktree, agentDir);
 	expect(other.id).toBe(main.id);

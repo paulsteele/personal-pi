@@ -20,7 +20,7 @@ function harness(mode: "tui" | "print" = "tui") {
 			{
 				type: "toolCall",
 				name: "submit_progress",
-				arguments: { goal: "Goal", progress: "Done", current: "Now", next: "Next" },
+				arguments: { goal: "Goal", changed: "Done", current: "Now", next: "Next" },
 			},
 		],
 		stopReason: "stop",
@@ -47,6 +47,7 @@ function harness(mode: "tui" | "print" = "tui") {
 	];
 	const ctx = {
 		mode,
+		isIdle: vi.fn().mockReturnValue(false),
 		hasUI: mode === "tui",
 		ui: { notify: vi.fn(), select: vi.fn() },
 		modelRegistry: {
@@ -127,17 +128,77 @@ describe("progress observer extension", () => {
 	it("runs fire-and-forget at the first four-turn lap boundary and publishes ready state", async () => {
 		const h = harness();
 		await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
-		for (let turnIndex = 0; turnIndex < 3; turnIndex += 1)
-			await h.handlers.get("turn_end")?.({ turnIndex }, h.ctx);
+		const turnEndEvent = (turnIndex: number) => ({
+			turnIndex,
+			message: { role: "assistant" as const, content: [] },
+			toolResults: [],
+		});
+		for (let turnIndex = 0; turnIndex < 3; turnIndex += 1) {
+			await h.handlers.get("turn_end")?.(turnEndEvent(turnIndex), h.ctx);
+		}
 		await flush();
 		expect(h.complete).not.toHaveBeenCalled();
-		await h.handlers.get("turn_end")?.({ turnIndex: 3 }, h.ctx);
+		await h.handlers.get("turn_end")?.(turnEndEvent(3), h.ctx);
 		await flush();
 		expect(h.complete).toHaveBeenCalledTimes(1);
 		expect(h.emitted.filter(([channel]) => channel === "progress-observer:state").at(-1)?.[1]).toMatchObject({
 			phase: "ready",
 			summary: { goal: "Goal" },
 		});
+	});
+
+	it("refreshes after final settlement without waiting for four turns", async () => {
+		vi.useFakeTimers();
+		const h = harness();
+		await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+		h.ctx.isIdle.mockReturnValue(true);
+		await h.handlers.get("agent_settled")?.({ aborted: false }, h.ctx);
+		expect(h.complete).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(750);
+		expect(h.complete).toHaveBeenCalledTimes(1);
+		expect(h.complete.mock.calls[0]![1].messages[0].content).toContain("Agent is idle");
+		await h.handlers.get("agent_settled")?.({ aborted: false }, h.ctx);
+		await vi.advanceTimersByTimeAsync(750);
+		expect(h.complete).toHaveBeenCalledTimes(1);
+		await h.handlers.get("session_shutdown")?.({}, h.ctx);
+		vi.useRealTimers();
+	});
+
+	it("refreshes idle state even when the final turn revision was already observed", async () => {
+		vi.useFakeTimers();
+		const h = harness();
+		await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+		await h.commands.get("observer").handler("refresh", h.ctx);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(h.complete).toHaveBeenCalledTimes(1);
+		h.ctx.isIdle.mockReturnValue(true);
+		await h.handlers.get("agent_settled")?.({ aborted: false }, h.ctx);
+		await vi.advanceTimersByTimeAsync(750);
+		expect(h.complete).toHaveBeenCalledTimes(2);
+		expect(h.complete.mock.calls[1]![1].messages[0].content).toContain("Agent is idle");
+		await h.handlers.get("session_shutdown")?.({}, h.ctx);
+		vi.useRealTimers();
+	});
+
+	it("compares new activity with the boundary captured by the previous successful request", async () => {
+		const h = harness();
+		h.ctx.sessionManager.buildContextEntries.mockReturnValue([
+			{ id: "leaf-1", type: "message", message: { role: "user", content: "Do work" } },
+		] as never);
+		await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+		await h.commands.get("observer").handler("refresh", h.ctx);
+		await vi.waitFor(() => expect(h.emitted.at(-1)?.[1]).toMatchObject({ phase: "ready" }));
+		h.ctx.sessionManager.getLeafId.mockReturnValue("leaf-2");
+		h.ctx.sessionManager.buildContextEntries.mockReturnValue([
+			{ id: "leaf-1", type: "message", message: { role: "user", content: "Do work" } },
+			{ id: "leaf-2", type: "message", message: { role: "assistant", content: "Added resume fixture" } },
+		] as never);
+		await h.commands.get("observer").handler("refresh", h.ctx);
+		await vi.waitFor(() => expect(h.complete).toHaveBeenCalledTimes(2));
+		expect(h.complete.mock.calls[1]![1].messages[0].content).toContain(
+			"NEW: assistant: Added resume fixture",
+		);
+		await h.handlers.get("session_shutdown")?.({}, h.ctx);
 	});
 
 	it("stays inert outside TUI mode", async () => {
@@ -228,7 +289,7 @@ describe("progress observer extension", () => {
 			).toMatchObject({
 				phase: "error",
 				stale: true,
-				summary: { goal: "Goal", progress: "Done" },
+				summary: { goal: "Goal", changed: "Done" },
 			}),
 		);
 		await h.handlers.get("session_shutdown")?.({}, h.ctx);

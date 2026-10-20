@@ -9,7 +9,7 @@ The sidebar uses a 44-column preferred width, shrinks to 28 columns, and hides w
 The selectors use Nerd Font icons rather than text; configure a Nerd Font in your terminal.
 
 - **Logs** (`󰋚`) — live tool calls, durations, permission provenance, and inline quality badges. This is the default tab. Click a tool row or its continuation lines to scroll the main transcript to that tool's output, without changing the session branch or editor focus. Nested calls navigate to their enclosing transcript tool; calls no longer rendered in the transcript leave its scroll position unchanged.
-- **Summary** (`󰨸`) — Progress Observer status and model, with spaced Now, Next, Blockers, Goal, and Done sections and wrapped, indented values.
+- **Summary** (`󰨸`) — Progress Observer supervision brief with a pinned Goal, prioritized Attention, and optional Now, Changed, Approach, Verified, and Next sections. Values wrap and indent, with the last successful observation time visible. Observer protocol version 2 requires updating/reloading Observer and Sidebar together.
 - **Tasks** (`󰄬`) — Plannotator's active plan, completed/total count, and scrollable checklist. Browser-approved plans use the approved snapshot; matching file checkmarks, `[DONE:n]` messages, and successful `plannotator_mark_done` results update completion on the current branch.
 - **Sandbox** (`󰆧`) — colored state and separate Runtime, Configuration, Bind Mounts, Network, and Attention sections. Writable/read-only mounts have distinct colors; long paths wrap without hiding their details.
 - **Quality** (`󰅴`) — reviewer/gate state, a JSCPD section combining tool details with scan scope/state/coverage, latest DRY check, and recovery information. The pinned header shows tool and scan readiness.

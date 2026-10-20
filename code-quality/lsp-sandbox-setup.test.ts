@@ -1,8 +1,8 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
+import { runFixtureGit } from "../tests/git-fixture.js";
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { promisify } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, it, vi } from "vitest";
 import { discoverSandboxLspFiles } from "./lsp-sandbox-discovery.js";
@@ -282,8 +282,8 @@ it("uses guest Git candidates to ignore generated files and prioritize source fi
 		"zzz-data.txt",
 	]);
 	await writeFile(join(fixture.guestRoot, ".gitignore"), "ignored.py\n");
-	await promisify(execFile)("git", ["init", "--quiet"], { cwd: fixture.guestRoot });
-	await promisify(execFile)("git", ["add", "src/app.ts"], { cwd: fixture.guestRoot });
+	await runFixtureGit(fixture.guestRoot, ["init", "--quiet"]);
+	await runFixtureGit(fixture.guestRoot, ["add", "src/app.ts"]);
 	fixture.execute.mockImplementation(async (options) => {
 		const input = JSON.parse(options.input!.toString());
 		return executeDiscovery({ ...options, input: Buffer.from(JSON.stringify({ ...input, entryLimit: 1 })) });
@@ -296,22 +296,12 @@ it("uses guest Git candidates to ignore generated files and prioritize source fi
 
 it("includes source from initialized guest submodules", async () => {
 	const fixture = await setupFixture(["modules/backend/app.py"]);
-	const git = (cwd: string, args: string[]) => promisify(execFile)("git", args, { cwd });
-	await git(fixture.guestRoot, ["init", "--quiet"]);
+	await runFixtureGit(fixture.guestRoot, ["init", "--quiet"]);
 	const submodule = join(fixture.guestRoot, "modules/backend");
-	await git(submodule, ["init", "--quiet"]);
-	await git(submodule, ["add", "app.py"]);
-	await git(submodule, [
-		"-c",
-		"user.name=Fixture",
-		"-c",
-		"user.email=fixture@example.invalid",
-		"commit",
-		"--quiet",
-		"-m",
-		"fixture",
-	]);
-	await git(fixture.guestRoot, ["add", "modules/backend"]);
+	await runFixtureGit(submodule, ["init", "--quiet"]);
+	await runFixtureGit(submodule, ["add", "app.py"]);
+	await runFixtureGit(submodule, ["commit", "--quiet", "-m", "fixture"]);
+	await runFixtureGit(fixture.guestRoot, ["add", "modules/backend"]);
 	expect(await discoverSandboxLspFiles(fixture.sandbox, fixture.signal)).toMatchObject({
 		files: ["modules/backend/app.py"],
 		truncated: false,

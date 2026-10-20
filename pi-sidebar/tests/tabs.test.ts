@@ -37,7 +37,7 @@ it("pins sandbox and turn headers above selectable tool, summary, and sandbox co
 		progressObserver: {
 			phase: "ready",
 			modelId: "observer",
-			summary: { goal: "Ship summary", current: "Implement tabs", progress: "In progress" },
+			summary: { goal: "Ship summary", current: "Implement tabs" },
 		},
 		sandbox: {
 			sessionId: "session",
@@ -82,26 +82,48 @@ it("gives full-height summary fields space and wraps every value at narrow width
 			phase: "ready",
 			modelId: "observer",
 			stale: true,
+			updatedAt: 1000,
 			summary: {
 				current: "Implement settings navigation",
 				next: "Verify the complete summary remains readable",
 				goal: "Ship the sidebar",
-				progress: "Settings grouped",
-				blockers: "Waiting for review",
+				changed: "Settings grouped",
+				approach: "Separate settings ownership",
+				verification: "Unit tests pass; manual checks pending",
+				attention: "Waiting for review",
 			},
 		},
 	});
 	const rows = renderSummaryContent(snapshot, theme, 26, false);
 	expect(rows).toContain("NOW");
 	expect(rows).toContain("NEXT");
-	expect(rows).toContain("BLOCKERS");
-	expect(rows.slice(rows.indexOf("NOW") + 1, rows.indexOf("NEXT")).filter((row) => !row.trim())).toHaveLength(
-		2,
-	);
+	expect(rows).toContain("ATTENTION");
+	expect(rows).toContain("APPROACH");
+	expect(rows).toContain("VERIFIED");
+	expect(rows.join(" ")).toContain("Checked at");
+	expect(rows.indexOf("GOAL")).toBeLessThan(rows.indexOf("ATTENTION"));
+	expect(
+		rows.slice(rows.indexOf("NOW") + 1, rows.indexOf("CHANGED")).filter((row) => !row.trim()),
+	).toHaveLength(2);
 	expect(rows.join(" ")).toContain("ready · stale");
 	expect(rows.join(" ")).toContain("Settings grouped");
 	for (const row of rows) {
 		expect(visibleWidth(row)).toBeLessThanOrEqual(26);
+	}
+});
+
+it("omits unsupported supervision rows instead of filling them", () => {
+	const snapshot = buildSidebarSnapshot({
+		state: createInertAtelierState(),
+		cwd: "/repo",
+		branchEntryCount: 0,
+		extensionStatuses: [],
+		progressObserver: { phase: "ready", modelId: "observer", summary: { goal: "Investigate reload" } },
+	});
+	const rows = renderSummaryContent(snapshot, theme, 26, false);
+	expect(rows).toContain("GOAL");
+	for (const label of ["NOW", "CHANGED", "APPROACH", "VERIFIED", "ATTENTION", "NEXT"]) {
+		expect(rows).not.toContain(label);
 	}
 });
 

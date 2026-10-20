@@ -1,8 +1,7 @@
-import { execFile } from "node:child_process";
+import { runFixtureGit } from "../tests/git-fixture.js";
 import { mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { promisify } from "node:util";
 import { afterEach, expect, it } from "vitest";
 import { discoverLspFiles } from "./lsp-setup.js";
 
@@ -22,7 +21,7 @@ async function discoveryFixture(files: Record<string, string>) {
 		await mkdir(dirname(join(root, file)), { recursive: true });
 		await writeFile(join(root, file), content);
 	}
-	const git = (...args: string[]) => promisify(execFile)("git", args, { cwd: root });
+	const git = (...args: string[]) => runFixtureGit(root, args);
 	return { directory, root, git, signal: new AbortController().signal };
 }
 

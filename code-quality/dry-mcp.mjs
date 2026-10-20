@@ -279,10 +279,11 @@ export async function serveBaseline(options, capture, configure, updateCapture) 
 		await writeReport(options, client, manifest, started);
 		return { ready: true };
 	})();
-	let baselineFailed = false;
-	baseline.catch(() => {
-		baselineFailed = true;
+	let resolveBaselineFailureReported;
+	const baselineFailureReported = new Promise((resolve) => {
+		resolveBaselineFailureReported = resolve;
 	});
+	const reportBaselineFailure = () => resolveBaselineFailureReported();
 	const sockets = new Set();
 	const server = createServer((socket) => {
 		sockets.add(socket);
@@ -336,13 +337,12 @@ export async function serveBaseline(options, capture, configure, updateCapture) 
 			queue = operation.catch(() => {});
 			void operation.then(
 				(value) => socket.end(`${JSON.stringify({ value })}\n`),
-				(error) => socket.end(`${JSON.stringify({ error: String(error) })}\n`),
+				(error) =>
+					socket.end(`${JSON.stringify({ error: String(error) })}\n`, () => {
+						reportBaselineFailure();
+					}),
 			);
 		});
-	});
-	await new Promise((resolve, reject) => {
-		server.once("error", reject);
-		server.listen(socketPath, resolve);
 	});
 	let retire;
 	const retired = new Promise((resolve) => {
@@ -350,14 +350,27 @@ export async function serveBaseline(options, capture, configure, updateCapture) 
 	});
 	process.once("SIGTERM", retire);
 	process.once("SIGINT", retire);
+	let failureDeliveryTimer;
+	const baselineLifetime = baseline.then(
+		() => client.closed,
+		async (error) => {
+			const failureDeliveryDeadline = new Promise((resolve) => {
+				failureDeliveryTimer = setTimeout(resolve, options.timeoutMs);
+			});
+			await Promise.race([baselineFailureReported, retired, failureDeliveryDeadline]);
+			throw error;
+		},
+	);
 	try {
-		await Promise.race([retired, baseline.then(() => client.closed)]);
+		await new Promise((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(socketPath, resolve);
+		});
+		await Promise.race([retired, baselineLifetime]);
 	} finally {
+		clearTimeout(failureDeliveryTimer);
 		process.removeListener("SIGTERM", retire);
 		process.removeListener("SIGINT", retire);
-		if (baselineFailed) {
-			await queue;
-		}
 		for (const socket of sockets) {
 			socket.destroy();
 		}

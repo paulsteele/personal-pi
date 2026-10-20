@@ -1,15 +1,22 @@
 export const PROGRESS_OBSERVER_STATE_CHANNEL = "progress-observer:state";
 export const PROGRESS_OBSERVER_DISCOVER_CHANNEL = "progress-observer:discover";
-export const PROGRESS_OBSERVER_PROTOCOL_VERSION = 1 as const;
+export const PROGRESS_OBSERVER_PROTOCOL_VERSION = 2 as const;
 
 export type ObserverPhase = "waiting" | "observing" | "ready" | "error" | "disabled" | "unavailable";
 
 export interface ProgressSummary {
 	goal: string;
-	progress: string;
-	current: string;
+	current?: string;
+	changed?: string;
+	approach?: string;
+	verification?: string;
+	attention?: string;
 	next?: string;
-	blockers?: string;
+}
+
+export interface ObservationBaseline {
+	summary: ProgressSummary;
+	entryId?: string;
 }
 
 export interface ObserverSnapshot {

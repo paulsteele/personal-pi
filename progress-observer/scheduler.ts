@@ -1,5 +1,11 @@
 import type { ObserverConfig } from "./config.js";
-import type { ObserverSnapshot, ProgressSummary } from "./events.js";
+import {
+	PROGRESS_OBSERVER_PROTOCOL_VERSION,
+	type ObservationBaseline,
+	type ObserverSnapshot,
+} from "./events.js";
+
+const MILESTONE_DEBOUNCE_MS = 750;
 
 export interface SchedulerOptions {
 	config: ObserverConfig;
@@ -7,9 +13,9 @@ export interface SchedulerOptions {
 	onState(snapshot: ObserverSnapshot): void;
 	run(
 		signal: AbortSignal,
-		previous?: ProgressSummary,
+		previous?: ObservationBaseline,
 	): Promise<
-		| { kind: "success"; summary: ProgressSummary }
+		| ({ kind: "success" } & ObservationBaseline)
 		| { kind: "cancelled" }
 		| { kind: "error" | "unavailable"; message: string }
 	>;
@@ -18,6 +24,7 @@ export interface SchedulerOptions {
 
 export interface ObserverScheduler {
 	turnEnded(revision: string): void;
+	milestone(revision: string): void;
 	refresh(): void;
 	reset(options?: { regenerate?: boolean }): void;
 	setEnabled(enabled: boolean): void;
@@ -34,28 +41,50 @@ export function createObserverScheduler(options: SchedulerOptions): ObserverSche
 	let completedTurns = 0;
 	let turnsAtLastRun = 0;
 	let lastRunAt: number | undefined;
-	let lastSummary: ProgressSummary | undefined;
+	let baseline: ObservationBaseline | undefined;
+	let updatedAt: number | undefined;
 	let lastObservedRevision: string | undefined;
 	let generation = 0;
 	let active: AbortController | undefined;
 	let pending = false;
 	let pendingRevision: string | undefined;
+	let milestoneTimer: ReturnType<typeof setTimeout> | undefined;
 	const now = options.now ?? Date.now;
 
 	const publish = (snapshot: Omit<ObserverSnapshot, "version" | "modelId">): void => {
-		if (disposed) return;
-		options.onState({ version: 1, modelId, ...snapshot });
+		if (disposed) {
+			return;
+		}
+		options.onState({ version: PROGRESS_OBSERVER_PROTOCOL_VERSION, modelId, ...snapshot });
 	};
 	const waiting = (): void => publish(enabled ? { phase: "waiting" } : { phase: "disabled" });
+	const previousState = () =>
+		baseline
+			? { summary: baseline.summary, stale: true, ...(updatedAt !== undefined ? { updatedAt } : {}) }
+			: {};
+	const clearMilestone = (): void => {
+		clearTimeout(milestoneTimer);
+		milestoneTimer = undefined;
+	};
+	const cancelRequests = (): void => {
+		generation += 1;
+		active?.abort();
+		active = undefined;
+		pending = false;
+		pendingRevision = undefined;
+		clearMilestone();
+	};
 
 	const dispatch = (revision = pendingRevision): void => {
-		if (disposed || !enabled) return;
-		if (revision !== undefined && revision === lastObservedRevision) return;
+		if (disposed || !enabled || (revision !== undefined && revision === lastObservedRevision)) {
+			return;
+		}
 		if (active) {
 			pending = true;
 			pendingRevision = revision;
 			return;
 		}
+		clearMilestone();
 		const controller = new AbortController();
 		active = controller;
 		pending = false;
@@ -63,95 +92,97 @@ export function createObserverScheduler(options: SchedulerOptions): ObserverSche
 		const expectedGeneration = generation;
 		const startedAt = now();
 		const turnsAtStart = completedTurns;
-		publish({ phase: "observing", ...(lastSummary ? { summary: lastSummary, stale: true } : {}) });
+		publish({ phase: "observing", ...previousState() });
 		void options
-			.run(controller.signal, lastSummary)
+			.run(controller.signal, baseline)
 			.then((result) => {
-				if (disposed || expectedGeneration !== generation || controller.signal.aborted) return;
+				if (disposed || expectedGeneration !== generation || controller.signal.aborted) {
+					return;
+				}
 				lastRunAt = startedAt;
 				turnsAtLastRun = turnsAtStart;
 				lastObservedRevision = revision;
 				if (result.kind === "success") {
-					lastSummary = result.summary;
-					publish({ phase: "ready", summary: result.summary, updatedAt: now() });
+					baseline = { summary: result.summary, ...(result.entryId ? { entryId: result.entryId } : {}) };
+					lastObservedRevision = revision ?? result.entryId;
+					updatedAt = now();
+					publish({ phase: "ready", summary: result.summary, updatedAt });
 				} else if (result.kind === "error" || result.kind === "unavailable") {
-					publish({
-						phase: result.kind,
-						message: result.message,
-						...(lastSummary ? { summary: lastSummary, stale: true } : {}),
-					});
+					publish({ phase: result.kind, message: result.message, ...previousState() });
 				}
 			})
 			.finally(() => {
-				if (active === controller) active = undefined;
-				if (disposed || expectedGeneration !== generation) return;
-				if (pending) dispatch(pendingRevision);
+				if (active === controller) {
+					active = undefined;
+				}
+				if (disposed || expectedGeneration !== generation) {
+					return;
+				}
+				if (pending) {
+					dispatch(pendingRevision);
+				}
 			});
 	};
 
 	const scheduler: ObserverScheduler = {
 		turnEnded(revision) {
-			if (disposed || !enabled) return;
+			if (disposed || !enabled) {
+				return;
+			}
 			completedTurns += 1;
 			const turnsDue = completedTurns - turnsAtLastRun >= config.turnInterval;
 			const timeDue = lastRunAt !== undefined && now() - lastRunAt >= config.maxAgeMs;
-			if (turnsDue || timeDue) dispatch(revision);
+			if (turnsDue || timeDue) {
+				dispatch(revision);
+			}
+		},
+		milestone(revision) {
+			if (disposed || !enabled || revision === lastObservedRevision) {
+				return;
+			}
+			clearMilestone();
+			milestoneTimer = setTimeout(() => {
+				milestoneTimer = undefined;
+				dispatch(revision);
+			}, MILESTONE_DEBOUNCE_MS);
 		},
 		refresh() {
-			// Manual refresh intentionally bypasses activity revision deduplication.
+			clearMilestone();
 			dispatch();
 		},
 		reset(resetOptions = {}) {
-			generation += 1;
-			active?.abort();
-			active = undefined;
-			pending = false;
-			pendingRevision = undefined;
+			cancelRequests();
 			completedTurns = 0;
 			turnsAtLastRun = 0;
 			lastRunAt = undefined;
 			lastObservedRevision = undefined;
-			lastSummary = undefined;
+			baseline = undefined;
+			updatedAt = undefined;
 			waiting();
-			if (resetOptions.regenerate && enabled) dispatch();
+			if (resetOptions.regenerate && enabled) {
+				dispatch();
+			}
 		},
 		setEnabled(next) {
 			enabled = next;
 			if (!enabled) {
-				generation += 1;
-				active?.abort();
-				active = undefined;
-				pending = false;
-				pendingRevision = undefined;
+				cancelRequests();
 				publish({ phase: "disabled" });
 			} else {
 				waiting();
 			}
 		},
 		setUnavailable(message) {
-			generation += 1;
-			active?.abort();
-			active = undefined;
-			pending = false;
-			pendingRevision = undefined;
-			publish({
-				phase: "unavailable",
-				message,
-				...(lastSummary ? { summary: lastSummary, stale: true } : {}),
-			});
+			cancelRequests();
+			publish({ phase: "unavailable", message, ...previousState() });
 		},
 		setConfig(next, nextModelId) {
 			config = next;
 			modelId = nextModelId;
 		},
 		dispose() {
-			if (disposed) return;
 			disposed = true;
-			generation += 1;
-			active?.abort();
-			active = undefined;
-			pending = false;
-			pendingRevision = undefined;
+			cancelRequests();
 		},
 	};
 	waiting();

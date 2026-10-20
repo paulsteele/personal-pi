@@ -1,9 +1,8 @@
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { promisify } from "node:util";
 import {
 	CancellationTokenSource,
 	WorkDoneProgress,
@@ -26,16 +25,6 @@ export interface ProbeEvent {
 	elapsedMs: number;
 	method: string;
 	params: unknown;
-}
-
-async function processGroupExists(pid: number): Promise<boolean> {
-	try {
-		await promisify(execFile)("ps", ["-g", String(pid), "-o", "pid="]);
-		return true;
-	} catch (error) {
-		if ((error as { code?: number }).code === 1) return false;
-		throw error;
-	}
 }
 
 export class LspProbe {
@@ -230,11 +219,15 @@ export class LspProbe {
 	}
 
 	private async killGroup(signal: NodeJS.Signals): Promise<void> {
-		if (!this.child.pid || !(await processGroupExists(this.child.pid))) return;
+		if (!this.child.pid) {
+			return;
+		}
 		try {
 			process.kill(-this.child.pid, signal);
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+			if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+				throw error;
+			}
 		}
 	}
 }

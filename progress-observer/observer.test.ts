@@ -40,8 +40,9 @@ const summaryCall = (
 			name: "submit_progress",
 			arguments: {
 				goal: "Ship observer",
-				progress: "Config is complete",
+				changed: "Config is complete",
 				current: "Writing tests",
+				verification: "Config tests pass; integration tests not run",
 				next: "Run checks",
 				...overrides,
 			},
@@ -95,7 +96,7 @@ describe("observer prompt", () => {
 		);
 		expect(prompt).toContain("Earlier work");
 		expect(prompt).toContain("tool call: bash");
-		expect(prompt).toContain("tool result: bash succeeded");
+		expect(prompt).toContain("tool result: bash completed (inspect output for outcome)");
 		expect(prompt).toContain("[redacted]");
 		expect(prompt).not.toContain("hidden plan");
 		expect(prompt).not.toContain("private-image");
@@ -103,14 +104,105 @@ describe("observer prompt", () => {
 		expect(prompt.length).toBeLessThanOrEqual(24_000);
 	});
 
-	it("does not frame the request in meta-commentary vocabulary", () => {
+	it("preserves user constraints outside the recent window and labels the actual delta", () => {
+		const entries = [
+			{
+				id: "request",
+				type: "message",
+				message: { role: "user", content: "Add fixtures without changing public APIs" },
+			},
+			...Array.from({ length: 42 }, (_, index) => ({
+				id: `step-${index}`,
+				type: "message",
+				message: { role: "assistant", content: `Inspecting fixture ${index}` },
+			})),
+			{ id: "new-result", type: "message", message: { role: "assistant", content: "Added resume fixture" } },
+		];
+		const prompt = buildObservationPrompt(source(entries), {
+			entryId: "step-41",
+			summary: { goal: "Add fixtures", current: "Inspecting fixtures" },
+		});
+		expect(prompt).toContain("Add fixtures without changing public APIs");
+		expect(prompt).toContain("PREVIOUS REPORT (recheck claims; do not treat as proof)");
+		expect(prompt).toContain("CONTEXT: assistant: Inspecting fixture 41");
+		expect(prompt).toContain("NEW: assistant: Added resume fixture");
+	});
+
+	it("recovers original requests from the active branch after compaction", () => {
 		const prompt = buildObservationPrompt(
-			source([{ type: "message", message: { role: "user", content: "Add fixtures" } }]),
-			{ goal: "Goal", progress: "Done", current: "Now" },
+			{
+				buildContextEntries: () => [{ type: "compaction", summary: "Resume fixture implemented" }],
+				getBranch: () => [
+					{ type: "message", message: { role: "user", content: "Keep the wire format compatible" } },
+				],
+			},
+			{ entryId: "compacted-away", summary: { goal: "Add fixtures", attention: "Tests failing" } },
 		);
-		expect(prompt).not.toMatch(/evidence/i);
-		expect(prompt).toContain("Report the current state of this work.");
-		expect(prompt).toContain("PREVIOUS REPORT");
+		expect(prompt).toContain("Keep the wire format compatible");
+		expect(prompt).toContain("Resume fixture implemented");
+		expect(prompt).toContain("Previous boundary unavailable: do not claim a change");
+	});
+
+	it("keeps every new record beyond the old 36-message window when the budget permits", () => {
+		const entries = Array.from({ length: 50 }, (_, index) => ({
+			id: `step-${index}`,
+			type: "message",
+			message: { role: "assistant", content: `Step ${index}` },
+		}));
+		const prompt = buildObservationPrompt(source(entries), {
+			entryId: "step-0",
+			summary: { goal: "Add fixtures" },
+		});
+		expect(prompt).toContain("NEW: assistant: Step 1\n");
+		expect(prompt).toContain("NEW: assistant: Step 49");
+	});
+
+	it("retains command identity and the final result of long tool output", () => {
+		const prompt = buildObservationPrompt(
+			source([
+				{
+					type: "message",
+					message: {
+						role: "assistant",
+						content: [
+							{ type: "toolCall", id: "check", name: "bash", arguments: { command: "bun run test" } },
+						],
+					},
+				},
+				{
+					type: "message",
+					message: {
+						role: "toolResult",
+						toolName: "bash",
+						toolCallId: "check",
+						content: [
+							{
+								type: "text",
+								text: `Starting tests ${"detail ".repeat(500)} Tests: 18 passed; full suite not run`,
+							},
+						],
+					},
+				},
+			]),
+		);
+		expect(prompt).toContain('tool call: bash {"command":"bun run test"}');
+		expect(prompt).toContain("Tests: 18 passed; full suite not run");
+		expect(prompt).toContain("[excerpt omitted]");
+	});
+
+	it("bounds large records without dropping pinned user constraints", () => {
+		const prompt = buildObservationPrompt(
+			source([
+				{ type: "message", message: { role: "user", content: "Preserve public API" } },
+				...Array.from({ length: 80 }, () => ({
+					type: "message",
+					message: { role: "assistant", content: "x".repeat(4000) },
+				})),
+			]),
+		);
+		expect(prompt).toContain("Preserve public API");
+		expect(prompt).toContain("[Older records omitted");
+		expect(prompt.length).toBeLessThanOrEqual(24_000);
 	});
 });
 
@@ -124,10 +216,9 @@ describe("observer model call", () => {
 		"scopes activity tracking to $provider with owner $piSessionId",
 		async ({ provider, piSessionId, trace }) => {
 			const complete = vi.fn<Complete>().mockResolvedValue(summaryCall());
-			const requestModel = { ...model, provider };
 			await observe({
 				caller: { complete },
-				model: requestModel,
+				model: { ...model, provider },
 				piSessionId,
 				prompt: "record",
 				config: DEFAULT_CONFIG,
@@ -139,29 +230,30 @@ describe("observer model call", () => {
 		},
 	);
 
-	it("requires and sanitizes one structured progress call", async () => {
-		const caller = { complete: vi.fn<Complete>().mockResolvedValue(summaryCall({ blockers: "None\u0000" })) };
-		const result = await observe({
-			caller,
-			model,
-			prompt: "evidence",
-			config: DEFAULT_CONFIG,
-		});
+	it("requires and sanitizes a structured supervision brief", async () => {
+		const caller = {
+			complete: vi
+				.fn<Complete>()
+				.mockResolvedValue(summaryCall({ attention: "Integration checks pending\u0000" })),
+		};
+		const result = await observe({ caller, model, prompt: "record", config: DEFAULT_CONFIG });
 		expect(result).toEqual({
 			kind: "success",
 			summary: {
 				goal: "Ship observer",
-				progress: "Config is complete",
+				changed: "Config is complete",
 				current: "Writing tests",
+				verification: "Config tests pass; integration tests not run",
 				next: "Run checks",
-				blockers: "None",
+				attention: "Integration checks pending",
 			},
 		});
 		const context = caller.complete.mock.calls[0]![1];
 		expect(context.tools?.[0]?.name).toBe("submit_progress");
 		expect(context.systemPrompt).toContain("Do not claim access to hidden reasoning");
-		expect(context.systemPrompt).toContain("never state what did not happen");
-		expect(context.systemPrompt).toContain("Never hedge");
+		expect(context.systemPrompt).toContain("Explicit uncertainty and negative facts are useful");
+		expect(context.systemPrompt).toContain("Missing context is not proof a check never ran");
+		expect(context.systemPrompt).toContain("Never promote a plan");
 	});
 
 	it("omits next instead of forcing an invented step", async () => {
@@ -175,14 +267,18 @@ describe("observer model call", () => {
 		});
 		expect(result).toEqual({
 			kind: "success",
-			summary: { goal: "Ship observer", progress: "Config is complete", current: "Writing tests" },
+			summary: {
+				goal: "Ship observer",
+				changed: "Config is complete",
+				current: "Writing tests",
+				verification: "Config tests pass; integration tests not run",
+			},
 		});
-		expect(result.kind === "success" && "next" in result.summary).toBe(false);
 	});
 
-	it("still requires goal, progress, and current", async () => {
+	it("requires the user goal", async () => {
 		const response = summaryCall();
-		delete response.content[0]!.arguments.current;
+		delete response.content[0]!.arguments.goal;
 		const result = await observe({
 			caller: { complete: vi.fn<Complete>().mockResolvedValue(response) },
 			model,
@@ -190,6 +286,18 @@ describe("observer model call", () => {
 			config: DEFAULT_CONFIG,
 		});
 		expect(result).toMatchObject({ kind: "error", cause: "malformed" });
+	});
+
+	it("accepts a goal without inventing activity, changes, or checks", async () => {
+		const response = summaryCall();
+		response.content[0]!.arguments = { goal: "Investigate reload notifications" };
+		const result = await observe({
+			caller: { complete: vi.fn<Complete>().mockResolvedValue(response) },
+			model,
+			prompt: "record",
+			config: DEFAULT_CONFIG,
+		});
+		expect(result).toEqual({ kind: "success", summary: { goal: "Investigate reload notifications" } });
 	});
 
 	it("does not dispatch an already cancelled observation", async () => {
@@ -258,7 +366,7 @@ describe("observer model call", () => {
 		const result = await observe({
 			caller: { complete: vi.fn<Complete>().mockResolvedValue({ ...summaryCall(), content: [] }) },
 			model,
-			prompt: "evidence",
+			prompt: "record",
 			config: DEFAULT_CONFIG,
 		});
 		expect(result).toMatchObject({ kind: "error", cause: "malformed" });

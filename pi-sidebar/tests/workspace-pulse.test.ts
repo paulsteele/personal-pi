@@ -1,4 +1,5 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { runFixtureGit } from "../../tests/git-fixture.js";
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, watch, writeFileSync } from "node:fs";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
@@ -282,19 +283,9 @@ describe("inspectWorkspacePulse", () => {
 			for (const [index, file] of trackedFiles.entries()) {
 				writeFileSync(file, `${index}\n`);
 			}
-			const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
-			git("init", "--quiet");
-			git("add", "--all");
-			git(
-				"-c",
-				"user.email=pulse@example.com",
-				"-c",
-				"user.name=pulse",
-				"commit",
-				"--quiet",
-				"-m",
-				"initial",
-			);
+			await runFixtureGit(repo, ["init", "--quiet"]);
+			await runFixtureGit(repo, ["add", "--all"]);
+			await runFixtureGit(repo, ["commit", "--quiet", "-m", "initial"]);
 			const unchangedContentWithOldTimestamp = 1_000_000_000;
 			for (const file of trackedFiles) {
 				utimesSync(file, unchangedContentWithOldTimestamp, unchangedContentWithOldTimestamp);

@@ -29,9 +29,9 @@ describe("observer event protocol", () => {
 		const publisher = createObserverPublisher(events);
 		const received: unknown[] = [];
 		events.on(PROGRESS_OBSERVER_STATE_CHANNEL, (state) => received.push(state));
-		const snapshot = { version: 1 as const, phase: "waiting" as const, modelId: "provider/model" };
+		const snapshot = { version: 2 as const, phase: "waiting" as const, modelId: "provider/model" };
 		publisher.update(snapshot);
-		events.emit(PROGRESS_OBSERVER_DISCOVER_CHANNEL, { version: 1 });
+		events.emit(PROGRESS_OBSERVER_DISCOVER_CHANNEL, { version: 2 });
 		expect(received).toEqual([snapshot, snapshot]);
 		publisher.dispose();
 		expect(events.count(PROGRESS_OBSERVER_DISCOVER_CHANNEL)).toBe(0);

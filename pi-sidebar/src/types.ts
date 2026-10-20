@@ -12,10 +12,12 @@ export type ProgressObserverPhase = "waiting" | "observing" | "ready" | "error" 
 
 export interface ProgressObserverSummary {
 	goal: string;
-	progress: string;
-	current: string;
+	current?: string;
+	changed?: string;
+	approach?: string;
+	verification?: string;
+	attention?: string;
 	next?: string;
-	blockers?: string;
 }
 
 export interface ProgressObserverSnapshot {

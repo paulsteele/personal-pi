@@ -258,11 +258,14 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 	}
 
 	function progressObserverSnapshot(raw: unknown): ProgressObserverSnapshot | undefined {
-		if (typeof raw !== "object" || raw === null) return undefined;
+		if (typeof raw !== "object" || raw === null) {
+			return undefined;
+		}
 		const value = raw as Record<string, unknown>;
 		const phases = new Set(["waiting", "observing", "ready", "error", "disabled", "unavailable"]);
-		if (value.version !== 1 || !phases.has(String(value.phase)) || typeof value.modelId !== "string")
+		if (value.version !== 2 || !phases.has(String(value.phase)) || typeof value.modelId !== "string") {
 			return undefined;
+		}
 		const clean = (text: unknown, max = 500): string | undefined =>
 			typeof text === "string"
 				? text
@@ -275,12 +278,15 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 		if (typeof value.summary === "object" && value.summary !== null) {
 			const item = value.summary as Record<string, unknown>;
 			const goal = clean(item.goal);
-			const progress = clean(item.progress);
-			const current = clean(item.current);
-			const next = clean(item.next);
-			const blockers = clean(item.blockers);
-			if (goal && progress && current)
-				summary = { goal, progress, current, ...(next ? { next } : {}), ...(blockers ? { blockers } : {}) };
+			if (goal) {
+				summary = { goal };
+				for (const key of ["current", "changed", "approach", "verification", "attention", "next"] as const) {
+					const text = clean(item[key]);
+					if (text) {
+						summary[key] = text;
+					}
+				}
+			}
 		}
 		const message = clean(value.message, 300);
 		return {
@@ -720,7 +726,7 @@ export default function sidebarExtension(pi: ExtensionAPI): void {
 				pi.events.on("permissions:decision", trackPermission(permissionFromDecision)),
 			);
 			pi.events.emit("sandbox:discover:v1", {});
-			pi.events.emit("progress-observer:discover", { version: 1 });
+			pi.events.emit("progress-observer:discover", { version: 2 });
 			pi.events.emit("code-quality:activity:discover", {
 				version: 1,
 				sessionId: nextSession.sessionManager.getSessionId(),

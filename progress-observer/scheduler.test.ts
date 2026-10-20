@@ -5,7 +5,7 @@ import type { ObserverSnapshot } from "./events.js";
 import { DEFAULT_CONFIG } from "./config.js";
 import { createObserverScheduler } from "./scheduler.js";
 
-const summary = { goal: "Goal", progress: "Done", current: "Now", next: "Next" };
+const summary = { goal: "Goal", changed: "Done", current: "Now", next: "Next" };
 
 function progressResponse(model: Model<Api>): AssistantMessage {
 	return {
@@ -65,6 +65,87 @@ describe("observer scheduler", () => {
 		scheduler.turnEnded(nextRevision());
 		await flush();
 		expect(run).toHaveBeenCalledTimes(3);
+	});
+
+	it("debounces milestones and carries the successfully observed boundary", async () => {
+		vi.useFakeTimers();
+		const run = vi.fn().mockResolvedValue({ kind: "success", summary, entryId: "r3" });
+		const scheduler = createObserverScheduler({
+			config: DEFAULT_CONFIG,
+			modelId: "model",
+			onState: () => undefined,
+			run,
+		});
+		scheduler.milestone("r1");
+		await vi.advanceTimersByTimeAsync(500);
+		scheduler.milestone("r3");
+		await vi.advanceTimersByTimeAsync(749);
+		expect(run).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
+		expect(run).toHaveBeenCalledTimes(1);
+		scheduler.milestone("r3");
+		await vi.advanceTimersByTimeAsync(750);
+		expect(run).toHaveBeenCalledTimes(1);
+		scheduler.milestone("r4");
+		await vi.advanceTimersByTimeAsync(750);
+		expect(run.mock.calls[1]![1]).toEqual({ summary, entryId: "r3" });
+		scheduler.dispose();
+	});
+
+	const cancelPendingMilestoneScenarios = [
+		{ name: "reset", cancel: (scheduler: ReturnType<typeof createObserverScheduler>) => scheduler.reset() },
+		{
+			name: "dispose",
+			cancel: (scheduler: ReturnType<typeof createObserverScheduler>) => scheduler.dispose(),
+		},
+		{
+			name: "disable",
+			cancel: (scheduler: ReturnType<typeof createObserverScheduler>) => scheduler.setEnabled(false),
+		},
+		{
+			name: "mark unavailable",
+			cancel: (scheduler: ReturnType<typeof createObserverScheduler>) =>
+				scheduler.setUnavailable("Missing model"),
+		},
+	];
+
+	it.each(cancelPendingMilestoneScenarios)("cancels a pending milestone when $name", async ({ cancel }) => {
+		vi.useFakeTimers();
+		const run = vi.fn().mockResolvedValue({ kind: "success", summary });
+		const scheduler = createObserverScheduler({
+			config: DEFAULT_CONFIG,
+			modelId: "model",
+			onState: () => undefined,
+			run,
+		});
+		scheduler.milestone("r1");
+		cancel(scheduler);
+		await vi.advanceTimersByTimeAsync(750);
+		expect(run).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("retains the last successful timestamp when an update fails", async () => {
+		let time = 1000;
+		const states: ObserverSnapshot[] = [];
+		const run = vi
+			.fn()
+			.mockResolvedValueOnce({ kind: "success", summary })
+			.mockResolvedValueOnce({ kind: "error", message: "failed" });
+		const scheduler = createObserverScheduler({
+			config: { ...DEFAULT_CONFIG, turnInterval: 1 },
+			modelId: "model",
+			onState: (state) => states.push(state),
+			run,
+			now: () => time,
+		});
+		scheduler.turnEnded("r1");
+		await flush();
+		time = 2000;
+		scheduler.turnEnded("r2");
+		await flush();
+		expect(states.at(-1)).toMatchObject({ phase: "error", stale: true, updatedAt: 1000 });
+		scheduler.dispose();
 	});
 
 	it("skips a due refresh when session activity has not changed", async () => {

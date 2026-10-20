@@ -1,9 +1,7 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, realpath, rm, symlink } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { promisify } from "node:util";
 import { afterEach, expect, it } from "vitest";
 import {
 	projectIdentity,
@@ -13,7 +11,7 @@ import {
 	type GitLocationRunner,
 } from "./index.js";
 
-const execute = promisify(execFile);
+import { runFixtureGit } from "../tests/git-fixture.js";
 const directories: string[] = [];
 
 afterEach(async () => {
@@ -30,22 +28,12 @@ async function projectFixture() {
 }
 
 async function git(cwd: string, ...args: string[]): Promise<void> {
-	await execute("git", args, { cwd, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1" } });
+	await runFixtureGit(cwd, args);
 }
 
 async function initializeRepository(root: string): Promise<void> {
 	await git(root, "init", "-q");
-	await git(
-		root,
-		"-c",
-		"user.email=test@example.com",
-		"-c",
-		"user.name=Test",
-		"commit",
-		"--allow-empty",
-		"-qm",
-		"initial",
-	);
+	await git(root, "commit", "--allow-empty", "-qm", "initial");
 }
 
 it("shares the canonical common-directory identity across linked worktrees, not clones", async () => {
@@ -67,6 +55,53 @@ it("shares the canonical common-directory identity across linked worktrees, not 
 	expect(cloned.root).toBe(clone);
 });
 
+it("creates worktrees and clones without inheriting developer Git identity, hooks, or signing", async () => {
+	const { directory, root } = await projectFixture();
+	const hooks = join(directory, "hooks");
+	await mkdir(hooks);
+	const postCheckout = join(hooks, "post-checkout");
+	await writeFile(postCheckout, "#!/bin/sh\nexit 88\n");
+	await chmod(postCheckout, 0o700);
+	await writeFile(
+		join(directory, ".gitconfig"),
+		[
+			"[user]",
+			"\tuseConfigOnly = true",
+			"[commit]",
+			"\tgpgsign = true",
+			"[core]",
+			`\thooksPath = ${JSON.stringify(hooks)}`,
+			"[init]",
+			"\tdefaultBranch = developer-branch",
+		].join("\n"),
+	);
+	const environment = {
+		...process.env,
+		HOME: directory,
+		XDG_CONFIG_HOME: directory,
+		GIT_DIR: join(directory, "wrong-repository"),
+		GIT_WORK_TREE: join(directory, "wrong-checkout"),
+		GIT_INDEX_FILE: join(directory, "wrong-index"),
+		GIT_AUTHOR_NAME: "Developer",
+		GIT_CONFIG_COUNT: "1",
+		GIT_CONFIG_KEY_0: "core.hooksPath",
+		GIT_CONFIG_VALUE_0: hooks,
+	};
+	const worktree = join(directory, "linked");
+	const clone = join(directory, "clone");
+	await runFixtureGit(root, ["init", "--quiet"], { environment });
+	await runFixtureGit(root, ["commit", "--allow-empty", "-qm", "initial"], { environment });
+	await runFixtureGit(root, ["worktree", "add", "--detach", worktree], { environment });
+	await runFixtureGit(directory, ["clone", "--local", root, clone], { environment });
+	expect(await runFixtureGit(root, ["log", "-1", "--format=%an <%ae>"], { environment })).toBe(
+		"Test <test@example.invalid>\n",
+	);
+	expect(await runFixtureGit(root, ["branch", "--show-current"], { environment })).toBe("main\n");
+	const main = await resolveGitRepository(root);
+	expect((await resolveGitRepository(worktree)).id).toBe(main.id);
+	expect((await resolveGitRepository(clone)).id).not.toBe(main.id);
+});
+
 it("resolves a symlinked startup subdirectory without changing the checkout identity", async () => {
 	const { directory, root } = await projectFixture();
 	await initializeRepository(root);
@@ -83,7 +118,7 @@ it("runs discovery through the supplied hardened Git runner at canonical paths",
 	const calls: { cwd: string; args: string[] }[] = [];
 	const runner: GitLocationRunner = async (cwd, args) => {
 		calls.push({ cwd, args });
-		return (await execute("git", args, { cwd })).stdout;
+		return runFixtureGit(cwd, args);
 	};
 	const repository = await resolveGitRepository(join(root, "src"), { git: runner });
 	expect(calls).toEqual([

@@ -906,7 +906,7 @@ describe("legacy two-region compositor migration fixtures", () => {
 		expect(sidebarRegionHeights(20)).toEqual({ progress: 9, separator: 1, activity: 10 });
 	});
 
-	it("renders inferred progress fields in the upper half without a heading", () => {
+	it("pins the goal and prioritizes attention in the supervision brief", () => {
 		const observed = {
 			...snapshot(),
 			progressObserver: {
@@ -914,22 +914,29 @@ describe("legacy two-region compositor migration fixtures", () => {
 				modelId: "litellm/luna",
 				summary: {
 					goal: "Deliver observer",
-					progress: "Config complete",
+					changed: "Config complete",
 					current: "Building UI",
+					approach: "Keep observer passive",
+					verification: "Unit tests pass",
 					next: "Verify tests",
-					blockers: "None",
+					attention: "Manual check pending",
 				},
 			},
 		};
 		const rows = contentRows(renderSidebarLines(observed, theme, 44, 20, false));
 		expect(rows.slice(0, 9).join(" ")).toContain("Goal Deliver observer");
-		expect(rows.slice(0, 9).join(" ")).toContain("Done Config complete");
+		expect(rows.slice(0, 9).join(" ")).toContain("Changed Config complete");
 		expect(rows.slice(0, 9).join(" ")).toContain("Next Verify tests");
 		expect(rows[0]?.trim()).toBe("Summary · litellm/luna");
-		expect(rows.indexOf("Now Building UI")).toBeLessThan(rows.indexOf("Next Verify tests"));
-		expect(rows.indexOf("Next Verify tests")).toBeLessThan(rows.indexOf("Blockers None"));
-		expect(rows.indexOf("Blockers None")).toBeLessThan(rows.indexOf("Goal Deliver observer"));
-		expect(rows.indexOf("Goal Deliver observer")).toBeLessThan(rows.indexOf("Done Config complete"));
+		expect(rows.indexOf("Goal Deliver observer")).toBeLessThan(
+			rows.indexOf("Attention Manual check pending"),
+		);
+		expect(rows.indexOf("Attention Manual check pending")).toBeLessThan(rows.indexOf("Now Building UI"));
+		expect(rows.indexOf("Now Building UI")).toBeLessThan(rows.indexOf("Changed Config complete"));
+		expect(rows.indexOf("Approach Keep observer passive")).toBeLessThan(
+			rows.indexOf("Verified Unit tests pass"),
+		);
+		expect(rows.indexOf("Verified Unit tests pass")).toBeLessThan(rows.indexOf("Next Verify tests"));
 		expect(rows).not.toContain("PROGRESS");
 		expect(rows).not.toContain("ACTIVITY");
 		expect(rows.findIndex((row) => row.includes("READY · ┃ 󰄋 ┃"))).toBe(11);
@@ -943,7 +950,7 @@ describe("legacy two-region compositor migration fixtures", () => {
 				modelId: "litellm/luna",
 				summary: {
 					goal: "Deliver observer",
-					progress: "Config complete",
+					changed: "Config complete",
 					current: "Building UI",
 				},
 			},
@@ -951,7 +958,7 @@ describe("legacy two-region compositor migration fixtures", () => {
 		const rows = contentRows(renderSidebarLines(observed, theme, 44, 20, false));
 		expect(rows).toContain("Now Building UI");
 		expect(rows.some((row) => row.startsWith("Next"))).toBe(false);
-		expect(rows.indexOf("Now Building UI")).toBeLessThan(rows.indexOf("Goal Deliver observer"));
+		expect(rows.indexOf("Goal Deliver observer")).toBeLessThan(rows.indexOf("Now Building UI"));
 	});
 
 	it("wraps long progress values instead of clipping them at the pane edge", () => {
@@ -962,7 +969,7 @@ describe("legacy two-region compositor migration fixtures", () => {
 				modelId: "litellm/luna",
 				summary: {
 					goal: "Implement a progress observer whose long summaries remain fully readable in narrow terminals",
-					progress: "Configuration and scheduling are complete",
+					changed: "Configuration and scheduling are complete",
 					current: "Wrapping every field while preserving semantic colors",
 					next: "Verify the complete sentence appears across continuation lines",
 				},

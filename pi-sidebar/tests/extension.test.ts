@@ -1069,17 +1069,17 @@ describe("extension registration", () => {
 	it("discovers and renders bounded progress-observer state through the event seam", async () => {
 		const h = harness();
 		await start(h);
-		expect(h.pi.events.emit).toHaveBeenCalledWith("progress-observer:discover", { version: 1 });
+		expect(h.pi.events.emit).toHaveBeenCalledWith("progress-observer:discover", { version: 2 });
 		h.pi.events.emit("progress-observer:state", {
-			version: 1,
+			version: 2,
 			phase: "ready",
 			modelId: "litellm/luna",
 			summary: {
 				goal: "Ship progress UI",
-				progress: "Observer connected",
+				changed: "Observer connected",
 				current: "Rendering the split",
 				next: "Run tests",
-				blockers: "None",
+				verification: "Unit tests pass; manual check pending",
 			},
 		});
 		await command(h, "summary");
@@ -1088,7 +1088,7 @@ describe("extension registration", () => {
 		expect(text).toContain("Ship progress UI");
 		expect(text).not.toContain("ACTIVITY");
 
-		h.pi.events.emit("progress-observer:state", { version: 2, phase: "ready", modelId: "bad" });
+		h.pi.events.emit("progress-observer:state", { version: 1, phase: "ready", modelId: "bad" });
 		expect(renderOverlayText(h)).toContain("Ship progress UI");
 		await h.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, h.ctx);
 		expect(h.getEventBusHandlerCount("progress-observer:state")).toBe(0);
