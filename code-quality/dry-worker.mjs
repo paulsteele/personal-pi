@@ -346,7 +346,14 @@ async function stageSource(options, indexed, bytes, windows) {
 	await writeFile(staged, bytes, { mode: 0o600 });
 	await privateJson(join(options.directory, "index", `${indexed.path}.json`), { ...indexed, windows });
 }
-const STAGED_ARTIFACTS = ["sources", "index", "manifest.json", "capture-state.json", "report.json"];
+const STAGED_ARTIFACTS = [
+	"sources",
+	"index",
+	"exports",
+	"manifest.json",
+	"capture-state.json",
+	"report.json",
+];
 function fileStat(metadata) {
 	return { size: metadata.size, mtimeMs: metadata.mtimeMs };
 }
@@ -590,50 +597,6 @@ export async function worker(options) {
 			windows: [],
 		};
 		return { file, ...(await queryBaseline({ ...options, format })) };
-	}
-	if (options.operation === "index") {
-		const manifest = JSON.parse(await readFile(join(options.directory, "manifest.json"), "utf8"));
-		const requestedPaths = options.paths === undefined ? undefined : new Set(options.paths);
-		const sources = requestedPaths
-			? manifest.files.filter((file) => requestedPaths.has(file.path))
-			: manifest.files;
-		const files = [];
-		let next = options.offset ?? 0;
-		let bytes = 0;
-		while (next < sources.length) {
-			const source = sources[next];
-			if (!safeRelative(source.path)) {
-				throw new Error("Invalid DRY index path");
-			}
-			const file = JSON.parse(
-				await readFile(join(options.directory, "index", `${source.path}.json`), "utf8"),
-			);
-			const size = Buffer.byteLength(JSON.stringify(file));
-			if (size > SHARD_BYTES / 2) {
-				throw new Error("DRY lexical file exceeds export shard budget");
-			}
-			if (files.length && bytes + size > SHARD_BYTES / 2) {
-				break;
-			}
-			files.push(file);
-			bytes += size;
-			next++;
-		}
-		return { files, next: next < sources.length ? next : null };
-	}
-	if (options.operation === "manifest") {
-		return JSON.parse(await readFile(join(options.directory, "manifest.json"), "utf8"));
-	}
-	if (options.operation === "report") {
-		const bytes = await readFile(join(options.directory, "report.json"));
-		const offset = options.offset ?? 0;
-		if (!Number.isInteger(offset) || offset < 0 || offset > bytes.length) {
-			throw new Error("Invalid DRY export offset");
-		}
-		return {
-			totalBytes: bytes.length,
-			content: bytes.subarray(offset, offset + SHARD_BYTES / 2).toString("base64"),
-		};
 	}
 	if (options.operation === "evidence") {
 		const full = join(options.directory, "sources", options.path);

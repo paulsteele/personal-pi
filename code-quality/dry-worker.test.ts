@@ -227,9 +227,8 @@ it("restages only edited files and removes deleted ones when updating a capture"
 	await expect(readFile(join(h.options.directory, "sources", "deleted.ts"))).rejects.toThrow();
 	await expect(readFile(join(h.options.directory, "index", "deleted.ts.json"))).rejects.toThrow();
 
-	const page = await worker.worker({ ...h.options, operation: "index", paths: ["edited.ts"] });
-	expect(page.files.map((file: { path: string }) => file.path)).toEqual(["edited.ts"]);
-	expect(page.next).toBeNull();
+	const indexed = JSON.parse(await readFile(join(h.options.directory, "index", "edited.ts.json"), "utf8"));
+	expect(indexed.path).toBe("edited.ts");
 });
 it("updates a served baseline in place and rescans only when sources changed", async () => {
 	const h = await fixture();
@@ -242,9 +241,10 @@ it("updates a served baseline in place and rescans only when sources changed", a
 	workerProcess.stdin.end(JSON.stringify({ ...h.options, executable, operation: "serve" }));
 	try {
 		await mcp.queryBaseline({ ...h.options, operation: "baseline" });
-		const initialManifest = await worker.worker({ ...h.options, operation: "manifest" });
+		const initialManifest = JSON.parse(await readFile(join(h.options.directory, "manifest.json"), "utf8"));
 		const unchanged = await worker.worker({ ...h.options, operation: "update" });
-		expect(unchanged).toEqual({ revision: initialManifest.revision, changed: [], removed: [] });
+		expect(unchanged).toMatchObject({ revision: initialManifest.revision, changed: [], removed: [] });
+		expect(unchanged.export).toBeUndefined();
 		expect(await readFile(join(h.options.directory, "launches"), "utf8")).toBe("scan\n");
 
 		await writeFile(join(h.repo, "existing.ts"), "const retentionDays = 60;");

@@ -25,11 +25,33 @@ import {
 	type DryReport,
 	type DryStatus,
 } from "./dry-types.js";
-import { isIndexedFile, isManifest, isReport } from "./dry-worker-schema.js";
+import { isIndexedFile } from "./dry-worker-schema.js";
+import { readBaselineExport, type DryExportResult } from "./dry-export-reader.js";
+import { DryBaselineDeadline } from "./dry-baseline-deadline.js";
+import type { DryBaselineExport } from "./dry-export.mjs";
 import { digest } from "./proposal.js";
 import { qualitySandbox, readGuestSnapshot, type QualitySandbox } from "./sandbox.js";
 
-const MAX_REPORT_BYTES = 128 * 1024 * 1024;
+interface GuestBaselineTimings {
+	captureMs: number;
+	detectorMs: number;
+	exportPreparationMs: number;
+}
+interface BaselineReady {
+	export: DryBaselineExport;
+	timings: GuestBaselineTimings;
+}
+interface BaselineUpdate {
+	revision: string;
+	changed: string[];
+	removed: string[];
+	export?: DryBaselineExport;
+	timings: GuestBaselineTimings;
+}
+const GUEST_BASELINE_PHASES = ["capture", "detector", "export preparation"] as const;
+function isGuestBaselinePhase(value: unknown): value is (typeof GUEST_BASELINE_PHASES)[number] {
+	return GUEST_BASELINE_PHASES.some((phase) => phase === value);
+}
 const AST_FORMATS = [
 	"javascript",
 	"typescript",
@@ -95,7 +117,7 @@ export class SandboxDryManager {
 	}
 	get configRevision(): string {
 		return digest(
-			JSON.stringify([this.profile, this.config?.maxFileBytes, this.executable, "turn-baseline-v1"]),
+			JSON.stringify([this.profile, this.config?.maxFileBytes, this.executable, "sharded-baseline-v2"]),
 		);
 	}
 	get generationId(): string {
@@ -163,6 +185,7 @@ export class SandboxDryManager {
 				"dry-suspects.mjs",
 				"source-disclosure.mjs",
 				"dry-lexical.mjs",
+				"dry-export.mjs",
 			];
 			for (const name of guestModules) {
 				await sandbox.session.filesystem.write(
@@ -198,6 +221,7 @@ export class SandboxDryManager {
 		operation: string,
 		parameters: Record<string, unknown>,
 		signal: AbortSignal,
+		timeoutMs = this.config?.dryScanTimeoutMs,
 	): Promise<T> {
 		const sandbox = this.sandbox;
 		const generation = this.generation;
@@ -227,7 +251,7 @@ export class SandboxDryManager {
 					profile: this.profile,
 					supported: this.formats,
 					maxFileBytes: this.config.maxFileBytes,
-					timeoutMs: this.config.dryScanTimeoutMs,
+					timeoutMs,
 					excludedNames: [...EXCLUDED_FILENAMES],
 					generatedSuffixes: GENERATED_SUFFIXES,
 					authorized: this.authorizedPaths,
@@ -235,7 +259,7 @@ export class SandboxDryManager {
 				}),
 			),
 			signal: AbortSignal.any([signal, this.lifetime.signal]),
-			timeoutMs: operation === "serve" ? undefined : this.config.dryScanTimeoutMs,
+			timeoutMs: operation === "serve" ? undefined : timeoutMs,
 		});
 		if (result.code !== 0) {
 			throw new Error(`DRY worker failed: ${result.stderr}`);
@@ -258,20 +282,36 @@ export class SandboxDryManager {
 		const previous = this.baselineOperation;
 		const operation = (async () => {
 			await previous?.catch(() => {});
-			this.lifetime.signal.throwIfAborted();
-			signal.throwIfAborted();
-			if (mode === "incremental" && (await this.serverReusable(signal))) {
-				try {
-					await this.updateBaseline(signal);
-					return;
-				} catch (error) {
-					if (signal.aborted || this.lifetime.signal.aborted) {
-						throw error;
+			const deadline = new DryBaselineDeadline(
+				this.config!.dryScanTimeoutMs,
+				AbortSignal.any([signal, this.lifetime.signal]),
+			);
+			try {
+				if (mode === "incremental" && (await deadline.wait(this.serverReusable(deadline.signal)))) {
+					try {
+						await this.updateBaseline(deadline);
+						return;
+					} catch (error) {
+						if (deadline.signal.aborted) {
+							throw error;
+						}
 					}
 				}
+				deadline.phase = "server retirement";
+				await deadline.wait(this.retireServer());
+				await this.buildBaseline(deadline);
+			} catch (error) {
+				this.serverAbort?.abort();
+				const failure = this.describeBaselineFailure(
+					deadline.signal.aborted ? deadline.signal.reason : error,
+				);
+				if (!this.lifetime.signal.aborted) {
+					this.publish({ scanPhase: "unavailable", reason: failure.message, baselinePhase: deadline.phase });
+				}
+				throw failure;
+			} finally {
+				deadline.close();
 			}
-			await this.retireServer();
-			await this.buildBaseline(signal);
 		})();
 		this.baselineOperation = operation;
 		operation.catch(() => {});
@@ -286,22 +326,33 @@ export class SandboxDryManager {
 			(await this.current(signal))
 		);
 	}
-	private async updateBaseline(signal: AbortSignal): Promise<void> {
-		const update = await this.request<{ revision: string; changed: string[]; removed: string[] }>(
-			"update",
-			{},
-			signal,
-		);
+	private async updateBaseline(deadline: DryBaselineDeadline): Promise<void> {
+		const signal = deadline.signal;
+		const update = await this.awaitGuestBaseline<BaselineUpdate>("update", deadline);
+		this.assertArtifactOwner(this.sandbox!, signal);
 		if (update.revision === this.manifest?.revision) {
-			this.publish({ lastScanAt: Date.now() });
+			const baselineDurationMs = performance.now() - deadline.startedAt;
+			const baselineTimings = { ...update.timings, transferValidationMs: 0 };
+			this.publish({
+				scanPhase: "ready",
+				baselinePhase: undefined,
+				lastScanAt: Date.now(),
+				baselineDurationMs,
+				baselineTimings,
+				indexBytes: 0,
+				indexShards: 0,
+			});
 			return;
 		}
-		const manifest = await this.exportManifest(signal);
-		const report = await this.exportReport(signal);
-		if (report.manifestRevision !== manifest.revision || manifest.revision !== update.revision) {
-			throw new Error("DRY report does not match the updated manifest");
+		const exported = await this.loadBaselineExport(update.export, deadline);
+		const { manifest, report, files: restaged } = exported;
+		if (
+			manifest.revision !== update.revision ||
+			restaged.length !== update.changed.length ||
+			restaged.some((file) => !update.changed.includes(file.path))
+		) {
+			throw new Error("DRY export does not match the updated paths/revision");
 		}
-		const restaged = await this.exportIndex(signal, update.changed);
 		const filesByPath = new Map(this.files.map((file) => [file.path, file]));
 		for (const path of update.removed) {
 			filesByPath.delete(path);
@@ -315,36 +366,114 @@ export class SandboxDryManager {
 		}
 		signal.throwIfAborted();
 		this.acceptBaseline(manifest, report, files as DryIndexedFile[]);
+		this.publishBaselineMetrics(exported, update.timings, deadline);
 	}
-	private async exportManifest(signal: AbortSignal): Promise<DryManifest> {
-		const manifest = await this.request<DryManifest>("manifest", {}, signal);
-		if (!isManifest(manifest)) {
-			throw new Error("Invalid DRY manifest");
+	private assertArtifactOwner(sandbox: QualitySandbox, signal: AbortSignal): void {
+		signal.throwIfAborted();
+		if (
+			this.sandbox !== sandbox ||
+			this.generation !== `${sandbox.sessionId}:${sandbox.session.generation}` ||
+			this.lifetime.signal.aborted ||
+			this.serverExited
+		) {
+			throw new Error("DRY artifact belongs to a retired sandbox/worker");
 		}
-		return manifest;
 	}
-	/** Pages lexical index files out of the guest, limited to `paths` when given. */
-	private async exportIndex(signal: AbortSignal, paths?: string[]): Promise<DryIndexedFile[]> {
-		const files: DryIndexedFile[] = [];
-		if (paths?.length === 0) {
-			return files;
+	private async readPrivateArtifact(path: string, maxBytes: number, signal: AbortSignal): Promise<Buffer> {
+		const sandbox = this.sandbox!;
+		this.assertArtifactOwner(sandbox, signal);
+		const stat = await sandbox.session.filesystem.stat(path, signal);
+		if (!stat.file || stat.size > maxBytes) {
+			throw new Error(`DRY artifact exceeds its bounded read: ${path}`);
 		}
-		let offset: number | null = 0;
-		while (offset !== null) {
-			const page: { files: DryIndexedFile[]; next: number | null } = await this.request(
-				"index",
-				{ offset, ...(paths ? { paths } : {}) },
-				signal,
-			);
-			for (const file of page.files) {
-				if (!isIndexedFile(file)) {
-					throw new Error("Invalid DRY lexical file");
+		const bytes = await sandbox.session.filesystem.read(path, signal);
+		this.assertArtifactOwner(sandbox, signal);
+		if (bytes.length > maxBytes) {
+			throw new Error(`DRY artifact exceeds its bounded read: ${path}`);
+		}
+		return bytes;
+	}
+	private async awaitGuestBaseline<T>(
+		operation: "baseline" | "update",
+		deadline: DryBaselineDeadline,
+	): Promise<T> {
+		deadline.phase = "capture";
+		this.publish({ scanPhase: "scanning", baselinePhase: deadline.phase });
+		let stopped = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const pollPhase = async () => {
+			try {
+				const bytes = await this.readPrivateArtifact(
+					join(this.directory, "phase.json"),
+					1024,
+					deadline.signal,
+				);
+				const value = JSON.parse(bytes.toString("utf8")) as { phase?: string };
+				if (!stopped && isGuestBaselinePhase(value.phase)) {
+					deadline.phase = value.phase;
+					this.publish({ baselinePhase: deadline.phase });
 				}
-				files.push(file);
+			} catch {
+				if (deadline.signal.aborted) {
+					return;
+				}
 			}
-			offset = page.next;
+			if (!stopped && !deadline.signal.aborted) {
+				timer = setTimeout(() => void pollPhase(), 250);
+			}
+		};
+		void pollPhase();
+		try {
+			return await deadline.wait(
+				Promise.race([
+					this.request<T>(operation, {}, deadline.signal, deadline.remainingMs),
+					this.serverOperation!.then(() => {
+						throw new Error("DRY baseline server exited before readiness");
+					}),
+				]),
+			);
+		} finally {
+			stopped = true;
+			clearTimeout(timer);
 		}
-		return files;
+	}
+	private async loadBaselineExport(
+		value: unknown,
+		deadline: DryBaselineDeadline,
+	): Promise<DryExportResult & { transferValidationMs: number }> {
+		const started = performance.now();
+		const result = await deadline.wait(
+			readBaselineExport(
+				this.directory,
+				value,
+				{
+					read: (path, maxBytes, signal) => deadline.wait(this.readPrivateArtifact(path, maxBytes, signal)),
+					phase: (name) => {
+						deadline.phase = name;
+						this.publish({ baselinePhase: name });
+					},
+				},
+				deadline.signal,
+			),
+		);
+		this.assertArtifactOwner(this.sandbox!, deadline.signal);
+		return { ...result, transferValidationMs: performance.now() - started };
+	}
+	private publishBaselineMetrics(
+		exported: DryExportResult & { transferValidationMs: number },
+		timings: GuestBaselineTimings,
+		deadline: DryBaselineDeadline,
+	): void {
+		const baselineDurationMs = performance.now() - deadline.startedAt;
+		const transferValidationMs = exported.transferValidationMs;
+		const baselineTimings = { ...timings, transferValidationMs };
+		this.publish({
+			baselinePhase: undefined,
+			baselineDurationMs,
+			baselineTimings,
+			indexBytes: exported.indexBytes,
+			indexShards: exported.indexShards,
+		});
 	}
 	private acceptBaseline(manifest: DryManifest, report: DryReport, files: DryIndexedFile[]): void {
 		this.manifest = manifest;
@@ -361,10 +490,12 @@ export class SandboxDryManager {
 			cloneCounts: report.cloneCounts,
 			formats: report.formats.slice(0, 32),
 			scanDurationMs: report.scanDurationMs,
+			analyzedFiles: report.analyzedFiles,
 			lastScanAt: Date.now(),
 		});
 	}
-	private async buildBaseline(signal: AbortSignal): Promise<void> {
+	private async buildBaseline(deadline: DryBaselineDeadline): Promise<void> {
+		const signal = deadline.signal;
 		if (!this.sandbox || this.status.toolPhase !== "ready") {
 			throw new Error(this.status.reason ?? "DRY is not initialized");
 		}
@@ -387,20 +518,14 @@ export class SandboxDryManager {
 				}
 			});
 		try {
-			await Promise.race([
-				this.request("baseline", {}, signal),
-				this.serverOperation.then(() => {
-					throw new Error("DRY baseline server exited before readiness");
-				}),
-			]);
-			const manifest = await this.exportManifest(signal);
-			const report = await this.exportReport(signal);
-			if (report.manifestRevision !== manifest.revision) {
-				throw new Error("DRY report does not match the baseline manifest");
+			const ready = await this.awaitGuestBaseline<BaselineReady>("baseline", deadline);
+			const exported = await this.loadBaselineExport(ready.export, deadline);
+			if (exported.files.length !== exported.manifest.files.length) {
+				throw new Error("DRY initial lexical export does not cover the manifest");
 			}
-			const files = await this.exportIndex(signal);
 			signal.throwIfAborted();
-			this.acceptBaseline(manifest, report, files);
+			this.acceptBaseline(exported.manifest, exported.report, exported.files);
+			this.publishBaselineMetrics(exported, ready.timings, deadline);
 		} catch (error) {
 			serverAbort.abort();
 			const failure = this.describeBaselineFailure(error);
@@ -416,33 +541,6 @@ export class SandboxDryManager {
 			return error instanceof Error ? error : new Error(String(error));
 		}
 		return new Error(corpusErrorMessage(corpusError, dryProfilePath(this.agentDir, this.project)));
-	}
-	private async exportReport(signal: AbortSignal): Promise<DryReport> {
-		const chunks: Buffer[] = [];
-		let offset = 0;
-		for (;;) {
-			const page = await this.request<{ content: string; totalBytes: number }>("report", { offset }, signal);
-			if (!Number.isInteger(page.totalBytes) || page.totalBytes < 0 || page.totalBytes > MAX_REPORT_BYTES) {
-				throw new Error("DRY report export declares an invalid size");
-			}
-			const bytes = Buffer.from(page.content, "base64");
-			chunks.push(bytes);
-			offset += bytes.length;
-			if (offset > page.totalBytes) {
-				throw new Error("DRY report export exceeds declared size");
-			}
-			if (offset === page.totalBytes) {
-				break;
-			}
-			if (!bytes.length) {
-				throw new Error("DRY report export made no progress");
-			}
-		}
-		const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-		if (!isReport(value)) {
-			throw new Error("Invalid normalized DRY report");
-		}
-		return value;
 	}
 	async prepare(
 		changed: SnapshotFile[],

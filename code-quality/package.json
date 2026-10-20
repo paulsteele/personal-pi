@@ -1,6 +1,6 @@
 {
 	"name": "@paulsteele/pi-code-quality",
-	"version": "2.13.0",
+	"version": "2.13.1",
 	"private": true,
 	"description": "Isolated post-edit quality gate with human arbitration",
 	"type": "module",
@@ -17,6 +17,8 @@
 		"lsp-sandbox-discovery.py",
 		"dry-worker.mjs",
 		"dry-mcp.mjs",
+		"dry-export.mjs",
+		"dry-export.d.mts",
 		"dry-corpus.mjs",
 		"dry-corpus.d.mts",
 		"dry-suspects.mjs",

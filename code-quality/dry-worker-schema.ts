@@ -1,5 +1,6 @@
 import { Type } from "typebox";
-import { Check } from "typebox/value";
+import { Check, Errors } from "typebox/value";
+import { MAX_LEXICAL_FEATURE_CHARS } from "./dry-lexical.mjs";
 import { DryLineRangeSchema, type DryIndexedFile, type DryManifest, type DryReport } from "./dry-types.js";
 
 const hash = Type.String({ pattern: "^[a-f0-9]{64}$" });
@@ -27,7 +28,7 @@ const IndexedFileSchema = Type.Object(
 			Type.Object(
 				{
 					range: DryLineRangeSchema,
-					features: Type.Array(Type.String({ minLength: 1, maxLength: 240 })),
+					features: Type.Array(Type.String({ minLength: 1, maxLength: MAX_LEXICAL_FEATURE_CHARS })),
 				},
 				{ additionalProperties: false },
 			),
@@ -88,6 +89,15 @@ export function isIndexedFile(value: unknown): value is DryIndexedFile {
 	}
 	const file = value as DryIndexedFile;
 	return file.windows.every((window) => window.range[0] <= window.range[1] && window.range[1] <= file.lines);
+}
+export function assertIndexedFile(value: unknown): asserts value is DryIndexedFile {
+	if (isIndexedFile(value)) {
+		return;
+	}
+	const path = value && typeof value === "object" && "path" in value ? String(value.path) : "<unknown>";
+	const error = Errors(IndexedFileSchema, value)[0];
+	const detail = error ? `${error.instancePath}: ${error.message}` : "window range exceeds source lines";
+	throw new Error(`Invalid DRY lexical file ${path}: ${detail}`);
 }
 export function isReport(value: unknown): value is DryReport {
 	return Check(ReportSchema, value);

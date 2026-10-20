@@ -8,6 +8,20 @@ export function dryStatusText(manager: Pick<SandboxDryManager, "status">): strin
 		`Scan: ${status.scanPhase}; ${status.files} files, ${status.windows} windows, ${status.excluded} excluded`,
 		`Scope: ${status.scope ?? "unresolved"}`,
 	];
+	if (status.baselinePhase) {
+		lines.push(`Baseline phase: ${status.baselinePhase}`);
+	}
+	if (status.analyzedFiles !== undefined) {
+		lines.push(`Detector: ${status.analyzedFiles} analyzed files; ${status.files} lexically indexed files`);
+	}
+	if (status.baselineDurationMs !== undefined && status.baselineTimings) {
+		const seconds = (milliseconds: number) => `${(milliseconds / 1000).toFixed(2)}s`;
+		const timings = status.baselineTimings;
+		lines.push(
+			`Baseline: ${seconds(status.baselineDurationMs)} total; capture ${seconds(timings.captureMs)}, detector ${seconds(timings.detectorMs)}, export preparation ${seconds(timings.exportPreparationMs)}, transfer/validation ${seconds(timings.transferValidationMs)}`,
+		);
+		lines.push(`Last lexical transfer: ${status.indexBytes ?? 0} bytes in ${status.indexShards ?? 0} shards`);
+	}
 	if (status.reason) {
 		lines.push(status.reason);
 	}

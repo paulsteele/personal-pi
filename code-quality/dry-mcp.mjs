@@ -3,6 +3,7 @@ import { createServer, createConnection } from "node:net";
 import { createInterface } from "node:readline";
 import { mkdir, writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
+import { prepareBaselineExport } from "./dry-export.mjs";
 
 const MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
 function isFormatWithoutAstSupport(format) {
@@ -232,6 +233,7 @@ async function writeReport(options, client, manifest, scanStarted) {
 		scanDurationMs: performance.now() - scanStarted,
 	};
 	await writeFile(join(options.directory, "report.json"), JSON.stringify(report), { mode: 0o600 });
+	return report;
 }
 /**
  * Serves one session baseline. `update` requests restage changed sources and rescan in the same
@@ -242,23 +244,55 @@ export async function serveBaseline(options, capture, configure, updateCapture) 
 	let client;
 	let manifest;
 	let queue = Promise.resolve();
+	let baselineExport;
+	const writeBaselinePhase = async (phaseName) => {
+		await writeFile(join(options.directory, "phase.json"), JSON.stringify({ phase: phaseName }), {
+			mode: 0o600,
+		});
+	};
+	const createBaselineTimings = (captureMs) => ({ captureMs, detectorMs: 0, exportPreparationMs: 0 });
+	const publishBaselineExport = async (report, changedPaths, timings) => {
+		await writeBaselinePhase("export preparation");
+		const started = performance.now();
+		baselineExport = await prepareBaselineExport(options, manifest, report, changedPaths);
+		timings.exportPreparationMs = performance.now() - started;
+		await writeBaselinePhase("idle");
+		return { export: baselineExport, timings };
+	};
 	const update = async () => {
+		await writeBaselinePhase("capture");
 		const started = performance.now();
 		const updated = await updateCapture(options);
-		const stagedSourcesChanged = updated.changed.length > 0 || updated.removed.length > 0;
-		if (stagedSourcesChanged) {
+		const timings = createBaselineTimings(performance.now() - started);
+		const revisionChanged = updated.manifest.revision !== manifest.revision;
+		manifest = updated.manifest;
+		const result = {
+			revision: manifest.revision,
+			changed: updated.changed,
+			removed: updated.removed,
+			timings,
+		};
+		if (!revisionChanged) {
+			await writeBaselinePhase("idle");
+			return result;
+		}
+		await writeBaselinePhase("detector");
+		const detectorStarted = performance.now();
+		if (updated.changed.length || updated.removed.length) {
 			await client.call("check_current_directory", { kinds: detectorKinds(options.profile), limit: 0 });
 		}
-		if (stagedSourcesChanged || updated.manifest.revision !== manifest.revision) {
-			await writeReport(options, client, updated.manifest, started);
-		}
-		manifest = updated.manifest;
-		return { revision: manifest.revision, changed: updated.changed, removed: updated.removed };
+		const report = await writeReport(options, client, manifest, detectorStarted);
+		timings.detectorMs = report.scanDurationMs;
+		return { ...result, ...(await publishBaselineExport(report, updated.changed, timings)) };
 	};
 	const baseline = (async () => {
+		await writeBaselinePhase("capture");
+		const captureStarted = performance.now();
 		manifest = await capture(options);
+		const timings = createBaselineTimings(performance.now() - captureStarted);
 		await mkdir(join(options.directory, "sources"), { recursive: true, mode: 0o700 });
 		const configPath = await configure(options);
+		await writeBaselinePhase("detector");
 		const started = performance.now();
 		client = new JscpdClient(
 			options.executable,
@@ -276,8 +310,9 @@ export async function serveBaseline(options, capture, configure, updateCapture) 
 			options.timeoutMs,
 		);
 		await client.initialize();
-		await writeReport(options, client, manifest, started);
-		return { ready: true };
+		const report = await writeReport(options, client, manifest, started);
+		timings.detectorMs = report.scanDurationMs;
+		return { ready: true, ...(await publishBaselineExport(report, undefined, timings)) };
 	})();
 	let resolveBaselineFailureReported;
 	const baselineFailureReported = new Promise((resolve) => {
@@ -308,9 +343,9 @@ export async function serveBaseline(options, capture, configure, updateCapture) 
 			input = "";
 			const operation = queue.then(async () => {
 				const request = JSON.parse(message);
-				await baseline;
+				const ready = await baseline;
 				if (request.operation === "baseline") {
-					return { ready: true };
+					return { ...ready, export: baselineExport };
 				}
 				if (request.operation === "update") {
 					return update();

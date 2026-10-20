@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.13.1 — 2026-10-20
+
+- Share a 160-character lexical-feature/evidence contract and represent oversized values with full-value SHA-256 digests. Report malformed lexical output with its source path and validation location.
+- Prepare revision-scoped export shards in the persistent DRY worker and transfer them through the existing sandbox filesystem service instead of launching a worker per page. Allow lexical files to span bounded shards and validate sizes, hashes, revisions, and metadata before readiness.
+- Bound the entire baseline build/update with one deadline. Show baseline phase timings, total readiness duration, lexical transfer bytes/shards, and separate detector-analyzed and lexically indexed file counts in DRY status.
+- Preserve unchanged-turn and changed/deleted-file incremental behavior; add regressions for exports over 16 MiB, oversized lexical files, cancellation, retired generations, malformed output, and transfer deadlines.
+
 ## 2.13.0 — 2026-10-20
 
 - Keep failed DRY baseline servers available until an error reply is flushed, retirement is requested, or the request deadline expires. Prevent startup failures from racing socket teardown.

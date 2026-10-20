@@ -1,14 +1,15 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, readFile, writeFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { SandboxDryManager } from "./dry-sandbox-manager.js";
-import type { DryIndexedFile, DryManifest } from "./dry-types.js";
+import type { DryIndexedFile, DryManifest, DryReport } from "./dry-types.js";
 import { DEFAULT_CONFIG } from "./config.js";
 import { lexicalWindows } from "./dry-lexical.mjs";
 import { corpusError } from "./dry-corpus.mjs";
 import { dryProfilePath } from "./dry-profile.js";
+import { prepareBaselineExport } from "./dry-export.mjs";
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -30,7 +31,10 @@ function indexedFile(path: string, text: string): DryIndexedFile {
 		suppressed: false,
 	};
 }
-async function fixture(baselineSources: Record<string, string> = {}) {
+async function fixture(
+	baselineSources: Record<string, string> = {},
+	baselineBudgetMs = DEFAULT_CONFIG.dryScanTimeoutMs,
+) {
 	const directory = await mkdtemp(join(tmpdir(), "dry-manager-"));
 	directories.push(directory);
 	const root = join(directory, "repo");
@@ -46,7 +50,7 @@ async function fixture(baselineSources: Record<string, string> = {}) {
 		bytes: 0,
 		suspects: [] as DryManifest["suspects"],
 	};
-	const report = {
+	const report: DryReport = {
 		version: 1,
 		manifestRevision: "",
 		cloneCounts: { exact: 0, renamed: 0, gap: 0, ast: 0 },
@@ -54,7 +58,8 @@ async function fixture(baselineSources: Record<string, string> = {}) {
 		formats: [{ name: "typescript", files: 0 }],
 		scanDurationMs: 1,
 	};
-	const stageGuestCorpus = () => {
+	const stageGuestCorpus = async (guestDirectory: string, isInitialBaseline: boolean) => {
+		const previousRevision = manifest.revision;
 		const previousHashes = new Map(manifest.files.map((file) => [file.path, file.hash]));
 		files = [...guestCorpus].map(([path, text]) => indexedFile(path, text));
 		manifest.files = files.map(({ windows: _windows, ...metadata }) => metadata);
@@ -63,11 +68,28 @@ async function fixture(baselineSources: Record<string, string> = {}) {
 		report.manifestRevision = manifest.revision;
 		report.analyzedFiles = files.length;
 		report.formats[0]!.files = files.length;
-		return {
-			revision: manifest.revision,
-			changed: files.filter((file) => previousHashes.get(file.path) !== file.hash).map((file) => file.path),
-			removed: [...previousHashes.keys()].filter((path) => !guestCorpus.has(path)),
-		};
+		const changed = files
+			.filter((file) => previousHashes.get(file.path) !== file.hash)
+			.map((file) => file.path);
+		const removed = [...previousHashes.keys()].filter((path) => !guestCorpus.has(path));
+		const timings = { captureMs: 1, detectorMs: 1, exportPreparationMs: 1 };
+		if (!isInitialBaseline && previousRevision === manifest.revision) {
+			return { revision: manifest.revision, changed, removed, timings };
+		}
+		for (const file of files) {
+			const path = join(guestDirectory, "index", `${file.path}.json`);
+			await mkdir(join(path, ".."), { recursive: true });
+			await writeFile(path, JSON.stringify(file));
+		}
+		const exportedPaths = isInitialBaseline ? undefined : changed;
+		indexRequests.push(exportedPaths);
+		const exported = await prepareBaselineExport(
+			{ directory: guestDirectory },
+			manifest,
+			report,
+			exportedPaths,
+		);
+		return { revision: manifest.revision, changed, removed, timings, export: exported };
 	};
 	const indexRequests: Array<string[] | undefined> = [];
 	const operations: string[] = [];
@@ -75,6 +97,9 @@ async function fixture(baselineSources: Record<string, string> = {}) {
 	let generation = 1;
 	let baselineFailure: string | undefined;
 	let finishBaseline: (() => void) | undefined;
+	let ready: Awaited<ReturnType<typeof stageGuestCorpus>>;
+	const artifactReads: string[] = [];
+	let beforeArtifactRead: ((path: string) => Promise<void>) | undefined;
 	const execute = vi.fn(async (options: { command: string[]; input?: Buffer; signal?: AbortSignal }) => {
 		if (!options.input) {
 			return { output: Buffer.from("{}"), stderr: "", code: 0 };
@@ -83,7 +108,7 @@ async function fixture(baselineSources: Record<string, string> = {}) {
 		operations.push(input.operation);
 		let value: unknown = {};
 		if (input.operation === "serve") {
-			stageGuestCorpus();
+			ready = await stageGuestCorpus(input.directory, true);
 			await new Promise<void>((resolve) => {
 				if (options.signal?.aborted) {
 					resolve();
@@ -102,15 +127,12 @@ async function fixture(baselineSources: Record<string, string> = {}) {
 			if (baselineFailure) {
 				throw new Error(baselineFailure);
 			}
-		} else if (input.operation === "manifest") {
-			value = manifest;
+			while (!ready) {
+				await new Promise((resolve) => setTimeout(resolve, 1));
+			}
+			value = ready;
 		} else if (input.operation === "update") {
-			value = stageGuestCorpus();
-		} else if (input.operation === "index") {
-			indexRequests.push(input.paths);
-			const requested =
-				input.paths === undefined ? files : files.filter((file) => input.paths.includes(file.path));
-			value = { files: requested, next: null };
+			value = await stageGuestCorpus(input.directory, false);
 		} else if (input.operation === "query") {
 			value = { file: { ...indexedFile(input.path, input.code), windows: [] }, clones: [], retrieved: 0 };
 		} else if (input.operation === "evidence") {
@@ -119,9 +141,6 @@ async function fixture(baselineSources: Record<string, string> = {}) {
 					.slice(input.range[0] - 1, input.range[1])
 					.join("\n"),
 			};
-		} else if (input.operation === "report") {
-			const bytes = Buffer.from(JSON.stringify(report));
-			value = { content: bytes.toString("base64"), totalBytes: bytes.length };
 		}
 		return { output: Buffer.from(JSON.stringify(value)), stderr: "", code: 0 };
 	});
@@ -146,17 +165,31 @@ async function fixture(baselineSources: Record<string, string> = {}) {
 				},
 			},
 			filesystem: {
-				mkdir: async () => {},
+				mkdir: async (path: string) => {
+					directories.push(path);
+					await mkdir(path, { recursive: true });
+				},
 				write: async () => {},
 				canonical: async (path: string) => path,
 				stat: async (path: string) => {
+					if (path.startsWith("/tmp/pi-quality-dry-")) {
+						const metadata = await stat(path);
+						return { file: metadata.isFile(), size: metadata.size };
+					}
 					const text = liveSources.get(path.slice(root.length + 1));
 					if (text === undefined) {
 						throw new Error("FileNotFoundError");
 					}
 					return { file: true, size: Buffer.byteLength(text) };
 				},
-				read: async (path: string) => Buffer.from(liveSources.get(path.slice(root.length + 1))!),
+				read: async (path: string) => {
+					if (path.startsWith("/tmp/pi-quality-dry-")) {
+						artifactReads.push(path);
+						await beforeArtifactRead?.(path);
+						return readFile(path);
+					}
+					return Buffer.from(liveSources.get(path.slice(root.length + 1))!);
+				},
 			},
 			execute,
 		},
@@ -165,13 +198,17 @@ async function fixture(baselineSources: Record<string, string> = {}) {
 		events: { emit: (_name: string, request: { accept(value: unknown): void }) => request.accept(sandbox) },
 	};
 	const manager = new SandboxDryManager(pi as never, join(directory, "agent"));
-	await manager.start(root, true, DEFAULT_CONFIG);
+	await manager.start(root, true, { ...DEFAULT_CONFIG, dryScanTimeoutMs: baselineBudgetMs });
 	return {
 		manager,
 		root,
 		agentDir: join(directory, "agent"),
 		guestCorpus,
 		indexRequests,
+		artifactReads,
+		interceptArtifactReads: (intercept: (path: string) => Promise<void>) => {
+			beforeArtifactRead = intercept;
+		},
 		excludeFromBaseline: (entry: { path: string; reason: string }) => {
 			manifest.excluded.push(entry);
 		},
@@ -228,8 +265,10 @@ it("keeps the session baseline across turns without exporting anything when noth
 	await h.manager.beginTurn(signal);
 	const firstRevision = h.manager.revision;
 	h.operations.length = 0;
+	h.artifactReads.length = 0;
 	await h.manager.beginTurn(signal);
 	expect(h.operations).toEqual(["update"]);
+	expect(h.artifactReads.filter((path) => path.includes("/exports/"))).toEqual([]);
 	expect(h.manager.revision).toBe(firstRevision);
 	expect(h.manager.status.scanPhase).toBe("ready");
 	await h.manager.stop();
@@ -244,6 +283,7 @@ it("re-indexes only edited files when the next turn updates the baseline", async
 	h.indexRequests.length = 0;
 	await h.manager.beginTurn(signal);
 	expect(h.operations).not.toContain("serve");
+	expect(h.operations).not.toContain("index");
 	expect(h.indexRequests).toEqual([["edited.ts"]]);
 	expect(h.manager.files.map((file) => [file.path, file.hash])).toEqual([
 		["kept.ts", contentHash("const kept = 1;")],
@@ -363,6 +403,44 @@ it("keeps a scan ready while warning about directories that look vendored", asyn
 		].join("\n"),
 	);
 	await h.manager.stop();
+});
+it("uses a constant worker-launch count for an index larger than 16 MiB", async () => {
+	const source = Array.from({ length: 6000 }, (_, index) => `const property${index} = ${index};`).join("\n");
+	const sources = Object.fromEntries(Array.from({ length: 28 }, (_, index) => [`file-${index}.ts`, source]));
+	const exportFixture = await fixture(sources);
+	await exportFixture.manager.beginTurn(new AbortController().signal);
+	expect(exportFixture.manager.status.indexBytes).toBeGreaterThan(16 * 1024 * 1024);
+	expect(exportFixture.manager.status.indexShards).toBeGreaterThan(32);
+	expect(exportFixture.operations).toEqual(["probe", "serve", "baseline"]);
+	expect(exportFixture.manager.status.files).toBe(28);
+	await exportFixture.manager.stop();
+});
+it("times out during transfer even when the filesystem ignores cancellation", async () => {
+	const exportFixture = await fixture({ "rule.ts": "const retentionDays = 30;" }, 100);
+	exportFixture.interceptArtifactReads(async (path) => {
+		if (path.includes("index-")) {
+			await new Promise<void>(() => {});
+		}
+	});
+	await expect(exportFixture.manager.beginTurn(new AbortController().signal)).rejects.toThrow(
+		"timed out during index transfer/validation",
+	);
+	expect(exportFixture.manager.status.scanPhase).toBe("unavailable");
+	expect(exportFixture.manager.files).toEqual([]);
+	await exportFixture.manager.stop();
+});
+it("rejects a generation retired while a shard is in flight", async () => {
+	const exportFixture = await fixture({ "rule.ts": "const retentionDays = 30;" });
+	exportFixture.interceptArtifactReads(async (path) => {
+		if (path.includes("index-")) {
+			exportFixture.nextGeneration();
+		}
+	});
+	await expect(exportFixture.manager.beginTurn(new AbortController().signal)).rejects.toThrow(
+		"retired sandbox/worker",
+	);
+	expect(exportFixture.manager.status.scanPhase).toBe("unavailable");
+	await exportFixture.manager.stop();
 });
 it("does not retry a failed scan from edit checks within the same turn", async () => {
 	const h = await fixture();

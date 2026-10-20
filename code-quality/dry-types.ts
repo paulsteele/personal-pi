@@ -1,6 +1,7 @@
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import type { DrySuspectDirectory } from "./dry-suspects.mjs";
+import { MAX_LEXICAL_FEATURE_CHARS } from "./dry-lexical.mjs";
 
 const text = (maxLength: number) => Type.String({ minLength: 1, maxLength });
 const hash = Type.String({ pattern: "^[a-f0-9]{64}$" });
@@ -21,7 +22,7 @@ export const DryEvidenceSchema = Type.Object({
 	id: hash,
 	changed: DrySourceSchema,
 	counterpart: DrySourceSchema,
-	signals: Type.Array(text(160), { maxItems: 12 }),
+	signals: Type.Array(text(MAX_LEXICAL_FEATURE_CHARS), { maxItems: 12 }),
 	score: Type.Number({ minimum: 0 }),
 });
 export type DryEvidence = Static<typeof DryEvidenceSchema>;
@@ -176,6 +177,15 @@ export interface DryReport {
 	formats: Array<{ name: string; files: number }>;
 	scanDurationMs: number;
 }
+export type DryBaselinePhase =
+	| "baseline startup"
+	| "server retirement"
+	| "capture"
+	| "detector"
+	| "export preparation"
+	| "manifest transfer/validation"
+	| "report transfer/validation"
+	| "index transfer/validation";
 export type DryToolPhase = "unavailable" | "validating" | "ready" | "off";
 export type DryScanPhase = "idle" | "scanning" | "ready" | "unavailable" | "off";
 export interface DryStatus {
@@ -194,6 +204,17 @@ export interface DryStatus {
 	cloneCounts: { exact: number; renamed: number; gap: number; ast: number };
 	lastScanAt?: number;
 	scanDurationMs?: number;
+	analyzedFiles?: number;
+	baselinePhase?: DryBaselinePhase;
+	baselineDurationMs?: number;
+	baselineTimings?: {
+		captureMs: number;
+		detectorMs: number;
+		exportPreparationMs: number;
+		transferValidationMs: number;
+	};
+	indexBytes?: number;
+	indexShards?: number;
 	formats?: Array<{ name: string; files: number }>;
 	latest?: {
 		outcome: string;
