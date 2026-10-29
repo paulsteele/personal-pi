@@ -73,6 +73,8 @@ Successful `edit`/`write` results include a compact diagnostic preview; a diagno
 
 LSP findings use the same initial rejection plus five response rounds, disagreements, and operator arbitration as readability findings. A disagreement reruns LSP; the model cannot dismiss a diagnostic. Without a patch, arbitration offers current code or five more rounds. An exact operator-approved readability patch must still pass LSP afterward. Explicit LSP-only waivers are recorded separately from clean diagnostics.
 
+Roslyn project/solution loading errors from `window/logMessage` or `window/showMessage` fail setup promptly and remain visible in `/quality lsp status` and the setup error. Details retain the SDK requirement and configuration path, omit stack traces, and are bounded. An initialization-complete notification cannot override a recorded load failure; warnings and unrelated server logs do not become project-load failures.
+
 Server failures pause for retry, reconfiguration, or waiver without consuming correction rounds. Defaults are 60 seconds for startup and 10 seconds per file diagnostic operation, configurable in the draft. A timeout or empty clearing notification is not a pass. File hashes, observed workspace changes, provider registration, and server generations invalidate stale results; these checks are not an atomic filesystem lock.
 
 Scope is macOS/Linux/WSL TUI sessions. The current real-server validation was on macOS arm64; Linux/WSL and larger real-world solutions still need field validation. See [lsp-compatibility.md](lsp-compatibility.md) for pinned versions, protocol quirks, reproducible probes, and measured tiny-fixture latencies. Clean LSP diagnostics are not a full build, test, or correctness certification.

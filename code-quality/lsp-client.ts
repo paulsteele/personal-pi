@@ -23,6 +23,22 @@ import {
 } from "./lsp-diagnostics.js";
 import type { LspRoute } from "./lsp-profile.js";
 
+function roslynProjectLoadFailure(message: string): string | undefined {
+	const reportsLoadingError = /error while loading/i.test(message);
+	const reportsFailedLoad =
+		/failed to (?:load|initialize) (?:[^\n]*\b)?(?:project|solution|buildhost)\b/i.test(message);
+	if (!reportsLoadingError && !reportsFailedLoad) {
+		return undefined;
+	}
+	const detail = message
+		.split(/^\s+at\s+/m)[0]!
+		.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "")
+		.trim();
+	const maxDetailChars = 3000;
+	const boundedDetail = detail.length > maxDetailChars ? `${detail.slice(0, maxDetailChars)}…` : detail;
+	return `C# project loading failed: ${boundedDetail}`;
+}
+
 export class LspClient {
 	private connection!: ProtocolConnection;
 	private guard?: ChildProcess;
@@ -189,8 +205,12 @@ export class LspClient {
 			},
 		);
 		this.connection.onNotification("window/logMessage", (params: { type: number; message: string }) => {
+			this.reportProjectLoadFailure(params);
 			const isFlycheckFailure = /(?:cargo check failed|flycheck.*failed|failed to run)/i.test(params.message);
 			if (this.route.preset === "rust-analyzer" && isFlycheckFailure) this.flycheckFailure = params.message;
+		});
+		this.connection.onNotification("window/showMessage", (params: { type: number; message: string }) => {
+			this.reportProjectLoadFailure(params);
 		});
 		this.connection.onNotification("textDocument/publishDiagnostics", (params: PublishDiagnosticsParams) => {
 			if (!this.versions.has(params.uri)) return;
@@ -247,7 +267,21 @@ export class LspClient {
 				"diagnostic provider registration",
 				this.route.startupTimeoutMs,
 			);
+		if (this.failure) {
+			throw new Error(this.failure);
+		}
 		this.status("ready");
+	}
+
+	private reportProjectLoadFailure(params: { type: number; message: string }): void {
+		const isRoslynError = this.route.preset === "roslyn" && params.type === 1;
+		if (!isRoslynError) {
+			return;
+		}
+		const reason = roslynProjectLoadFailure(params.message);
+		if (reason) {
+			this.fail(reason);
+		}
 	}
 
 	private setting(section?: string): unknown {

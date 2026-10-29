@@ -234,6 +234,32 @@ it("reports the startup failure in status rather than overwriting it with stoppe
 	expect(clients[0]!.stop).toHaveBeenCalledTimes(1);
 });
 
+it("keeps the Roslyn SDK failure visible in setup validation and status", async () => {
+	const fixture = validationFixture();
+	const route = presetRoute(presetById("roslyn"), "/opt/pi-tools/roslyn/server");
+	route.project = "application.sln";
+	fixture.sandbox.session.execute = async () => ({
+		output: Buffer.from(JSON.stringify({ files: ["Source/Core.cs"], truncated: false })),
+		stderr: "",
+		code: 0,
+	});
+	const reason = [
+		"C# project loading failed: A compatible .NET SDK was not found.",
+		"Requested SDK version: 10.0.102",
+		"global.json file: /workspace/global.json",
+		"Installed SDKs: 10.0.109",
+	].join("\n");
+	startClient.mockRejectedValueOnce(new Error(reason));
+	const result = await fixture.manager.validate(route, fixture.project, new AbortController().signal);
+	expect(result).toEqual({ ready: false, summary: `Error: ${reason}` });
+	expect(fixture.manager.statusText()).toBe(`roslyn: failed (Podman) — Error: ${reason}`);
+	expect(fixture.manager.header).toMatchObject([
+		{ id: "roslyn", phase: "failed", reason: `Error: ${reason}` },
+	]);
+	expect(clients[0]!.check).not.toHaveBeenCalled();
+	expect(clients[0]!.stop).toHaveBeenCalledTimes(1);
+	await fixture.manager.stop();
+});
 it("validates a representative Python file through the sandbox's complete diagnostic client", async () => {
 	const fixture = validationFixture();
 	const result = await fixture.manager.validate(fixture.route, fixture.project, new AbortController().signal);

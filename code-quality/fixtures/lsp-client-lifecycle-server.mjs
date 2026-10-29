@@ -14,6 +14,13 @@ connection.onRequest("initialize", ({ processId }) => {
 		},
 	};
 });
+connection.onNotification("solution/open", async () => {
+	const projectLoadNotifications = JSON.parse(process.env.PROJECT_LOAD_MESSAGES ?? "[]");
+	for (const { method, ...params } of projectLoadNotifications) {
+		await connection.sendNotification(method, params);
+	}
+	await connection.sendNotification("workspace/projectInitializationComplete");
+});
 connection.onRequest("shutdown", () => null);
 connection.onNotification("exit", () => process.exit(0));
 connection.listen();

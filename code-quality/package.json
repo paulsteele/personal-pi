@@ -1,6 +1,6 @@
 {
 	"name": "@paulsteele/pi-code-quality",
-	"version": "2.13.1",
+	"version": "2.13.2",
 	"private": true,
 	"description": "Isolated post-edit quality gate with human arbitration",
 	"type": "module",

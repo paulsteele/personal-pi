@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.13.2 — 2026-10-29
+
+- Surface Roslyn project/solution loading errors immediately in setup validation and LSP status, including SDK-resolution errors. Preserve bounded failure details without stack traces instead of waiting for a miscellaneous-file error or publishing readiness after failed project initialization.
+
 ## 2.13.1 — 2026-10-20
 
 - Share a 160-character lexical-feature/evidence contract and represent oversized values with full-value SHA-256 digests. Report malformed lexical output with its source path and validation location.
