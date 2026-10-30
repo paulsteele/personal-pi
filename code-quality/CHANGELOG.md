@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.13.3 — 2026-10-30
+
+- Add `/quality lsp setup discard` to delete a pending configuration draft after confirmation without changing the approved profile or pending quality case. Refuse deletion when the draft changes during confirmation or another configuration operation holds its lock.
+- Show both draft approval and discard commands when unapproved edits block `/quality lsp on|off`, before requesting enabled-state confirmation.
+
 ## 2.13.2 — 2026-10-29
 
 - Surface Roslyn project/solution loading errors immediately in setup validation and LSP status, including SDK-resolution errors. Preserve bounded failure details without stack traces instead of waiting for a miscellaneous-file error or publishing readiness after failed project initialization.

@@ -174,11 +174,11 @@ async function readJson(path: string): Promise<{ value: unknown; revision: strin
 	}
 }
 
-export async function publishLspJson(
+async function withLspConfigurationLock<T>(
 	path: string,
-	value: unknown,
-	expected: string | undefined,
-): Promise<string> {
+	expectedRevision: string | undefined,
+	operation: () => Promise<T>,
+): Promise<T> {
 	await rejectSymlinks(path);
 	await mkdir(dirname(path), { recursive: true, mode: 0o700 });
 	await chmod(dirname(path), 0o700);
@@ -187,28 +187,43 @@ export async function publishLspJson(
 			"Another LSP configuration operation owns the lock; retry after it finishes. Stale locks require inspection.",
 		);
 	});
-	const temporary = `${path}.${randomUUID()}.tmp`;
 	try {
 		await lock.writeFile(JSON.stringify({ pid: process.pid }));
-		if ((await readJson(path))?.revision !== expected)
+		if ((await readJson(path))?.revision !== expectedRevision) {
 			throw new Error("LSP configuration changed since preview; reopen setup");
-		const text = JSON.stringify(value, null, 2) + "\n";
-		if (Buffer.byteLength(text) > 1024 * 1024)
-			throw new Error("LSP configuration exceeds its storage budget");
-		const file = await open(temporary, "wx", 0o600);
-		try {
-			await file.writeFile(text);
-			await file.sync();
-		} finally {
-			await file.close();
 		}
-		await rename(temporary, path);
-		return digest(text);
+		return await operation();
 	} finally {
 		await lock.close();
-		await unlink(temporary).catch(() => {});
 		await unlink(`${path}.lock`);
 	}
+}
+
+export async function publishLspJson(
+	path: string,
+	value: unknown,
+	expected: string | undefined,
+): Promise<string> {
+	return withLspConfigurationLock(path, expected, async () => {
+		const temporary = `${path}.${randomUUID()}.tmp`;
+		try {
+			const text = JSON.stringify(value, null, 2) + "\n";
+			if (Buffer.byteLength(text) > 1024 * 1024) {
+				throw new Error("LSP configuration exceeds its storage budget");
+			}
+			const file = await open(temporary, "wx", 0o600);
+			try {
+				await file.writeFile(text);
+				await file.sync();
+			} finally {
+				await file.close();
+			}
+			await rename(temporary, path);
+			return digest(text);
+		} finally {
+			await unlink(temporary).catch(() => {});
+		}
+	});
 }
 
 export async function resolveLspProject(cwd: string, agentDir: string): Promise<LspProject> {
@@ -289,6 +304,16 @@ export async function loadLspDraft(
 		},
 		revision: stored.revision,
 	};
+}
+
+export async function discardLspDraft(
+	agentDir: string,
+	project: LspProject,
+	expectedDraftRevision: string,
+): Promise<void> {
+	assertOutsideProject(agentDir, project);
+	const path = lspProfilePath(agentDir, project, true);
+	await withLspConfigurationLock(path, expectedDraftRevision, () => unlink(path));
 }
 
 export async function approveLspDraft(

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import {
 	approveLspDraft,
+	discardLspDraft,
 	loadLspDraft,
 	loadLspProfile,
 	lspProfilePath,
@@ -81,6 +82,63 @@ it("returns the published draft revision without adopting a subsequent writer's 
 		"changed since preview",
 	);
 	expect((await loadLspDraft(agentDir, project))!.draft.profile.enabled).toBe(false);
+});
+
+it("deletes only the confirmed draft and preserves the approved profile", async () => {
+	const { agentDir, project, profile } = await projectFixture();
+	await saveLspDraft(agentDir, project, profile);
+	const initialDraft = (await loadLspDraft(agentDir, project))!;
+	const active = await approveLspDraft(agentDir, project, initialDraft.revision);
+	await saveLspDraft(
+		agentDir,
+		project,
+		{ ...profile, enabled: false },
+		active.revision,
+		initialDraft.revision,
+	);
+	const pending = (await loadLspDraft(agentDir, project))!;
+	await discardLspDraft(agentDir, project, pending.revision);
+	expect(await loadLspDraft(agentDir, project)).toBeUndefined();
+	expect(await loadLspProfile(agentDir, project)).toEqual(active);
+});
+
+it("refuses to discard a draft with an outdated revision", async () => {
+	const { agentDir, project, profile } = await projectFixture();
+	await saveLspDraft(agentDir, project, profile);
+	const original = (await loadLspDraft(agentDir, project))!;
+	await saveLspDraft(agentDir, project, { ...profile, enabled: false }, null, original.revision);
+	const replacement = await loadLspDraft(agentDir, project);
+	await expect(discardLspDraft(agentDir, project, original.revision)).rejects.toThrow(
+		"changed since preview",
+	);
+	expect(await loadLspDraft(agentDir, project)).toEqual(replacement);
+});
+
+it("respects the draft publication lock during discard", async () => {
+	const { agentDir, project, profile } = await projectFixture();
+	await saveLspDraft(agentDir, project, profile);
+	const pending = (await loadLspDraft(agentDir, project))!;
+	const lockPath = `${lspProfilePath(agentDir, project, true)}.lock`;
+	await writeFile(lockPath, JSON.stringify({ pid: process.pid }));
+	await expect(discardLspDraft(agentDir, project, pending.revision)).rejects.toThrow("owns the lock");
+	expect(await loadLspDraft(agentDir, project)).toEqual(pending);
+	await rm(lockPath);
+	await discardLspDraft(agentDir, project, pending.revision);
+	expect(await loadLspDraft(agentDir, project)).toBeUndefined();
+});
+
+it("rejects a symlinked draft instead of deleting it or its target", async () => {
+	const { directory, agentDir, project, profile } = await projectFixture();
+	const path = await saveLspDraft(agentDir, project, profile);
+	const pending = (await loadLspDraft(agentDir, project))!;
+	const text = await readFile(path, "utf8");
+	const outside = join(directory, "outside-draft.json");
+	await writeFile(outside, text);
+	await rm(path);
+	await symlink(outside, path);
+	await expect(discardLspDraft(agentDir, project, pending.revision)).rejects.toThrow("symlink");
+	expect(await readFile(outside, "utf8")).toBe(text);
+	expect(await readFile(path, "utf8")).toBe(text);
 });
 
 it("rejects manual active-profile changes instead of executing them", async () => {

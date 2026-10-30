@@ -1,6 +1,6 @@
 {
   "name": "@paulsteele/pi-shared-ui",
-  "version": "2.13.2",
+  "version": "2.13.3",
   "private": true,
   "description": "Shared framed overlays and user-owned settings flows",
   "type": "module",

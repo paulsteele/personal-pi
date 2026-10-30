@@ -1,6 +1,6 @@
 {
 	"name": "@paulsteele/pi-progress-observer",
-	"version": "2.13.2",
+	"version": "2.13.3",
 	"private": true,
 	"description": "Passive side-model progress summaries for Pi",
 	"type": "module",

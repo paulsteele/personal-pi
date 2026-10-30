@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	approveLspDraft,
+	discardLspDraft,
 	loadLspDraft,
 	loadLspProfile,
 	resolveLspProject,
@@ -37,15 +38,37 @@ export async function handleLspCommand(
 		return;
 	}
 	const [action = "status", argument, ...extra] = input.trim().split(/\s+/).filter(Boolean);
-	if (extra.length) throw new Error("Too many LSP command arguments");
+	if (extra.length) {
+		throw new Error("Too many LSP command arguments");
+	}
 	const project = await resolveLspProject(ctx.cwd, agentDir);
 	if (action === "status") {
 		ctx.ui.notify(ports.status(project), "info");
 		return;
 	}
 	if (action === "setup") {
-		if (argument && !["edit", "approve"].includes(argument))
-			throw new Error("Usage: /quality lsp setup [edit|approve]");
+		if (argument && !["edit", "approve", "discard"].includes(argument)) {
+			throw new Error("Usage: /quality lsp setup [edit|approve|discard]");
+		}
+		if (argument === "discard") {
+			const pending = await loadLspDraft(agentDir, project);
+			if (!pending) {
+				ctx.ui.notify("No LSP draft to discard.", "info");
+				return;
+			}
+			const confirmed = await ctx.ui.confirm(
+				"Discard LSP configuration draft?",
+				"This deletes the shared project's draft, including unapproved edits. The approved profile and pending quality case remain unchanged.",
+				{ signal },
+			);
+			if (!confirmed) {
+				return;
+			}
+			signal.throwIfAborted();
+			await discardLspDraft(agentDir, project, pending.revision);
+			ctx.ui.notify("LSP draft discarded. The approved profile is unchanged.", "info");
+			return;
+		}
 		const setupMode = argument === "edit" || argument === "approve" ? argument : "setup";
 		const approved = ports.setup
 			? await ports.setup(setupMode, project, signal)
@@ -98,17 +121,24 @@ export async function handleLspCommand(
 		return;
 	}
 	if (action === "on" || action === "off") {
-		if (argument) throw new Error("Usage: /quality lsp [on|off]");
+		if (argument) {
+			throw new Error("Usage: /quality lsp [on|off]");
+		}
+		const draft = await loadLspDraft(agentDir, project);
+		const hasEditedDraft =
+			draft !== undefined && JSON.stringify(draft.draft.profile) !== JSON.stringify(active?.profile);
+		if (hasEditedDraft) {
+			throw new Error(
+				"An edited LSP draft is pending. Run /quality lsp setup approve to validate and activate it, or /quality lsp setup discard to delete it before changing enabled state.",
+			);
+		}
 		const disablesPendingCheck = action === "off" && ports.hasPendingCase();
 		const message = disablesPendingCheck
 			? "This waives LSP checking for your pending case and disables the shared project profile. Other instances with pending cases must resolve their own waiver."
 			: `Turn project LSP checking ${action}? Other instances observe this profile change at their next action boundary.`;
-		if (!(await ctx.ui.confirm("Change project LSP checking?", message, { signal }))) return;
-		const draft = await loadLspDraft(agentDir, project);
-		const hasEditedDraft =
-			draft !== undefined && JSON.stringify(draft.draft.profile) !== JSON.stringify(active?.profile);
-		if (hasEditedDraft)
-			throw new Error("An edited LSP draft is pending; approve or discard it before changing enabled state");
+		if (!(await ctx.ui.confirm("Change project LSP checking?", message, { signal }))) {
+			return;
+		}
 		const initialProfile = { version: 1 as const, projectId: project.id, mode: "auto" as const, routes: [] };
 		await saveLspDraft(
 			agentDir,
@@ -121,7 +151,9 @@ export async function handleLspCommand(
 			draft?.revision ?? null,
 		);
 		await approveLspDraft(agentDir, project, (await loadLspDraft(agentDir, project))!.revision);
-		if (disablesPendingCheck) ports.waivePendingLsp();
+		if (disablesPendingCheck) {
+			ports.waivePendingLsp();
+		}
 		await ports.reload(signal);
 		return;
 	}
